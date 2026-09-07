@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=LaserForge
+GenericName=Laser Engraver & Cutter
+Comment=LightBurn-style 2D CAD/CAM and GRBL Laser Engraver Controller
+Exec=/home/k/LaserForge/run.sh %u
+Icon=/home/k/LaserForge/assets/laserforge.png
+Path=/home/k/LaserForge
+Terminal=false
+StartupNotify=true
+Categories=Graphics;Development;Engineering;Utility;
+MimeType=application/x-laserforge;
+Keywords=laser;lightburn;engraver;grbl;cnc;cutter;dither;gcode;

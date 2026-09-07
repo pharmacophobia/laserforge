@@ -1,0 +1,150 @@
+"""
+LaserForge Core Data Models.
+Defines vector shapes, layers, cut settings, and geometric primitives.
+"""
+
+from dataclasses import dataclass, field
+import uuid
+from typing import List, Tuple, Optional, Dict, Any
+
+@dataclass
+class LayerCutSettings:
+    layer_id: int
+    name: str = "C00"
+    color: str = "#000000"
+    mode: str = "Line"  # "Line", "Fill", "Fill + Line", "Image"
+    speed: float = 1000.0  # mm/min
+    power_max: float = 80.0  # % (0-100)
+    power_min: float = 20.0  # % (0-100)
+    passes: int = 1
+    z_step: float = 0.0  # mm step down per pass
+    line_interval: float = 0.1  # mm spacing for raster fill (~254 DPI)
+    fill_angle: float = 0.0  # degrees
+    cross_hatch: bool = False
+    air_assist: bool = False
+    output_enabled: bool = True
+    show_on_canvas: bool = True
+    overscan_pct: float = 3.0  # % overscan acceleration margin for raster
+    is_tool: bool = False  # If true, framing/tool guide layer (not cut)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "layer_id": self.layer_id,
+            "name": self.name,
+            "color": self.color,
+            "mode": self.mode,
+            "speed": self.speed,
+            "power_max": self.power_max,
+            "power_min": self.power_min,
+            "passes": self.passes,
+            "z_step": self.z_step,
+            "line_interval": self.line_interval,
+            "fill_angle": self.fill_angle,
+            "cross_hatch": self.cross_hatch,
+            "air_assist": self.air_assist,
+            "output_enabled": self.output_enabled,
+            "show_on_canvas": self.show_on_canvas,
+            "overscan_pct": self.overscan_pct,
+            "is_tool": self.is_tool
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "LayerCutSettings":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class LaserEntity:
+    """Base class for all canvas objects."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    layer_id: int = 0
+    name: str = "Shape"
+    x: float = 0.0  # Top-left or center in mm
+    y: float = 0.0
+    rotation: float = 0.0  # Degrees
+    selected: bool = False
+    locked: bool = False
+
+    def get_bounds(self) -> Tuple[float, float, float, float]:
+        """Returns (min_x, min_y, max_x, max_y) in mm."""
+        raise NotImplementedError
+
+
+@dataclass
+class RectEntity(LaserEntity):
+    width: float = 50.0
+    height: float = 30.0
+    corner_radius: float = 0.0
+
+    def get_bounds(self) -> Tuple[float, float, float, float]:
+        return (self.x, self.y, self.x + self.width, self.y + self.height)
+
+
+@dataclass
+class CircleEntity(LaserEntity):
+    radius_x: float = 25.0
+    radius_y: float = 25.0
+
+    def get_bounds(self) -> Tuple[float, float, float, float]:
+        return (self.x - self.radius_x, self.y - self.radius_y,
+                self.x + self.radius_x, self.y + self.radius_y)
+
+
+@dataclass
+class LineEntity(LaserEntity):
+    x2: float = 50.0
+    y2: float = 50.0
+
+    def get_bounds(self) -> Tuple[float, float, float, float]:
+        min_x = min(self.x, self.x2)
+        min_y = min(self.y, self.y2)
+        max_x = max(self.x, self.x2)
+        max_y = max(self.y, self.y2)
+        return (min_x, min_y, max_x, max_y)
+
+
+@dataclass
+class PathEntity(LaserEntity):
+    """General vector path consisting of sub-paths of (x, y) segments."""
+    # List of contours, where each contour is a list of (x, y) points
+    contours: List[List[Tuple[float, float]]] = field(default_factory=list)
+    closed: bool = True
+
+    def get_bounds(self) -> Tuple[float, float, float, float]:
+        all_pts = [pt for c in self.contours for pt in c]
+        if not all_pts:
+            return (self.x, self.y, self.x, self.y)
+        min_x = min(pt[0] for pt in all_pts)
+        min_y = min(pt[1] for pt in all_pts)
+        max_x = max(pt[0] for pt in all_pts)
+        max_y = max(pt[1] for pt in all_pts)
+        return (min_x, min_y, max_x, max_y)
+
+
+@dataclass
+class TextEntity(LaserEntity):
+    text: str = "LaserForge"
+    font_family: str = "Sans Serif"
+    font_size: float = 20.0  # mm
+    bold: bool = False
+    italic: bool = False
+    width: float = 60.0
+    height: float = 20.0
+
+    def get_bounds(self) -> Tuple[float, float, float, float]:
+        return (self.x, self.y, self.x + self.width, self.y + self.height)
+
+
+@dataclass
+class ImageEntity(LaserEntity):
+    image_path: str = ""
+    width: float = 80.0   # mm on bed
+    height: float = 80.0  # mm on bed
+    dither_mode: str = "Floyd-Steinberg"  # "Floyd-Steinberg", "Atkinson", "Threshold", "Grayscale"
+    invert: bool = False
+    contrast: float = 1.0
+    brightness: float = 0.0
+    threshold_value: int = 128  # 0-255
+
+    def get_bounds(self) -> Tuple[float, float, float, float]:
+        return (self.x, self.y, self.x + self.width, self.y + self.height)
