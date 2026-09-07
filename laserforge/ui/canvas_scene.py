@@ -33,6 +33,10 @@ class LaserItemWrapper(QGraphicsItem):
         super().__init__()
         self.entity = entity
         self.layer_manager = layer_manager
+        self._cached_rect: Optional[QRectF] = None
+        self._cached_path: Optional[QPainterPath] = None
+        self._cached_pixmap: Optional[QPixmap] = None
+        self._cached_pixmap_path: Optional[str] = None
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
@@ -43,17 +47,26 @@ class LaserItemWrapper(QGraphicsItem):
 
     def sync_from_entity(self):
         """Updates QGraphicsItem geometry from internal entity."""
+        self.prepareGeometryChange()
+        self._cached_rect = None
+        self._cached_path = None
         self.setPos(self.entity.x, self.entity.y)
         self.setRotation(self.entity.rotation)
         self.update()
 
     def sync_to_entity(self):
         """Updates internal entity coordinates from current QGraphicsItem pos."""
+        dx = self.pos().x() - self.entity.x
+        dy = self.pos().y() - self.entity.y
+        if isinstance(self.entity, LineEntity):
+            self.entity.x2 += dx
+            self.entity.y2 += dy
         self.entity.x = self.pos().x()
         self.entity.y = self.pos().y()
         self.entity.rotation = self.rotation()
 
-    def boundingRect(self) -> QRectF:
+    def raw_rect(self) -> QRectF:
+        """Returns exact unpadded geometry rectangle."""
         if isinstance(self.entity, RectEntity):
             return QRectF(0, 0, self.entity.width, self.entity.height)
         elif isinstance(self.entity, CircleEntity):
@@ -64,13 +77,18 @@ class LaserItemWrapper(QGraphicsItem):
             dy = self.entity.y2 - self.entity.y
             return QRectF(min(0, dx), min(0, dy), abs(dx), abs(dy))
         elif isinstance(self.entity, PathEntity):
-            b = self.entity.get_bounds()
-            return QRectF(b[0] - self.entity.x, b[1] - self.entity.y, b[2] - b[0], b[3] - b[1])
+            lx1, ly1, lx2, ly2 = self.entity.get_local_bounds()
+            return QRectF(lx1, ly1, max(0.1, lx2 - lx1), max(0.1, ly2 - ly1))
         elif isinstance(self.entity, TextEntity):
             return QRectF(0, 0, self.entity.width, self.entity.height)
         elif isinstance(self.entity, ImageEntity):
             return QRectF(0, 0, self.entity.width, self.entity.height)
         return QRectF(0, 0, 10, 10)
+
+    def boundingRect(self) -> QRectF:
+        if self._cached_rect is None:
+            self._cached_rect = self.raw_rect().adjusted(-3.5, -3.5, 3.5, 3.5)
+        return self._cached_rect
 
     def paint(self, painter: QPainter, option, widget=None):
         layer = self.layer_manager.get_layer(self.entity.layer_id)
@@ -88,7 +106,7 @@ class LaserItemWrapper(QGraphicsItem):
             brush = QBrush(brush_color)
         painter.setBrush(brush)
 
-        rect = self.boundingRect()
+        rect = self.raw_rect()
 
         if isinstance(self.entity, RectEntity):
             if self.entity.corner_radius > 0:
@@ -105,15 +123,17 @@ class LaserItemWrapper(QGraphicsItem):
             painter.drawLine(QPointF(0, 0), QPointF(dx, dy))
 
         elif isinstance(self.entity, PathEntity):
-            ppath = QPainterPath()
-            for contour in self.entity.contours:
-                if not contour: continue
-                ppath.moveTo(contour[0][0] - self.entity.x, contour[0][1] - self.entity.y)
-                for pt in contour[1:]:
-                    ppath.lineTo(pt[0] - self.entity.x, pt[1] - self.entity.y)
-                if self.entity.closed:
-                    ppath.closeSubpath()
-            painter.drawPath(ppath)
+            if self._cached_path is None:
+                ppath = QPainterPath()
+                for contour in self.entity.contours:
+                    if not contour: continue
+                    ppath.moveTo(contour[0][0], contour[0][1])
+                    for pt in contour[1:]:
+                        ppath.lineTo(pt[0], pt[1])
+                    if self.entity.closed:
+                        ppath.closeSubpath()
+                self._cached_path = ppath
+            painter.drawPath(self._cached_path)
 
         elif isinstance(self.entity, TextEntity):
             font = QFont(self.entity.font_family, int(self.entity.font_size * 2))
@@ -124,9 +144,11 @@ class LaserItemWrapper(QGraphicsItem):
 
         elif isinstance(self.entity, ImageEntity):
             if self.entity.image_path:
-                pixmap = QPixmap(self.entity.image_path)
-                if not pixmap.isNull():
-                    painter.drawPixmap(rect.toRect(), pixmap)
+                if self._cached_pixmap is None or self._cached_pixmap_path != self.entity.image_path:
+                    self._cached_pixmap = QPixmap(self.entity.image_path)
+                    self._cached_pixmap_path = self.entity.image_path
+                if not self._cached_pixmap.isNull():
+                    painter.drawPixmap(rect.toRect(), self._cached_pixmap)
             painter.setPen(QPen(color, 1, Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)

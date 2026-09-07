@@ -77,9 +77,19 @@ class GCodeGenerator:
             paths.append([(entity.x, entity.y), (entity.x2, entity.y2)])
 
         elif isinstance(entity, PathEntity):
+            rot_rad = math.radians(entity.rotation)
+            b = entity.get_bounds()
+            cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
             for c in entity.contours:
                 if len(c) > 1:
-                    paths.append(list(c))
+                    world_c = []
+                    for px, py in c:
+                        wx = entity.x + px
+                        wy = entity.y + py
+                        if rot_rad != 0:
+                            wx, wy = self._rotate_pt(wx, wy, cx, cy, rot_rad)
+                        world_c.append((wx, wy))
+                    paths.append(world_c)
 
         elif isinstance(entity, TextEntity):
             # Defer to text path generator or placeholder box
@@ -99,12 +109,24 @@ class GCodeGenerator:
         polygon: List[Tuple[float, float]],
         interval_mm: float
     ) -> List[Tuple[float, float, float]]:
-        """Generates horizontal fill scanlines intersecting polygon."""
+        """Generates optimized horizontal fill scanlines intersecting polygon."""
         if len(polygon) < 3:
             return []
 
-        min_y = min(p[1] for p in polygon)
-        max_y = max(p[1] for p in polygon)
+        # Pre-extract valid non-horizontal edges
+        edges = []
+        n = len(polygon)
+        min_y = float("inf")
+        max_y = float("-inf")
+        for i in range(n):
+            p1 = polygon[i]
+            p2 = polygon[(i + 1) % n]
+            ey1 = min(p1[1], p2[1])
+            ey2 = max(p1[1], p2[1])
+            min_y = min(min_y, ey1)
+            max_y = max(max_y, ey2)
+            if ey2 - ey1 > 1e-6:
+                edges.append((ey1, ey2, p1, p2))
 
         scanlines = []
         cur_y = min_y + interval_mm / 2.0
@@ -112,24 +134,22 @@ class GCodeGenerator:
 
         while cur_y <= max_y:
             intersections = []
-            n = len(polygon)
-            for i in range(n):
-                p1 = polygon[i]
-                p2 = polygon[(i + 1) % n]
-                if (p1[1] <= cur_y < p2[1]) or (p2[1] <= cur_y < p1[1]):
-                    if abs(p2[1] - p1[1]) > 1e-6:
-                        t = (cur_y - p1[1]) / (p2[1] - p1[1])
-                        inter_x = p1[0] + t * (p2[0] - p1[0])
-                        intersections.append(inter_x)
+            for ey1, ey2, p1, p2 in edges:
+                if ey1 <= cur_y < ey2:
+                    t = (cur_y - p1[1]) / (p2[1] - p1[1])
+                    inter_x = p1[0] + t * (p2[0] - p1[0])
+                    intersections.append(inter_x)
 
             intersections.sort()
-            # Pair intersections into segments
             reverse = (row % 2 == 1)
             segments = []
             for j in range(0, len(intersections) - 1, 2):
                 x1 = intersections[j]
                 x2 = intersections[j + 1]
-                segments.append((min(x1, x2), max(x1, x2), cur_y))
+                if reverse:
+                    segments.append((x2, x1, cur_y))
+                else:
+                    segments.append((x1, x2, cur_y))
 
             if reverse:
                 segments.reverse()
@@ -141,6 +161,7 @@ class GCodeGenerator:
             row += 1
 
         return scanlines
+
 
     def generate_job(self, entities: List[LaserEntity]) -> GCodeJobResult:
         """Translates the canvas entities into complete G-code and visual toolpaths."""
@@ -162,7 +183,8 @@ class GCodeGenerator:
         gcode_lines.append("G21          ; Set units to millimeters")
         gcode_lines.append("G90          ; Absolute positioning")
         gcode_lines.append("M5           ; Ensure laser is OFF")
-        gcode_lines.append(f"G0 Z0 F{self.settings.rapid_speed:.0f} ; Safe Z")
+        if self.settings.enable_z_moves:
+            gcode_lines.append(f"G0 Z0 F{self.settings.rapid_speed:.0f} ; Safe Z")
 
         # Group entities by layer
         layer_groups: Dict[int, List[LaserEntity]] = {}
@@ -190,9 +212,10 @@ class GCodeGenerator:
             for pass_idx in range(passes):
                 if passes > 1:
                     gcode_lines.append(f"; Pass {pass_idx + 1}/{passes}")
-                    if layer.z_step != 0:
+                    if self.settings.enable_z_moves and layer.z_step != 0:
                         z_val = -(pass_idx * layer.z_step)
                         gcode_lines.append(f"G0 Z{z_val:.3f}")
+
 
                 # 1. IMAGE MODE
                 image_entities = [e for e in group_entities if isinstance(e, ImageEntity)]

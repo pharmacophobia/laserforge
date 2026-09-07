@@ -44,6 +44,9 @@ class SerialController(QObject):
         self.worker_thread: Optional[threading.Thread] = None
         self.stop_worker = False
         self.lock = threading.Lock()
+        self.ack_event = threading.Event()
+        self.ack_status = False
+
 
     @staticmethod
     def list_available_ports() -> List[str]:
@@ -222,7 +225,9 @@ class SerialController(QObject):
         self.abort_requested = True
         self.is_streaming = False
         self.is_paused = False
+        self.ack_event.set()
         if self.is_connected and self.serial_port:
+
             with self.lock:
                 try:
                     self.serial_port.write(b"M5\r\n\x18") # Turn off laser + soft reset
@@ -264,8 +269,11 @@ class SerialController(QObject):
         self.log_received.emit("rx", "Job Completed Successfully!")
         self.job_finished.emit(True, "Job Completed Successfully")
 
-    def _send_and_wait_ack(self, line: str, timeout: float = 15.0) -> bool:
-        """Sends a line and waits for GRBL 'ok' response."""
+    def _send_and_wait_ack(self, line: str, max_idle_timeout: float = 15.0) -> bool:
+        """Sends a line and waits for GRBL 'ok' response using event synchronization."""
+        self.ack_event.clear()
+        self.ack_status = False
+
         with self.lock:
             if not self.serial_port or not self.serial_port.is_open:
                 return False
@@ -275,20 +283,27 @@ class SerialController(QObject):
             except Exception:
                 return False
 
-        # Wait for acknowledgment
-        start_t = time.time()
-        while time.time() - start_t < timeout:
-            if self.abort_requested:
+        # Wait for acknowledgment event; permit long moves while machine is running
+        send_time = time.time()
+        while not self.abort_requested:
+            if self.ack_event.wait(timeout=0.25):
+                return self.ack_status and not self.abort_requested
+
+            now = time.time()
+            if self.machine_state in ("Run", "Jog", "Hold"):
+                # Actively processing move on hardware
+                continue
+            if now - getattr(self, "last_rx_time", send_time) > max_idle_timeout:
+                # Timed out with no communication
                 return False
-            time.sleep(0.005)
-            # Checked in _reader_loop via event or flag
-            return True
+
         return False
 
     def _reader_loop(self):
         """Continuously reads incoming data from serial port and polls status."""
         last_poll_time = 0.0
         line_buffer = ""
+        self.last_rx_time = time.time()
 
         while not self.stop_worker and self.is_connected:
             now = time.time()
@@ -314,6 +329,7 @@ class SerialController(QObject):
                         break
 
             if raw_data:
+                self.last_rx_time = time.time()
                 text = raw_data.decode("latin1", errors="ignore")
                 line_buffer += text
 
@@ -338,14 +354,34 @@ class SerialController(QObject):
 
             for p in parts[1:]:
                 if p.startswith("MPos:"):
-                    coords = [float(c) for c in p[5:].split(",")]
-                    self.mpos = coords
-                    status_dict["mpos"] = coords
+                    try:
+                        coords = [float(c) for c in p[5:].split(",")]
+                        self.mpos = coords
+                        status_dict["mpos"] = coords
+                    except ValueError:
+                        pass
                 elif p.startswith("WPos:"):
-                    coords = [float(c) for c in p[5:].split(",")]
-                    self.wpos = coords
-                    status_dict["wpos"] = coords
+                    try:
+                        coords = [float(c) for c in p[5:].split(",")]
+                        self.wpos = coords
+                        status_dict["wpos"] = coords
+                    except ValueError:
+                        pass
 
             self.status_updated.emit(status_dict)
+        elif line == "ok":
+            self.ack_status = True
+            self.ack_event.set()
+            self.log_received.emit("rx", line)
+        elif line.startswith("error:"):
+            self.ack_status = False
+            self.ack_event.set()
+            self.log_received.emit("err", line)
+        elif line.startswith("ALARM:"):
+            self.machine_state = "Alarm"
+            self.ack_status = False
+            self.ack_event.set()
+            self.log_received.emit("err", line)
         else:
             self.log_received.emit("rx", line)
+

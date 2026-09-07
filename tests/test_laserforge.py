@@ -183,6 +183,23 @@ class TestLaserForgeCore(unittest.TestCase):
             if os.path.exists(img_path): os.unlink(img_path)
             if os.path.exists(svg_path): os.unlink(svg_path)
 
+    def test_path_entity_translation_and_bounds(self):
+        # A 10x10 triangle in local coordinates
+        triangle = [(0.0, 0.0), (10.0, 0.0), (5.0, 10.0), (0.0, 0.0)]
+        path = PathEntity(layer_id=0, x=50.0, y=70.0, contours=[triangle], closed=True)
+
+        local_bounds = path.get_local_bounds()
+        self.assertEqual(local_bounds, (0.0, 0.0, 10.0, 10.0))
+
+        world_bounds = path.get_bounds()
+        self.assertEqual(world_bounds, (50.0, 70.0, 60.0, 80.0))
+
+        # Check GCode output includes translated coordinates (50, 70)
+        job = self.gcode_gen.generate_job([path])
+        self.assertIn("G0 X50.000 Y70.000", job.gcode)
+        self.assertIn("G1 X60.000 Y70.000", job.gcode)
+        self.assertIn("G1 X55.000 Y80.000", job.gcode)
+
 
 if __name__ == "__main__":
     unittest.main()

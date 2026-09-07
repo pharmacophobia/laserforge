@@ -159,7 +159,7 @@ class RasterProcessor:
                             # Close previous segment on noticeable power change
                             x1 = origin_x_mm + (seg_start_col * line_interval_mm)
                             x2 = origin_x_mm + (col * line_interval_mm)
-                            line_segments.append((min(x1, x2), max(x1, x2), seg_power, reverse))
+                            line_segments.append((x1, x2, seg_power, reverse))
                             seg_start_col = col
                             seg_power = val / 255.0
                 else:
@@ -167,13 +167,14 @@ class RasterProcessor:
                         in_segment = False
                         x1 = origin_x_mm + (seg_start_col * line_interval_mm)
                         x2 = origin_x_mm + (col * line_interval_mm)
-                        line_segments.append((min(x1, x2), max(x1, x2), seg_power, reverse))
+                        line_segments.append((x1, x2, seg_power, reverse))
 
             if in_segment:
                 col = -1 if reverse else w
                 x1 = origin_x_mm + (seg_start_col * line_interval_mm)
                 x2 = origin_x_mm + (col * line_interval_mm)
-                line_segments.append((min(x1, x2), max(x1, x2), seg_power, reverse))
+                line_segments.append((x1, x2, seg_power, reverse))
+
 
             if line_segments:
                 scanlines.append({

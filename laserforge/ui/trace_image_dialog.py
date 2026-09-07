@@ -54,6 +54,14 @@ class TracePreviewCanvas(QWidget):
 
     def set_contours(self, contours: List[List[Tuple[float, float]]]):
         self.contours = contours
+        path = QPainterPath()
+        for poly in contours:
+            if len(poly) < 2:
+                continue
+            path.moveTo(poly[0][0], poly[0][1])
+            for pt in poly[1:]:
+                path.lineTo(pt[0], pt[1])
+        self._cached_path = path
         self.update()
 
     def set_opacity(self, val: float):
@@ -117,20 +125,20 @@ class TracePreviewCanvas(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No image loaded")
             return
 
-        # 1. Render background image with adjustable opacity
         painter.save()
+        painter.translate(self.pan_x, self.pan_y)
+        painter.scale(self.zoom, self.zoom)
+
+        # 1. Render background image with adjustable opacity
         painter.setOpacity(self.image_opacity)
-        img_rect = QRectF(
-            self.pan_x, self.pan_y,
-            self.pixmap.width() * self.zoom,
-            self.pixmap.height() * self.zoom
-        )
-        painter.drawPixmap(img_rect.toRect(), self.pixmap)
-        painter.restore()
+        painter.drawPixmap(0, 0, self.pixmap)
 
         # Image border
-        painter.setPen(QPen(QColor("#424242"), 1, Qt.PenStyle.DashLine))
-        painter.drawRect(img_rect)
+        painter.setOpacity(1.0)
+        border_pen = QPen(QColor("#424242"), 1.0, Qt.PenStyle.DashLine)
+        border_pen.setCosmetic(True)
+        painter.setPen(border_pen)
+        painter.drawRect(QRectF(0, 0, self.pixmap.width(), self.pixmap.height()))
 
         # 2. Render vector contours over image
         pen_vector = QPen(QColor("#00e5ff"), 1.5)
@@ -138,19 +146,10 @@ class TracePreviewCanvas(QWidget):
         painter.setPen(pen_vector)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        for poly in self.contours:
-            if len(poly) < 2:
-                continue
-            path = QPainterPath()
-            p0 = poly[0]
-            sx = self.pan_x + p0[0] * self.zoom
-            sy = self.pan_y + p0[1] * self.zoom
-            path.moveTo(sx, sy)
+        if hasattr(self, "_cached_path") and self._cached_path:
+            painter.drawPath(self._cached_path)
 
-            for pt in poly[1:]:
-                path.lineTo(self.pan_x + pt[0] * self.zoom, self.pan_y + pt[1] * self.zoom)
-
-            painter.drawPath(path)
+        painter.restore()
 
 
 class TraceImageDialog(QDialog):

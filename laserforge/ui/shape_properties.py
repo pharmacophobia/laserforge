@@ -252,9 +252,11 @@ class ShapePropertiesPanel(QWidget):
                 if self.lock_aspect_ratio:
                     ent.height *= scale_x
             elif isinstance(ent, PathEntity):
+                scale_y = scale_x if self.lock_aspect_ratio else 1.0
                 for contour in ent.contours:
                     for idx, pt in enumerate(contour):
-                        contour[idx] = (ent.x + (pt[0] - ent.x) * scale_x, pt[1])
+                        contour[idx] = (pt[0] * scale_x, pt[1] * scale_y)
+                ent.invalidate_bounds()
 
             item.sync_from_entity()
 
@@ -288,9 +290,11 @@ class ShapePropertiesPanel(QWidget):
                 if self.lock_aspect_ratio:
                     ent.width *= scale_y
             elif isinstance(ent, PathEntity):
+                scale_x = scale_y if self.lock_aspect_ratio else 1.0
                 for contour in ent.contours:
                     for idx, pt in enumerate(contour):
-                        contour[idx] = (pt[0], ent.y + (pt[1] - ent.y) * scale_y)
+                        contour[idx] = (pt[0] * scale_x, pt[1] * scale_y)
+                ent.invalidate_bounds()
 
             item.sync_from_entity()
 

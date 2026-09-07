@@ -9,14 +9,24 @@ Sorts toolpaths to:
 from typing import List, Tuple
 import math
 
+def point_dist_sq(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+    dx = p1[0] - p2[0]
+    dy = p1[1] - p2[1]
+    return dx * dx + dy * dy
+
 def point_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
 
 def polygon_bounds(pts: List[Tuple[float, float]]) -> Tuple[float, float, float, float]:
-    min_x = min(p[0] for p in pts)
-    min_y = min(p[1] for p in pts)
-    max_x = max(p[0] for p in pts)
-    max_y = max(p[1] for p in pts)
+    min_x = float("inf")
+    min_y = float("inf")
+    max_x = float("-inf")
+    max_y = float("-inf")
+    for p in pts:
+        if p[0] < min_x: min_x = p[0]
+        if p[0] > max_x: max_x = p[0]
+        if p[1] < min_y: min_y = p[1]
+        if p[1] > max_y: max_y = p[1]
     return (min_x, min_y, max_x, max_y)
 
 def is_box_inside(inner: Tuple[float, float, float, float], outer: Tuple[float, float, float, float]) -> bool:
@@ -50,21 +60,32 @@ class PathOptimizer:
         for i, path in enumerate(paths):
             if not path:
                 continue
-            bounds = polygon_bounds(path)
+            bx1, by1, bx2, by2 = polygon_bounds(path)
+            area = (bx2 - bx1) * (by2 - by1)
             items.append({
                 "index": i,
                 "path": path,
                 "closed": closed_flags[i] if i < len(closed_flags) else True,
-                "bounds": bounds,
+                "bounds": (bx1, by1, bx2, by2),
+                "area": area,
                 "depth": 0
             })
 
         # Calculate nesting depth (inner contours have higher depth)
-        for i, item_a in enumerate(items):
-            for j, item_b in enumerate(items):
-                if i != j and item_a["closed"] and item_b["closed"]:
-                    if is_box_inside(item_a["bounds"], item_b["bounds"]):
-                        item_a["depth"] += 1
+        for item_a in items:
+            if not item_a["closed"]:
+                continue
+            ax1, ay1, ax2, ay2 = item_a["bounds"]
+            a_area = item_a["area"]
+            for item_b in items:
+                if item_a is item_b or not item_b["closed"]:
+                    continue
+                # Enclosing box must have greater or equal area
+                if item_b["area"] < a_area:
+                    continue
+                bx1, by1, bx2, by2 = item_b["bounds"]
+                if ax1 >= bx1 - 0.001 and ay1 >= by1 - 0.001 and ax2 <= bx2 + 0.001 and ay2 <= by2 + 0.001:
+                    item_a["depth"] += 1
 
         # Sort by depth descending (cut deepest inner items first)
         depth_groups = {}
@@ -83,25 +104,31 @@ class PathOptimizer:
             unvisited = list(group)
             while unvisited:
                 best_idx = 0
-                best_dist = float("inf")
+                best_dist_sq = float("inf")
                 should_reverse = False
+
+                cx, cy = current_pos
 
                 for k, candidate in enumerate(unvisited):
                     path = candidate["path"]
                     start_pt = path[0]
-                    end_pt = path[-1]
 
-                    d_start = point_distance(current_pos, start_pt)
-                    if d_start < best_dist:
-                        best_dist = d_start
+                    dx = cx - start_pt[0]
+                    dy = cy - start_pt[1]
+                    d_start = dx * dx + dy * dy
+                    if d_start < best_dist_sq:
+                        best_dist_sq = d_start
                         best_idx = k
                         should_reverse = False
 
                     # If open path, check reverse direction
                     if not candidate["closed"]:
-                        d_end = point_distance(current_pos, end_pt)
-                        if d_end < best_dist:
-                            best_dist = d_end
+                        end_pt = path[-1]
+                        edx = cx - end_pt[0]
+                        edy = cy - end_pt[1]
+                        d_end = edx * edx + edy * edy
+                        if d_end < best_dist_sq:
+                            best_dist_sq = d_end
                             best_idx = k
                             should_reverse = True
 

@@ -103,22 +103,44 @@ class LineEntity(LaserEntity):
         return (min_x, min_y, max_x, max_y)
 
 
+import math
+
 @dataclass
 class PathEntity(LaserEntity):
     """General vector path consisting of sub-paths of (x, y) segments."""
-    # List of contours, where each contour is a list of (x, y) points
+    # List of contours, where each contour is a list of (x, y) points relative to (x, y)
     contours: List[List[Tuple[float, float]]] = field(default_factory=list)
     closed: bool = True
+    _cached_local_bounds: Optional[Tuple[float, float, float, float]] = field(default=None, repr=False, compare=False)
+
+    def get_local_bounds(self) -> Tuple[float, float, float, float]:
+        if self._cached_local_bounds is not None:
+            return self._cached_local_bounds
+        if not self.contours:
+            return (0.0, 0.0, 0.0, 0.0)
+        min_x = float("inf")
+        min_y = float("inf")
+        max_x = float("-inf")
+        max_y = float("-inf")
+        for c in self.contours:
+            for pt in c:
+                if pt[0] < min_x: min_x = pt[0]
+                if pt[0] > max_x: max_x = pt[0]
+                if pt[1] < min_y: min_y = pt[1]
+                if pt[1] > max_y: max_y = pt[1]
+        if math.isinf(min_x):
+            res = (0.0, 0.0, 0.0, 0.0)
+        else:
+            res = (min_x, min_y, max_x, max_y)
+        self._cached_local_bounds = res
+        return res
 
     def get_bounds(self) -> Tuple[float, float, float, float]:
-        all_pts = [pt for c in self.contours for pt in c]
-        if not all_pts:
-            return (self.x, self.y, self.x, self.y)
-        min_x = min(pt[0] for pt in all_pts)
-        min_y = min(pt[1] for pt in all_pts)
-        max_x = max(pt[0] for pt in all_pts)
-        max_y = max(pt[1] for pt in all_pts)
-        return (min_x, min_y, max_x, max_y)
+        lx1, ly1, lx2, ly2 = self.get_local_bounds()
+        return (self.x + lx1, self.y + ly1, self.x + lx2, self.y + ly2)
+
+    def invalidate_bounds(self):
+        self._cached_local_bounds = None
 
 
 @dataclass

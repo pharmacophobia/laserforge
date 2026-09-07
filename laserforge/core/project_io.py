@@ -205,13 +205,21 @@ class ProjectIO:
                         closed = (tag == "polygon")
                         if closed and pts[0] != pts[-1]:
                             pts.append(pts[0])
-                        entities.append(PathEntity(layer_id=default_layer_id, name=f"SVG {tag.capitalize()}", contours=[pts], closed=closed))
+                        min_x = min(p[0] for p in pts)
+                        min_y = min(p[1] for p in pts)
+                        norm_pts = [(p[0] - min_x, p[1] - min_y) for p in pts]
+                        entities.append(PathEntity(layer_id=default_layer_id, name=f"SVG {tag.capitalize()}", x=min_x, y=min_y, contours=[norm_pts], closed=closed))
 
                 elif tag == "path":
                     d_attr = elem.get("d", "")
                     contours = ProjectIO._parse_svg_path_d(d_attr)
                     if contours:
-                        entities.append(PathEntity(layer_id=default_layer_id, name="SVG Path", contours=contours, closed=True))
+                        all_pts = [p for c in contours for p in c]
+                        if all_pts:
+                            min_x = min(p[0] for p in all_pts)
+                            min_y = min(p[1] for p in all_pts)
+                            norm_contours = [[(p[0] - min_x, p[1] - min_y) for p in c] for c in contours]
+                            entities.append(PathEntity(layer_id=default_layer_id, name="SVG Path", x=min_x, y=min_y, contours=norm_contours, closed=True))
 
         except Exception as e:
             print(f"SVG Import error: {e}")
