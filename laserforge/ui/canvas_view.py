@@ -178,14 +178,27 @@ class LaserCanvasView(QGraphicsView):
         self.top_ruler.update()
         self.left_ruler.update()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._space_pressed = True
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._space_pressed = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().keyReleaseEvent(event)
+
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.SpaceModifier):
+        if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.LeftButton and getattr(self, "_space_pressed", False)):
             self._is_panning = True
             self._pan_start = event.position()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
         super().mousePressEvent(event)
+
 
     def mouseMoveEvent(self, event: QMouseEvent):
         scene_pt = self.mapToScene(event.position().toPoint())

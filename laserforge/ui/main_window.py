@@ -38,6 +38,8 @@ from laserforge.ui.console_panel import ConsolePanel
 from laserforge.ui.shape_properties import ShapePropertiesPanel
 from laserforge.ui.preview_dialog import PreviewDialog
 from laserforge.ui.machine_settings_dialog import MachineSettingsDialog
+from laserforge.ui.trace_image_dialog import TraceImageDialog
+
 
 
 def create_tool_icon(text: str, bg_color: str = "#2b2b36", fg_color: str = "#00e5ff") -> QIcon:
@@ -119,7 +121,13 @@ class MainWindow(QMainWindow):
         self.act_import_img = QAction("Import Image...", self)
         self.act_import_img.triggered.connect(self.import_image)
 
+        self.act_trace_image = QAction("Trace Image to Vector (SVG)...", self)
+        self.act_trace_image.setShortcut("Ctrl+T")
+        self.act_trace_image.setToolTip("Convert bitmap image to vector paths / SVG")
+        self.act_trace_image.triggered.connect(self.trace_image)
+
         self.act_export_gcode = QAction("Export G-Code...", self)
+
         self.act_export_gcode.setShortcut("Ctrl+E")
         self.act_export_gcode.triggered.connect(self.export_gcode)
 
@@ -188,6 +196,7 @@ class MainWindow(QMainWindow):
         menu_file.addSeparator()
         menu_file.addAction(self.act_import_svg)
         menu_file.addAction(self.act_import_img)
+        menu_file.addAction(self.act_trace_image)
         menu_file.addSeparator()
         menu_file.addAction(self.act_export_gcode)
         menu_file.addSeparator()
@@ -215,6 +224,7 @@ class MainWindow(QMainWindow):
         # Tools Menu
         menu_tools = menubar.addMenu("&Tools")
         menu_tools.addAction(self.act_preview)
+        menu_tools.addAction(self.act_trace_image)
         menu_tools.addAction(self.act_zoom_fit)
 
         # Help Menu
@@ -235,9 +245,11 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.act_import_svg)
         tb.addAction(self.act_import_img)
+        tb.addAction(self.act_trace_image)
         tb.addSeparator()
         tb.addAction(self.act_zoom_fit)
         tb.addSeparator()
+
 
         # Preview Button on top
         btn_preview = QPushButton("  Preview (Alt+P)")
@@ -291,7 +303,13 @@ class MainWindow(QMainWindow):
         act_svg.triggered.connect(self.import_svg)
         cad_tb.addAction(act_svg)
 
+        # Trace Image Action
+        act_trace = QAction(create_tool_icon("⚡", fg_color="#ffd600"), "Trace Image to Vector (SVG)", self)
+        act_trace.triggered.connect(self.trace_image)
+        cad_tb.addAction(act_trace)
+
         cad_tb.addSeparator()
+
 
         # Zoom Fit
         act_fit = QAction(create_tool_icon("⛶", fg_color="#fff"), "Fit Workbed in View", self)
@@ -399,7 +417,11 @@ class MainWindow(QMainWindow):
         self.laser_panel.start_job_requested.connect(self.start_job)
         self.laser_panel.frame_job_requested.connect(self.frame_job)
 
+        # Properties panel signals
+        self.props_panel.trace_image_requested.connect(self.trace_image)
+
         # Serial status badge
+
         self.serial_ctrl.connected.connect(lambda p: self.status_machine.setText(f"Laser: Connected ({p})"))
         self.serial_ctrl.connected.connect(lambda: self.status_machine.setStyleSheet("font-weight: bold; color: #66bb6a;"))
         self.serial_ctrl.disconnected.connect(lambda: self.status_machine.setText("Laser: Disconnected"))
@@ -536,7 +558,88 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error Importing Image", f"Failed to import image: {e}")
 
+    def trace_image(self):
+        """Traces a bitmap image into vector contours and SVG (LightBurn Trace Image tool)."""
+        from PIL import Image as PILImage
+
+        # Check if an ImageEntity is selected on the canvas
+        selected_entities = self.scene.get_selected_entities()
+        target_image_ent: Optional[ImageEntity] = None
+        for ent in selected_entities:
+            if isinstance(ent, ImageEntity):
+                target_image_ent = ent
+                break
+
+        pil_img = None
+        image_name = "Image"
+        initial_w = 80.0
+        initial_h = 80.0
+        target_x = 0.0
+        target_y = 0.0
+
+        if target_image_ent and target_image_ent.image_path and os.path.exists(target_image_ent.image_path):
+            try:
+                pil_img = PILImage.open(target_image_ent.image_path)
+                image_name = target_image_ent.name
+                initial_w = target_image_ent.width
+                initial_h = target_image_ent.height
+                target_x = target_image_ent.x
+                target_y = target_image_ent.y
+            except Exception as e:
+                QMessageBox.warning(self, "Image Error", f"Could not load selected image: {e}")
+                pil_img = None
+
+        if pil_img is None:
+            # Prompt user to select an image file to vectorize
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select Image to Trace (Vectorize to SVG)", "",
+                "Image Files (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)"
+            )
+            if not path:
+                return
+            try:
+                pil_img = PILImage.open(path)
+                image_name = os.path.basename(path)
+                aspect = pil_img.height / max(1, pil_img.width)
+                initial_w = 80.0
+                initial_h = initial_w * aspect
+                target_x = (self.settings.bed_width - initial_w) / 2.0
+                target_y = (self.settings.bed_height - initial_h) / 2.0
+            except Exception as e:
+                QMessageBox.critical(self, "Load Error", f"Failed to open image file: {e}")
+                return
+
+        # Open the interactive TraceImageDialog
+        dlg = TraceImageDialog(
+            pil_img,
+            image_name=image_name,
+            initial_width_mm=initial_w,
+            initial_height_mm=initial_h,
+            active_layer_id=self.scene.active_layer_id,
+            parent=self
+        )
+
+        if dlg.exec() == TraceImageDialog.DialogCode.Accepted and dlg.result_path_entity:
+            path_ent = dlg.result_path_entity
+            path_ent.x = target_x
+            path_ent.y = target_y
+
+            # If user checked delete original bitmap
+            if target_image_ent and dlg.delete_original_image:
+                for item in list(self.scene.items()):
+                    if hasattr(item, "entity") and item.entity is target_image_ent:
+                        self.scene.removeItem(item)
+                        break
+
+            wrapper = self.scene.add_entity(path_ent)
+            self.scene.clearSelection()
+            wrapper.setSelected(True)
+            self.statusBar().showMessage(
+                f"Successfully traced '{image_name}' into {len(path_ent.contours)} vector contours!", 4000
+            )
+
     def export_gcode(self):
+
         entities = self.scene.get_all_entities()
         if not entities:
             QMessageBox.warning(self, "Export G-Code", "Canvas is empty. Draw or import shapes first.")

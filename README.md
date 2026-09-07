@@ -27,10 +27,19 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - **Inner-First Nesting Sort**: Automatically cuts interior holes, dropouts, and slots before exterior perimeters to prevent loose material shifting.
   - **Traveling Salesperson (TSP) Optimizer**: Minimizes non-cutting rapid travel movements using nearest-neighbor Euclidean distance.
   - Accurate run-time ETA estimation based on cut length, rapid travel, and acceleration limits.
+- **Image to SVG Vector Tracer (LightBurn-Style Trace Tool)**:
+  - Vectorizes bitmap images (PNG, JPG, BMP, WebP) into clean vector paths and SVG files.
+  - **Marching Squares Boundary Tracing**: Extracts topological outer contours and inner cutouts.
+  - **Otsu Auto-Thresholding**: Automatically calculates the optimal binarization threshold.
+  - **RDP Curve Smoothing**: Simplifies pixel stairstep noise into smooth vector polygons.
+  - **Dust / Speckle Filter**: Rejects speckle noise smaller than configurable pixel threshold.
+  - **Interactive Tracing Studio**: Real-time side-by-side / overlay preview with image fade slider, threshold adjustment, invert toggle, and layer assignment.
+  - **Export to SVG**: One-click export to standalone `.svg` vector files or direct insertion onto the cutting bed.
 - **Interactive Toolpath Simulation Preview**:
   - Real-time 2D animated simulation canvas showing rapid moves (red dotted) and laser burn moves (layer colored).
   - Animated laser head scrubber slider with Play / Pause / Reset and speed multipliers (1x to 50x).
   - Raw G-code viewer with one-click export (`.nc` / `.gcode`) and clipboard copy.
+
 - **Real-Time Machine Controller**:
   - Background threaded USB serial communications with GRBL 1.1+.
   - 8-directional jog pad with configurable step sizes (0.1, 1, 10, 50, 100 mm) and speed control.

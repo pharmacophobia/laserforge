@@ -141,7 +141,50 @@ class TestLaserForgeCore(unittest.TestCase):
         self.assertIn("Pass 2/3", job.gcode)
         self.assertIn("Pass 3/3", job.gcode)
 
+    def test_image_tracer_to_svg(self):
+        from PIL import ImageDraw
+        from laserforge.core.image_tracer import ImageTracer
+
+        img = Image.new("RGB", (100, 100), (255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.rectangle([20, 20, 80, 80], fill=(0, 0, 0))
+        d.ellipse([40, 40, 60, 60], fill=(255, 255, 255))
+
+        contours = ImageTracer.trace_image(img, smoothness=1.0, scale_x=0.5, scale_y=0.5)
+        self.assertGreaterEqual(len(contours), 2)
+
+        svg = ImageTracer.contours_to_svg(contours, 50.0, 50.0)
+        self.assertIn("<svg", svg)
+        self.assertIn("d=\"M", svg)
+
+    def test_image_tracer_file_to_file(self):
+        from PIL import ImageDraw
+        from laserforge.core.image_tracer import ImageTracer
+
+        img = Image.new("L", (80, 80), 255)
+        d = ImageDraw.Draw(img)
+        d.rectangle([15, 15, 65, 65], fill=0)
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf_in:
+            img_path = tf_in.name
+            img.save(img_path)
+
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tf_out:
+            svg_path = tf_out.name
+
+        try:
+            ImageTracer.trace_file_to_svg_file(img_path, svg_path, target_width_mm=60.0)
+            self.assertTrue(os.path.exists(svg_path))
+            with open(svg_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("<svg", content)
+            self.assertIn("width=\"60.00mm\"", content)
+        finally:
+            if os.path.exists(img_path): os.unlink(img_path)
+            if os.path.exists(svg_path): os.unlink(svg_path)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

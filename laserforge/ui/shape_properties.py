@@ -21,7 +21,10 @@ from laserforge.config import DEFAULT_BED_WIDTH_MM, DEFAULT_BED_HEIGHT_MM
 
 
 class ShapePropertiesPanel(QWidget):
+    trace_image_requested = pyqtSignal()
+
     def __init__(self, scene: LaserCanvasScene, parent=None):
+
         super().__init__(parent)
         self.scene = scene
         self._is_updating_ui = False
@@ -123,7 +126,20 @@ class ShapePropertiesPanel(QWidget):
         align_layout.addWidget(btn_bed_center, 2, 0, 1, 3)
 
         layout.addWidget(align_group)
+
+        # 3. Image Vectorization Actions Group
+        self.img_group = QGroupBox("Bitmap Vectorization")
+        img_layout = QVBoxLayout(self.img_group)
+        img_layout.setContentsMargins(6, 8, 6, 6)
+        self.btn_trace_img = QPushButton("⚡ Trace Image to SVG...")
+        self.btn_trace_img.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; padding: 6px;")
+        self.btn_trace_img.clicked.connect(self.trace_image_requested.emit)
+        img_layout.addWidget(self.btn_trace_img)
+        self.img_group.setVisible(False)
+        layout.addWidget(self.img_group)
+
         layout.addStretch(1)
+
 
     def _connect_signals(self):
         self.scene.selectionChanged.connect(self.update_from_selection)
@@ -139,6 +155,7 @@ class ShapePropertiesPanel(QWidget):
         selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
         if not selected_items:
             self.setEnabled(False)
+            self.img_group.setVisible(False)
             self._is_updating_ui = True
             self.x_spin.setValue(0)
             self.y_spin.setValue(0)
@@ -149,7 +166,10 @@ class ShapePropertiesPanel(QWidget):
             return
 
         self.setEnabled(True)
+        has_image = any(isinstance(i.entity, ImageEntity) for i in selected_items)
+        self.img_group.setVisible(has_image)
         self._is_updating_ui = True
+
 
         if len(selected_items) == 1:
             item = selected_items[0]
