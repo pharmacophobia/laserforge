@@ -9,7 +9,7 @@ LightBurn-inspired layout integrating:
 """
 
 import os
-from typing import Optional
+from typing import Optional, Tuple, List, Dict
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QToolBar,
     QDockWidget, QTabWidget, QFileDialog, QMessageBox, QLabel,
@@ -458,7 +458,9 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self.load_project_file(path)
 
+    def load_project_file(self, path: str):
         try:
             entities, layer_settings, machine_cfg = ProjectIO.load_project(path, self.layer_manager)
             self.scene.clear_entities()
@@ -513,7 +515,9 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self.import_svg_file(path)
 
+    def import_svg_file(self, path: str):
         try:
             entities = ProjectIO.import_svg(path, self.scene.active_layer_id)
             for ent in entities:
@@ -525,11 +529,13 @@ class MainWindow(QMainWindow):
 
     def import_image(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import Bitmap Image", "", "Image Files (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)"
+            self, "Import Bitmap Image", "", "Image Files (*.png *.jpg *.jpeg *.bmp *.webp *.gif);;All Files (*)"
         )
         if not path:
             return
+        self.import_image_file(path)
 
+    def import_image_file(self, path: str, pos: Optional[Tuple[float, float]] = None):
         try:
             from PIL import Image as PILImage
             with PILImage.open(path) as img:
@@ -540,9 +546,12 @@ class MainWindow(QMainWindow):
             target_w = 80.0
             target_h = target_w * aspect
 
-            # Center in bed
-            x = (self.settings.bed_width - target_w) / 2.0
-            y = (self.settings.bed_height - target_h) / 2.0
+            if pos is not None:
+                x, y = pos
+            else:
+                # Center in bed
+                x = (self.settings.bed_width - target_w) / 2.0
+                y = (self.settings.bed_height - target_h) / 2.0
 
             img_ent = ImageEntity(
                 layer_id=self.scene.active_layer_id,
@@ -550,11 +559,13 @@ class MainWindow(QMainWindow):
                 x=x, y=y,
                 width=target_w, height=target_h,
                 image_path=path,
-                dither_mode="floyd_steinberg",
-                dpi=254.0 # 0.1mm interval
+                dither_mode="Floyd-Steinberg",
+                dpi=254.0
             )
-            self.scene.add_entity(img_ent)
-            self.statusBar().showMessage(f"Imported image {os.path.basename(path)}", 3000)
+            wrapper = self.scene.add_entity(img_ent)
+            self.scene.clearSelection()
+            wrapper.setSelected(True)
+            self.statusBar().showMessage(f"Imported image '{os.path.basename(path)}' (80 × {target_h:.1f} mm)", 4000)
         except Exception as e:
             QMessageBox.critical(self, "Error Importing Image", f"Failed to import image: {e}")
 

@@ -167,6 +167,7 @@ class ImageEntity(LaserEntity):
     contrast: float = 1.0
     brightness: float = 0.0
     threshold_value: int = 128  # 0-255
+    dpi: float = 254.0
 
     def get_bounds(self) -> Tuple[float, float, float, float]:
         return (self.x, self.y, self.x + self.width, self.y + self.height)

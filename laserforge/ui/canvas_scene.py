@@ -145,10 +145,20 @@ class LaserItemWrapper(QGraphicsItem):
         elif isinstance(self.entity, ImageEntity):
             if self.entity.image_path:
                 if self._cached_pixmap is None or self._cached_pixmap_path != self.entity.image_path:
-                    self._cached_pixmap = QPixmap(self.entity.image_path)
+                    pix = QPixmap(self.entity.image_path)
+                    if pix.isNull():
+                        try:
+                            from PIL import Image as PILImg
+                            with PILImg.open(self.entity.image_path) as p_img:
+                                rgba = p_img.convert("RGBA")
+                                qimg = QImage(rgba.tobytes("raw", "RGBA"), rgba.width, rgba.height, QImage.Format.Format_RGBA8888)
+                                pix = QPixmap.fromImage(qimg)
+                        except Exception:
+                            pix = QPixmap()
+                    self._cached_pixmap = pix
                     self._cached_pixmap_path = self.entity.image_path
-                if not self._cached_pixmap.isNull():
-                    painter.drawPixmap(rect.toRect(), self._cached_pixmap)
+                if self._cached_pixmap and not self._cached_pixmap.isNull():
+                    painter.drawPixmap(rect, self._cached_pixmap, QRectF(self._cached_pixmap.rect()))
             painter.setPen(QPen(color, 1, Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
@@ -263,8 +273,15 @@ class LaserCanvasScene(QGraphicsScene):
             elif isinstance(e, TextEntity):
                 new_ent = TextEntity(layer_id=e.layer_id, name=e.name, x=e.x+5, y=e.y+5, text=e.text, font_family=e.font_family, font_size=e.font_size, bold=e.bold, italic=e.italic)
             elif isinstance(e, PathEntity):
-                new_contours = [[(p[0]+5, p[1]+5) for p in c] for c in e.contours]
+                new_contours = [list(c) for c in e.contours]
                 new_ent = PathEntity(layer_id=e.layer_id, name=e.name, x=e.x+5, y=e.y+5, contours=new_contours, closed=e.closed)
+            elif isinstance(e, ImageEntity):
+                new_ent = ImageEntity(
+                    layer_id=e.layer_id, name=f"{e.name}_copy", x=e.x+5, y=e.y+5,
+                    width=e.width, height=e.height, image_path=e.image_path,
+                    dither_mode=e.dither_mode, invert=e.invert, contrast=e.contrast,
+                    brightness=e.brightness, threshold_value=e.threshold_value, dpi=e.dpi
+                )
 
             if new_ent:
                 wrapper = self.add_entity(new_ent)

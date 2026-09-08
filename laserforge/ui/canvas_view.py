@@ -138,6 +138,7 @@ class LaserCanvasView(QGraphicsView):
 
         # Enable mouse tracking for live coordinate display
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
 
     def set_bed_size(self, w: float, h: float):
         self.bed_width = w
@@ -225,6 +226,41 @@ class LaserCanvasView(QGraphicsView):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            import os
+            main_win = self.window()
+            for url in event.mimeData().urls():
+                filepath = url.toLocalFile()
+                if not filepath or not os.path.exists(filepath):
+                    continue
+                ext = os.path.splitext(filepath)[1].lower()
+                if ext in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"):
+                    scene_pos = self.mapToScene(event.position().toPoint())
+                    if hasattr(main_win, "import_image_file"):
+                        main_win.import_image_file(filepath, pos=(scene_pos.x(), scene_pos.y()))
+                elif ext in (".svg",):
+                    if hasattr(main_win, "import_svg_file"):
+                        main_win.import_svg_file(filepath)
+                elif ext in (".laserproj", ".json"):
+                    if hasattr(main_win, "load_project_file"):
+                        main_win.load_project_file(filepath)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
         """Draws the dark workspace, workbed boundary, and millimeter grid lines."""

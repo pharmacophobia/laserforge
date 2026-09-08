@@ -200,6 +200,36 @@ class TestLaserForgeCore(unittest.TestCase):
         self.assertIn("G1 X60.000 Y70.000", job.gcode)
         self.assertIn("G1 X55.000 Y80.000", job.gcode)
 
+    def test_image_entity_creation_and_gcode(self):
+        # Create a temporary test image
+        img = Image.new("RGB", (100, 50), (128, 128, 128))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+            img_path = tf.name
+            img.save(img_path)
+
+        try:
+            img_ent = ImageEntity(
+                layer_id=0,
+                name="test.png",
+                x=10.0,
+                y=20.0,
+                width=80.0,
+                height=40.0,
+                image_path=img_path,
+                dither_mode="Floyd-Steinberg",
+                dpi=254.0
+            )
+            self.assertEqual(img_ent.dpi, 254.0)
+            self.assertEqual(img_ent.get_bounds(), (10.0, 20.0, 90.0, 60.0))
+
+            # Test CAM GCode generation from ImageEntity
+            job = self.gcode_gen.generate_job([img_ent])
+            self.assertGreater(len(job.segments), 0)
+            self.assertGreater(job.total_cut_dist_mm, 0.0)
+        finally:
+            if os.path.exists(img_path):
+                os.unlink(img_path)
+
 
 if __name__ == "__main__":
     unittest.main()

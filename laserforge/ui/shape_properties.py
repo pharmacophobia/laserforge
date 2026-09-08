@@ -152,7 +152,10 @@ class ShapePropertiesPanel(QWidget):
         if self._is_updating_ui:
             return
 
-        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        try:
+            selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        except RuntimeError:
+            return
         if not selected_items:
             self.setEnabled(False)
             self.img_group.setVisible(False)

@@ -55,7 +55,8 @@ class ProjectIO:
                     "image_path": e.image_path, "width": e.width, "height": e.height,
                     "dither_mode": e.dither_mode, "invert": e.invert,
                     "contrast": e.contrast, "brightness": e.brightness,
-                    "threshold_value": e.threshold_value
+                    "threshold_value": e.threshold_value,
+                    "dpi": getattr(e, "dpi", 254.0)
                 })
             entities_data.append(e_dict)
 
@@ -147,7 +148,8 @@ class ProjectIO:
                     **base_kwargs, image_path=d.get("image_path", ""), width=float(d.get("width", 80)),
                     height=float(d.get("height", 80)), dither_mode=d.get("dither_mode", "Floyd-Steinberg"),
                     invert=bool(d.get("invert", False)), contrast=float(d.get("contrast", 1.0)),
-                    brightness=float(d.get("brightness", 0.0)), threshold_value=int(d.get("threshold_value", 128))
+                    brightness=float(d.get("brightness", 0.0)), threshold_value=int(d.get("threshold_value", 128)),
+                    dpi=float(d.get("dpi", 254.0))
                 ))
 
         return entities, layer_manager, m
