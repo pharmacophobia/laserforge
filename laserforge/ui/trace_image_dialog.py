@@ -3,12 +3,28 @@ LaserForge Trace Image Dialog.
 Interactive, professional-grade image-to-vector tracing studio (LightBurn-style Trace Image tool).
 Provides:
   - 4 View Modes: Overlay (Image + Vectors), Binary Mask (B&W), Vectors Only, and Original Image
-  - 3 Detection Engines: Standard Threshold (Global / Otsu), Adaptive Gaussian (Photos / Uneven Lighting), Canny Edge Sketch
-  - Curve & Corner Refinement: Sub-pixel RDP polygon simplification, corner-preserving Chaikin curve smoothing, turning-angle threshold
-  - Filtering: Bilateral edge-preserving denoise pre-filter, dust/speck min area filter, ignore image border, ignore inner holes
-  - Presets: Clean Logo / Clipart, Photo / Sketch, Detailed Text / Line Art, Outer Silhouette Only, Canny Edge Sketch
-  - Real-time responsive live preview (<15ms per frame) with zoom & pan controls, node visualization, and translucent fill preview
-  - Native PathEntity canvas insertion & direct standalone SVG export
+  - 4 Detection Engines:
+      1. Feature Outlines (Gradient Magnitude / Sobel) - explicitly traces physical boundaries of all features
+      2. Standard Threshold (Global / Otsu) - for clean high-contrast black & white graphics
+      3. Adaptive Gaussian - for uneven lighting and document scans
+      4. Canny Edge Sketch - multi-stage edge detection
+  - Pre-Processing & Enhancement:
+      - Alpha compositing onto pure white (preserves transparency without black box artifacts)
+      - Contrast & Brightness adjustment sliders
+      - High-Pass frequency filter (LightBurn feature to remove uneven shadows and isolate feature outlines)
+      - Local Contrast Enhancement (CLAHE)
+  - Curve & Corner Refinement:
+      - Sub-pixel RDP polygon simplification
+      - Corner-preserving Chaikin curve smoothing (preserves 90° & sharp corners while smoothing curves)
+      - Turning-angle threshold & subdivision control
+  - Filtering & Edge Continuity:
+      - Edge dilation to bridge gaps and form closed loops
+      - Bilateral edge-preserving denoise pre-filter
+      - Dust / speck min area filter
+      - Ignore outer image border & ignore inner holes
+  - Presets: Feature Outlines, Clean Logo / Clipart, Photo / Sketch (High-Pass), Detailed Line Art, Outer Silhouette
+  - Real-time responsive live preview (<15ms per frame) with zoom & pan, node visualization, and fill preview
+  - Direct canvas insertion as native PathEntity and standalone SVG file export
 """
 
 from typing import List, Tuple, Optional, Dict, Any
@@ -37,7 +53,7 @@ from laserforge.core.image_tracer import ImageTracer, otsu_threshold
 class TracePreviewCanvas(QWidget):
     """
     Interactive zoomable & pannable canvas displaying the source image,
-    the binary threshold mask, and traced vector paths.
+    the binary threshold/edge mask, and traced vector paths.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,7 +77,7 @@ class TracePreviewCanvas(QWidget):
         self._panning: bool = False
         self._last_mouse = QPointF()
 
-        self.setMinimumSize(450, 420)
+        self.setMinimumSize(460, 440)
         self.setStyleSheet("background-color: #14141a;")
         self.setCursor(Qt.CursorShape.CrossCursor)
 
@@ -210,7 +226,6 @@ class TracePreviewCanvas(QWidget):
             else:
                 painter.fillRect(QRectF(0, 0, w, h), QColor("#000000"))
         elif self.view_mode == "vectors":
-            # Solid dark slate workspace background
             painter.fillRect(QRectF(0, 0, w, h), QColor("#1c1d26"))
         elif self.view_mode == "original":
             painter.setOpacity(1.0)
@@ -236,7 +251,7 @@ class TracePreviewCanvas(QWidget):
         if show_vectors and hasattr(self, "_cached_path") and not self._cached_path.isEmpty():
             # Translucent fill preview
             if self.show_fill:
-                fill_color = QColor(0, 229, 255, 40) if self.view_mode != "mask" else QColor(255, 64, 129, 50)
+                fill_color = QColor(0, 229, 255, 38) if self.view_mode != "mask" else QColor(255, 64, 129, 45)
                 painter.setBrush(QBrush(fill_color))
             else:
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -266,8 +281,30 @@ class TraceImageDialog(QDialog):
     """Full-featured LightBurn-grade image-to-vector tracing studio."""
 
     PRESETS = {
-        "Clean Logo / Clipart (Default)": {
-            "mode": 0,  # Standard Otsu
+        "Feature Outlines & Edges (Best for Artwork / Photos)": {
+            "mode": 0,  # Feature Outlines (Sobel Magnitude)
+            "edge_sens": 30,
+            "edge_dilation": 1,
+            "clahe": True,
+            "contrast": 15,
+            "brightness": 0,
+            "high_pass": 0.0,
+            "invert": False,
+            "smoothness": 0.6,
+            "corner_sharpness": 65,
+            "smooth_iter": 1,
+            "noise_filter": 12,
+            "denoise_blur": 0.5,
+            "ignore_border": True,
+            "ignore_holes": False,
+            "desc": "Extracts physical boundaries between all internal visual features, shaded zones, and colors."
+        },
+        "Clean Logo / Clipart (B&W)": {
+            "mode": 1,  # Standard Otsu
+            "clahe": False,
+            "contrast": 0,
+            "brightness": 0,
+            "high_pass": 0.0,
             "invert": False,
             "smoothness": 0.8,
             "corner_sharpness": 65,
@@ -276,12 +313,16 @@ class TraceImageDialog(QDialog):
             "denoise_blur": 0.5,
             "ignore_border": True,
             "ignore_holes": False,
-            "desc": "Best for high-contrast logos, black & white clipart, and crisp graphic icons."
+            "desc": "Optimal for high-contrast black & white graphics, logos, and silhouette icons."
         },
-        "Photo / Sketch (Adaptive Gaussian)": {
-            "mode": 1,  # Adaptive
+        "Photo / Sketch (High-Pass + Adaptive)": {
+            "mode": 2,  # Adaptive Gaussian
             "adaptive_bs": 15,
             "adaptive_c": 4.0,
+            "high_pass": 20.0,
+            "contrast": 20,
+            "brightness": 0,
+            "clahe": True,
             "invert": False,
             "smoothness": 0.6,
             "corner_sharpness": 65,
@@ -290,10 +331,16 @@ class TraceImageDialog(QDialog):
             "denoise_blur": 1.0,
             "ignore_border": True,
             "ignore_holes": False,
-            "desc": "Gaussian thresholding adapts to uneven lighting, photo gradients, and pencil sketches."
+            "desc": "LightBurn High-Pass filter strips broad shadows and traces fine feature details in photos."
         },
-        "Detailed Text & Line Art": {
-            "mode": 0,  # Standard Otsu
+        "Detailed Line Art & Text": {
+            "mode": 0,  # Feature Outlines
+            "edge_sens": 25,
+            "edge_dilation": 1,
+            "clahe": True,
+            "contrast": 10,
+            "brightness": 0,
+            "high_pass": 0.0,
             "invert": False,
             "smoothness": 0.3,
             "corner_sharpness": 40,
@@ -302,32 +349,23 @@ class TraceImageDialog(QDialog):
             "denoise_blur": 0.0,
             "ignore_border": True,
             "ignore_holes": False,
-            "desc": "Ultra-low simplification with 0 curve rounding to preserve sharp serif fonts and lines."
+            "desc": "Preserves fine lines, sharp text serifs, and high-precision mechanical drawings."
         },
-        "Outer Silhouette Only (No Holes)": {
-            "mode": 0,  # Standard Otsu
+        "Outer Silhouette Only (Cutout)": {
+            "mode": 1,  # Standard Otsu
+            "clahe": False,
+            "contrast": 0,
+            "brightness": 0,
+            "high_pass": 0.0,
             "invert": False,
             "smoothness": 1.2,
             "corner_sharpness": 70,
-            "smooth_iter": 2,  # Organic smooth
+            "smooth_iter": 2,
             "noise_filter": 25,
             "denoise_blur": 1.0,
             "ignore_border": True,
             "ignore_holes": True,
             "desc": "Traces outermost perimeter only — ideal for sticker cut lines, badge cutouts, and base plates."
-        },
-        "Canny Edge Sketch": {
-            "mode": 2,  # Canny
-            "canny_thresh": 100,
-            "invert": False,
-            "smoothness": 0.8,
-            "corner_sharpness": 60,
-            "smooth_iter": 1,
-            "noise_filter": 10,
-            "denoise_blur": 0.5,
-            "ignore_border": True,
-            "ignore_holes": False,
-            "desc": "Extracts gradient outline boundaries directly via Canny edge detection."
         }
     }
 
@@ -346,7 +384,7 @@ class TraceImageDialog(QDialog):
         self.active_layer_id = active_layer_id
 
         self.setWindowTitle(f"Trace Image to Vector (SVG Studio) — {image_name}")
-        self.resize(1160, 740)
+        self.resize(1180, 760)
 
         self.pixel_contours: List[List[Tuple[float, float]]] = []
         self.result_path_entity: Optional[PathEntity] = None
@@ -368,8 +406,8 @@ class TraceImageDialog(QDialog):
         self._init_ui()
         self.canvas.set_source_image(self.pil_image)
 
-        # Initial Otsu calculation and preset load
-        self._apply_preset("Clean Logo / Clipart (Default)")
+        # Initial Preset: Feature Outlines
+        self._apply_preset("Feature Outlines & Edges (Best for Artwork / Photos)")
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -498,7 +536,7 @@ class TraceImageDialog(QDialog):
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll_area.setFixedWidth(400)
+        scroll_area.setFixedWidth(410)
 
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
@@ -517,33 +555,137 @@ class TraceImageDialog(QDialog):
         self.preset_combo.currentTextChanged.connect(self._on_preset_selected)
         preset_vbox.addWidget(self.preset_combo)
 
-        self.lbl_preset_desc = QLabel(self.PRESETS["Clean Logo / Clipart (Default)"]["desc"])
+        self.lbl_preset_desc = QLabel(self.PRESETS["Feature Outlines & Edges (Best for Artwork / Photos)"]["desc"])
         self.lbl_preset_desc.setStyleSheet("color: #90a4ae; font-size: 11px; font-style: italic;")
         self.lbl_preset_desc.setWordWrap(True)
         preset_vbox.addWidget(self.lbl_preset_desc)
 
         right_layout.addWidget(preset_group)
 
-        # 2. Detection & Thresholding Group
-        detect_group = QGroupBox("Detection Engine & Binarization")
+        # 2. Image Pre-Processing & Enhancement Group
+        pre_group = QGroupBox("Image Pre-Processing & Enhancement")
+        pre_grid = QGridLayout(pre_group)
+        pre_grid.setSpacing(6)
+
+        # Contrast
+        pre_grid.addWidget(QLabel("Contrast:"), 0, 0)
+        self.contrast_slider = QSlider(Qt.Orientation.Horizontal)
+        self.contrast_slider.setRange(-100, 100)
+        self.contrast_slider.setValue(15)
+        self.contrast_slider.valueChanged.connect(self._on_contrast_slider_changed)
+        pre_grid.addWidget(self.contrast_slider, 0, 1)
+
+        self.contrast_spin = QSpinBox()
+        self.contrast_spin.setRange(-100, 100)
+        self.contrast_spin.setValue(15)
+        self.contrast_spin.setSuffix("%")
+        self.contrast_spin.setFixedWidth(65)
+        self.contrast_spin.valueChanged.connect(self._on_contrast_spin_changed)
+        pre_grid.addWidget(self.contrast_spin, 0, 2)
+
+        # Brightness
+        pre_grid.addWidget(QLabel("Brightness:"), 1, 0)
+        self.brightness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.brightness_slider.setRange(-100, 100)
+        self.brightness_slider.setValue(0)
+        self.brightness_slider.valueChanged.connect(self._on_brightness_slider_changed)
+        pre_grid.addWidget(self.brightness_slider, 1, 1)
+
+        self.brightness_spin = QSpinBox()
+        self.brightness_spin.setRange(-100, 100)
+        self.brightness_spin.setValue(0)
+        self.brightness_spin.setSuffix("%")
+        self.brightness_spin.setFixedWidth(65)
+        self.brightness_spin.valueChanged.connect(self._on_brightness_spin_changed)
+        pre_grid.addWidget(self.brightness_spin, 1, 2)
+
+        # High-Pass Filter (LightBurn feature)
+        pre_grid.addWidget(QLabel("High-Pass:"), 2, 0)
+        self.high_pass_slider = QSlider(Qt.Orientation.Horizontal)
+        self.high_pass_slider.setRange(0, 600)  # maps to 0.0 - 60.0 px
+        self.high_pass_slider.setValue(0)
+        self.high_pass_slider.valueChanged.connect(self._on_high_pass_slider_changed)
+        pre_grid.addWidget(self.high_pass_slider, 2, 1)
+
+        self.high_pass_spin = QDoubleSpinBox()
+        self.high_pass_spin.setRange(0.0, 60.0)
+        self.high_pass_spin.setSingleStep(1.0)
+        self.high_pass_spin.setValue(0.0)
+        self.high_pass_spin.setSuffix(" px")
+        self.high_pass_spin.setFixedWidth(65)
+        self.high_pass_spin.setToolTip("LightBurn high-pass filter: removes uneven background shadows and pulls out feature boundaries")
+        self.high_pass_spin.valueChanged.connect(self._on_high_pass_spin_changed)
+        pre_grid.addWidget(self.high_pass_spin, 2, 2)
+
+        # CLAHE (Local Contrast Boost)
+        self.chk_clahe = QCheckBox("Enhance Local Contrast (CLAHE)")
+        self.chk_clahe.setChecked(True)
+        self.chk_clahe.setToolTip("Equalizes local contrast so subtle feature boundaries become sharp and prominent")
+        self.chk_clahe.toggled.connect(self._on_user_param_changed)
+        pre_grid.addWidget(self.chk_clahe, 3, 0, 1, 3)
+
+        right_layout.addWidget(pre_group)
+
+        # 3. Detection Engine & Thresholding Group
+        detect_group = QGroupBox("Detection Engine")
         detect_grid = QGridLayout(detect_group)
         detect_grid.setSpacing(6)
 
         detect_grid.addWidget(QLabel("Mode:"), 0, 0)
         self.combo_mode = QComboBox()
+        self.combo_mode.addItem("Feature Outlines (Sobel / Gradient)")
         self.combo_mode.addItem("Standard Threshold (Global / Otsu)")
-        self.combo_mode.addItem("Adaptive Gaussian (Photos / Lighting)")
+        self.combo_mode.addItem("Adaptive Gaussian (Uneven Lighting)")
         self.combo_mode.addItem("Canny Edge Sketch")
         self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
         detect_grid.addWidget(self.combo_mode, 0, 1, 1, 2)
 
         # Invert toggle
         self.chk_invert = QCheckBox("Invert (Trace Light on Dark)")
-        self.chk_invert.setToolTip("Inverts black and white foreground detection")
+        self.chk_invert.setToolTip("Inverts foreground/background detection")
         self.chk_invert.toggled.connect(self._on_user_param_changed)
         detect_grid.addWidget(self.chk_invert, 1, 0, 1, 3)
 
-        # Sub-container: Standard Threshold Controls
+        # Sub-container 0: Feature Outlines Controls
+        self.widget_feature = QWidget()
+        w_feat_layout = QGridLayout(self.widget_feature)
+        w_feat_layout.setContentsMargins(0, 0, 0, 0)
+        w_feat_layout.setSpacing(6)
+
+        w_feat_layout.addWidget(QLabel("Sensitivity:"), 0, 0)
+        self.feat_sens_slider = QSlider(Qt.Orientation.Horizontal)
+        self.feat_sens_slider.setRange(5, 200)
+        self.feat_sens_slider.setValue(30)
+        self.feat_sens_slider.valueChanged.connect(self._on_feat_sens_slider_changed)
+        w_feat_layout.addWidget(self.feat_sens_slider, 0, 1)
+
+        self.feat_sens_spin = QSpinBox()
+        self.feat_sens_spin.setRange(5, 200)
+        self.feat_sens_spin.setValue(30)
+        self.feat_sens_spin.setFixedWidth(55)
+        self.feat_sens_spin.setToolTip("Lower sensitivity detects faint subtle outlines; higher extracts only bold borders")
+        self.feat_sens_spin.valueChanged.connect(self._on_feat_sens_spin_changed)
+        w_feat_layout.addWidget(self.feat_sens_spin, 0, 2)
+
+        w_feat_layout.addWidget(QLabel("Continuity:"), 1, 0)
+        self.feat_dilation_slider = QSlider(Qt.Orientation.Horizontal)
+        self.feat_dilation_slider.setRange(0, 4)
+        self.feat_dilation_slider.setValue(1)
+        self.feat_dilation_slider.valueChanged.connect(self._on_feat_dilation_slider_changed)
+        w_feat_layout.addWidget(self.feat_dilation_slider, 1, 1)
+
+        self.feat_dilation_spin = QSpinBox()
+        self.feat_dilation_spin.setRange(0, 4)
+        self.feat_dilation_spin.setValue(1)
+        self.feat_dilation_spin.setSuffix(" px")
+        self.feat_dilation_spin.setFixedWidth(55)
+        self.feat_dilation_spin.setToolTip("Bridges small gaps in outlines to ensure solid closed contour loops")
+        self.feat_dilation_spin.valueChanged.connect(self._on_feat_dilation_spin_changed)
+        w_feat_layout.addWidget(self.feat_dilation_spin, 1, 2)
+
+        detect_grid.addWidget(self.widget_feature, 2, 0, 1, 3)
+
+        # Sub-container 1: Standard Threshold Controls
         self.widget_thresh = QWidget()
         w_thresh_layout = QGridLayout(self.widget_thresh)
         w_thresh_layout.setContentsMargins(0, 0, 0, 0)
@@ -563,13 +705,14 @@ class TraceImageDialog(QDialog):
         self.thresh_spin.valueChanged.connect(self._on_thresh_spin_changed)
         w_thresh_layout.addWidget(self.thresh_spin, 0, 2)
 
-        self.btn_auto_otsu = QPushButton("⚡ Auto Threshold (Otsu)")
+        self.btn_auto_otsu = QPushButton("⚡ Auto Cutoff (Otsu)")
         self.btn_auto_otsu.setToolTip("Automatically compute optimal binarization threshold via OpenCV Otsu")
         self.btn_auto_otsu.clicked.connect(self._auto_otsu)
         w_thresh_layout.addWidget(self.btn_auto_otsu, 1, 0, 1, 3)
-        detect_grid.addWidget(self.widget_thresh, 2, 0, 1, 3)
+        detect_grid.addWidget(self.widget_thresh, 3, 0, 1, 3)
+        self.widget_thresh.hide()
 
-        # Sub-container: Adaptive Gaussian Controls
+        # Sub-container 2: Adaptive Gaussian Controls
         self.widget_adaptive = QWidget()
         w_adapt_layout = QGridLayout(self.widget_adaptive)
         w_adapt_layout.setContentsMargins(0, 0, 0, 0)
@@ -605,10 +748,10 @@ class TraceImageDialog(QDialog):
         self.adaptive_c_spin.valueChanged.connect(self._on_adaptive_c_spin_changed)
         w_adapt_layout.addWidget(self.adaptive_c_spin, 1, 2)
 
-        detect_grid.addWidget(self.widget_adaptive, 3, 0, 1, 3)
+        detect_grid.addWidget(self.widget_adaptive, 4, 0, 1, 3)
         self.widget_adaptive.hide()
 
-        # Sub-container: Canny Edge Controls
+        # Sub-container 3: Canny Edge Controls
         self.widget_canny = QWidget()
         w_canny_layout = QGridLayout(self.widget_canny)
         w_canny_layout.setContentsMargins(0, 0, 0, 0)
@@ -628,12 +771,27 @@ class TraceImageDialog(QDialog):
         self.canny_spin.valueChanged.connect(self._on_canny_spin_changed)
         w_canny_layout.addWidget(self.canny_spin, 0, 2)
 
-        detect_grid.addWidget(self.widget_canny, 4, 0, 1, 3)
+        w_canny_layout.addWidget(QLabel("Continuity:"), 1, 0)
+        self.canny_dilation_slider = QSlider(Qt.Orientation.Horizontal)
+        self.canny_dilation_slider.setRange(0, 4)
+        self.canny_dilation_slider.setValue(1)
+        self.canny_dilation_slider.valueChanged.connect(self._on_canny_dilation_slider_changed)
+        w_canny_layout.addWidget(self.canny_dilation_slider, 1, 1)
+
+        self.canny_dilation_spin = QSpinBox()
+        self.canny_dilation_spin.setRange(0, 4)
+        self.canny_dilation_spin.setValue(1)
+        self.canny_dilation_spin.setSuffix(" px")
+        self.canny_dilation_spin.setFixedWidth(55)
+        self.canny_dilation_spin.valueChanged.connect(self._on_canny_dilation_spin_changed)
+        w_canny_layout.addWidget(self.canny_dilation_spin, 1, 2)
+
+        detect_grid.addWidget(self.widget_canny, 5, 0, 1, 3)
         self.widget_canny.hide()
 
         right_layout.addWidget(detect_group)
 
-        # 3. Vector Refinement & Curve Smoothing Group
+        # 4. Vector Refinement & Curve Smoothing Group
         refine_group = QGroupBox("Vector Smoothing & Corner Control")
         refine_grid = QGridLayout(refine_group)
         refine_grid.setSpacing(6)
@@ -642,14 +800,14 @@ class TraceImageDialog(QDialog):
         refine_grid.addWidget(QLabel("Simplification:"), 0, 0)
         self.smooth_slider = QSlider(Qt.Orientation.Horizontal)
         self.smooth_slider.setRange(5, 400)  # maps to 0.05 - 4.00 px
-        self.smooth_slider.setValue(80)
+        self.smooth_slider.setValue(60)
         self.smooth_slider.valueChanged.connect(self._on_smooth_slider_changed)
         refine_grid.addWidget(self.smooth_slider, 0, 1)
 
         self.smooth_spin = QDoubleSpinBox()
         self.smooth_spin.setRange(0.05, 5.0)
         self.smooth_spin.setSingleStep(0.1)
-        self.smooth_spin.setValue(0.8)
+        self.smooth_spin.setValue(0.6)
         self.smooth_spin.setSuffix(" px")
         self.smooth_spin.setFixedWidth(70)
         self.smooth_spin.valueChanged.connect(self._on_smooth_spin_changed)
@@ -720,7 +878,7 @@ class TraceImageDialog(QDialog):
 
         right_layout.addWidget(refine_group)
 
-        # 4. Output Dimensions & Target Layer Group
+        # 5. Output Dimensions & Target Layer Group
         out_group = QGroupBox("Vector Output Dimensions")
         out_grid = QGridLayout(out_group)
         out_grid.setSpacing(6)
@@ -760,7 +918,7 @@ class TraceImageDialog(QDialog):
         right_layout.addWidget(out_group)
         right_layout.addStretch(1)
 
-        # 5. Action Buttons
+        # 6. Action Buttons
         btn_apply = QPushButton("✔  Apply & Insert Vector")
         btn_apply.setStyleSheet(
             "background-color: #2e7d32; color: white; font-weight: bold; padding: 10px; font-size: 13px; border-radius: 4px;"
@@ -786,7 +944,6 @@ class TraceImageDialog(QDialog):
     # -----------------------------------------------------------------
     def _set_view_mode(self, mode: str):
         self.canvas.set_view_mode(mode)
-        # Enable opacity slider only for overlay mode
         is_overlay = (mode == "overlay")
         self.opacity_slider.setEnabled(is_overlay)
         self.lbl_opacity.setEnabled(is_overlay)
@@ -816,39 +973,63 @@ class TraceImageDialog(QDialog):
             self.combo_mode.setCurrentIndex(mode_idx)
             self._update_mode_widgets(mode_idx)
 
+            # Pre-processing
+            c = p.get("contrast", 0)
+            self.contrast_spin.setValue(c)
+            self.contrast_slider.setValue(c)
+
+            b = p.get("brightness", 0)
+            self.brightness_spin.setValue(b)
+            self.brightness_slider.setValue(b)
+
+            hp = p.get("high_pass", 0.0)
+            self.high_pass_spin.setValue(hp)
+            self.high_pass_slider.setValue(int(hp * 10))
+
+            self.chk_clahe.setChecked(p.get("clahe", False))
             self.chk_invert.setChecked(p.get("invert", False))
 
+            # Mode specific
             if mode_idx == 0:
+                # Feature Outlines
+                sens = p.get("edge_sens", 30)
+                self.feat_sens_spin.setValue(sens)
+                self.feat_sens_slider.setValue(sens)
+                dil = p.get("edge_dilation", 1)
+                self.feat_dilation_spin.setValue(dil)
+                self.feat_dilation_slider.setValue(dil)
+            elif mode_idx == 1:
                 # Standard Otsu
                 gray = np.array(self.pil_image.convert("L"))
                 auto_t = otsu_threshold(gray)
                 self.thresh_slider.setValue(auto_t)
                 self.thresh_spin.setValue(auto_t)
-            elif mode_idx == 1:
+            elif mode_idx == 2:
                 # Adaptive
                 bs = p.get("adaptive_bs", 15)
-                c = p.get("adaptive_c", 4.0)
+                c_val = p.get("adaptive_c", 4.0)
                 self.adaptive_bs_spin.setValue(bs)
                 self.adaptive_bs_slider.setValue((bs - 1) // 2)
-                self.adaptive_c_spin.setValue(c)
-                self.adaptive_c_slider.setValue(int(c))
-            elif mode_idx == 2:
+                self.adaptive_c_spin.setValue(c_val)
+                self.adaptive_c_slider.setValue(int(c_val))
+            elif mode_idx == 3:
                 # Canny
                 ct = p.get("canny_thresh", 100)
                 self.canny_slider.setValue(ct)
                 self.canny_spin.setValue(ct)
+                dil = p.get("edge_dilation", 1)
+                self.canny_dilation_spin.setValue(dil)
+                self.canny_dilation_slider.setValue(dil)
 
-            # Smoothness
-            sm = p.get("smoothness", 0.8)
+            # Smoothness & Corners
+            sm = p.get("smoothness", 0.6)
             self.smooth_spin.setValue(sm)
             self.smooth_slider.setValue(int(sm * 100))
 
-            # Corner
             cn = p.get("corner_sharpness", 65)
             self.corner_spin.setValue(cn)
             self.corner_slider.setValue(cn)
 
-            # Curve smoothing
             self.combo_smooth_iter.setCurrentIndex(p.get("smooth_iter", 1))
 
             # Filters
@@ -881,13 +1062,85 @@ class TraceImageDialog(QDialog):
         self._schedule_calc()
 
     def _update_mode_widgets(self, idx: int):
-        self.widget_thresh.setVisible(idx == 0)
-        self.widget_adaptive.setVisible(idx == 1)
-        self.widget_canny.setVisible(idx == 2)
+        self.widget_feature.setVisible(idx == 0)
+        self.widget_thresh.setVisible(idx == 1)
+        self.widget_adaptive.setVisible(idx == 2)
+        self.widget_canny.setVisible(idx == 3)
 
     # -----------------------------------------------------------------
     # Synced Sliders & SpinBoxes
     # -----------------------------------------------------------------
+    def _on_contrast_slider_changed(self, val: int):
+        self.contrast_spin.blockSignals(True)
+        self.contrast_spin.setValue(val)
+        self.contrast_spin.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_contrast_spin_changed(self, val: int):
+        self.contrast_slider.blockSignals(True)
+        self.contrast_slider.setValue(val)
+        self.contrast_slider.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_brightness_slider_changed(self, val: int):
+        self.brightness_spin.blockSignals(True)
+        self.brightness_spin.setValue(val)
+        self.brightness_spin.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_brightness_spin_changed(self, val: int):
+        self.brightness_slider.blockSignals(True)
+        self.brightness_slider.setValue(val)
+        self.brightness_slider.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_high_pass_slider_changed(self, val: int):
+        hp = val / 10.0
+        self.high_pass_spin.blockSignals(True)
+        self.high_pass_spin.setValue(hp)
+        self.high_pass_spin.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_high_pass_spin_changed(self, val: float):
+        self.high_pass_slider.blockSignals(True)
+        self.high_pass_slider.setValue(int(val * 10))
+        self.high_pass_slider.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_feat_sens_slider_changed(self, val: int):
+        self.feat_sens_spin.blockSignals(True)
+        self.feat_sens_spin.setValue(val)
+        self.feat_sens_spin.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_feat_sens_spin_changed(self, val: int):
+        self.feat_sens_slider.blockSignals(True)
+        self.feat_sens_slider.setValue(val)
+        self.feat_sens_slider.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_feat_dilation_slider_changed(self, val: int):
+        self.feat_dilation_spin.blockSignals(True)
+        self.feat_dilation_spin.setValue(val)
+        self.feat_dilation_spin.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_feat_dilation_spin_changed(self, val: int):
+        self.feat_dilation_slider.blockSignals(True)
+        self.feat_dilation_slider.setValue(val)
+        self.feat_dilation_slider.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
     def _on_thresh_slider_changed(self, val: int):
         self.thresh_spin.blockSignals(True)
         self.thresh_spin.setValue(val)
@@ -903,8 +1156,8 @@ class TraceImageDialog(QDialog):
         self._schedule_calc()
 
     def _auto_otsu(self):
-        if self.combo_mode.currentIndex() != 0:
-            self.combo_mode.setCurrentIndex(0)
+        if self.combo_mode.currentIndex() != 1:
+            self.combo_mode.setCurrentIndex(1)
         gray = np.array(self.pil_image.convert("L"))
         thresh = otsu_threshold(gray)
         self.thresh_slider.setValue(thresh)
@@ -955,6 +1208,20 @@ class TraceImageDialog(QDialog):
         self.canny_slider.blockSignals(True)
         self.canny_slider.setValue(val)
         self.canny_slider.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_canny_dilation_slider_changed(self, val: int):
+        self.canny_dilation_spin.blockSignals(True)
+        self.canny_dilation_spin.setValue(val)
+        self.canny_dilation_spin.blockSignals(False)
+        self._mark_custom_preset()
+        self._schedule_calc()
+
+    def _on_canny_dilation_spin_changed(self, val: int):
+        self.canny_dilation_slider.blockSignals(True)
+        self.canny_dilation_slider.setValue(val)
+        self.canny_dilation_slider.blockSignals(False)
         self._mark_custom_preset()
         self._schedule_calc()
 
@@ -1012,18 +1279,29 @@ class TraceImageDialog(QDialog):
         t0 = time.perf_counter()
 
         mode_idx = self.combo_mode.currentIndex()
-        if mode_idx == 1:
-            mode = "adaptive"
-            threshold = None
-        elif mode_idx == 2:
-            mode = "edge"
-            threshold = self.canny_spin.value()
-        else:
+        if mode_idx == 0:
+            mode = "feature"
+            threshold = self.feat_sens_spin.value()
+            edge_dilation = self.feat_dilation_spin.value()
+        elif mode_idx == 1:
             mode = "threshold"
             threshold = self.thresh_spin.value()
+            edge_dilation = 0
+        elif mode_idx == 2:
+            mode = "adaptive"
+            threshold = None
+            edge_dilation = 0
+        else:  # mode_idx == 3
+            mode = "edge"
+            threshold = self.canny_spin.value()
+            edge_dilation = self.canny_dilation_spin.value()
 
         invert = self.chk_invert.isChecked()
         blur = self.blur_spin.value()
+        contrast = float(self.contrast_spin.value())
+        brightness = float(self.brightness_spin.value())
+        high_pass = self.high_pass_spin.value()
+        clahe = self.chk_clahe.isChecked()
         adaptive_bs = self.adaptive_bs_spin.value()
         adaptive_c = self.adaptive_c_spin.value()
 
@@ -1036,7 +1314,12 @@ class TraceImageDialog(QDialog):
                 invert=invert,
                 blur_radius=blur,
                 adaptive_block_size=adaptive_bs,
-                adaptive_c=adaptive_c
+                adaptive_c=adaptive_c,
+                contrast=contrast,
+                brightness=brightness,
+                high_pass=high_pass,
+                clahe=clahe,
+                edge_dilation=edge_dilation
             )
         except Exception as e:
             self.lbl_stats.setText(f"Error computing mask: {e}")

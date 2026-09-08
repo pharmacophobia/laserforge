@@ -254,6 +254,10 @@ class TestLaserForgeCore(unittest.TestCase):
         c_sil = ImageTracer.trace_image(img, mode="threshold", ignore_holes=True)
         self.assertEqual(len(c_sil), 1)
 
+        # Feature Outlines (Sobel gradient magnitude)
+        c_feat = ImageTracer.trace_image(img, mode="feature", threshold=30, clahe=True)
+        self.assertGreaterEqual(len(c_feat), 2)
+
         # Adaptive Gaussian mode
         c_adapt = ImageTracer.trace_image(img, mode="adaptive", adaptive_block_size=15, adaptive_c=4.0)
         self.assertGreaterEqual(len(c_adapt), 1)
@@ -261,6 +265,13 @@ class TestLaserForgeCore(unittest.TestCase):
         # Canny edge mode
         c_edge = ImageTracer.trace_image(img, mode="edge", threshold=100)
         self.assertGreaterEqual(len(c_edge), 1)
+
+        # Transparent RGBA compositing test
+        rgba_img = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+        d_rgba = ImageDraw.Draw(rgba_img)
+        d_rgba.rectangle([20, 20, 80, 80], fill=(50, 50, 50, 255))
+        c_trans = ImageTracer.trace_image(rgba_img, mode="feature")
+        self.assertGreaterEqual(len(c_trans), 1)
 
     def test_trace_image_dialog_presets(self):
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -278,17 +289,21 @@ class TestLaserForgeCore(unittest.TestCase):
         self.assertGreaterEqual(len(dlg.pixel_contours), 1)
 
         # Switch to Silhouette preset
-        dlg._apply_preset("Outer Silhouette Only (No Holes)")
+        dlg._apply_preset("Outer Silhouette Only (Cutout)")
         self.assertEqual(len(dlg.pixel_contours), 1)
 
         # Switch to Clean Logo preset
-        dlg._apply_preset("Clean Logo / Clipart (Default)")
+        dlg._apply_preset("Clean Logo / Clipart (B&W)")
         self.assertEqual(len(dlg.pixel_contours), 2)
+
+        # Switch to Feature Outlines preset
+        dlg._apply_preset("Feature Outlines & Edges (Best for Artwork / Photos)")
+        self.assertGreaterEqual(len(dlg.pixel_contours), 2)
 
         # Apply and create PathEntity
         dlg._apply_and_close()
         self.assertIsNotNone(dlg.result_path_entity)
-        self.assertEqual(len(dlg.result_path_entity.contours), 2)
+        self.assertGreaterEqual(len(dlg.result_path_entity.contours), 2)
 
 
 if __name__ == "__main__":

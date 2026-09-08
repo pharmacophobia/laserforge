@@ -114,25 +114,75 @@ class ImageTracer:
     def get_binary_mask(
         img: Image.Image,
         threshold: Optional[int] = None,
-        mode: str = "threshold",
+        mode: str = "feature",
         invert: bool = False,
         blur_radius: float = 0.5,
         adaptive_block_size: int = 15,
-        adaptive_c: float = 4.0
+        adaptive_c: float = 4.0,
+        contrast: float = 0.0,
+        brightness: float = 0.0,
+        high_pass: float = 0.0,
+        clahe: bool = False,
+        edge_dilation: int = 1
     ) -> np.ndarray:
         """
         Binarizes a PIL image into a clean 2D uint8 mask (0 or 255).
         Foreground (cut lines/burn area) = 255, background = 0.
+        Supports:
+          - Alpha transparency compositing onto clean white background
+          - Contrast & Brightness adjustments
+          - Local Contrast Enhancement (CLAHE)
+          - High-Pass frequency filter (removes uneven lighting/shadows)
+          - Feature Outlines (Sobel gradient magnitude) for extracting internal features
+          - Standard Otsu / manual global thresholding
+          - Adaptive Gaussian thresholding
+          - Canny Edge detection
         """
-        # Convert PIL image to grayscale uint8 numpy array
-        gray = np.array(img.convert("L"), dtype=np.uint8)
+        # 1. Alpha composite onto clean white background to avoid transparent black blobs
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            composite = Image.alpha_composite(bg, img.convert("RGBA"))
+            gray = np.array(composite.convert("L"), dtype=np.uint8)
+        else:
+            gray = np.array(img.convert("L"), dtype=np.uint8)
 
-        # Bilateral / edge-preserving denoising
+        # 2. Bilateral / edge-preserving denoising
         if blur_radius > 0.1:
             k = max(3, int(blur_radius * 2) | 1)
             gray = cv2.bilateralFilter(gray, d=k, sigmaColor=40, sigmaSpace=k)
 
-        if mode == "adaptive":
+        # 3. Contrast & Brightness adjustment (-100 to +100)
+        if contrast != 0.0 or brightness != 0.0:
+            alpha = max(0.0, (contrast + 100.0) / 100.0)
+            beta = brightness * 1.28
+            gray = np.clip(alpha * gray.astype(np.float32) + beta, 0, 255).astype(np.uint8)
+
+        # 4. CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        if clahe:
+            clahe_obj = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            gray = clahe_obj.apply(gray)
+
+        # 5. High-Pass frequency filter (removes broad shadows and lighting gradients)
+        if high_pass > 0.5:
+            k_hp = max(3, int(high_pass * 2) | 1)
+            blur_hp = cv2.GaussianBlur(gray, (k_hp, k_hp), 0)
+            hp = gray.astype(np.int16) - blur_hp.astype(np.int16) + 128
+            gray = np.clip(hp, 0, 255).astype(np.uint8)
+
+        # 6. Extraction Engine
+        if mode in ("feature", "gradient"):
+            # Feature Outlines: Gradient magnitude extracts the physical outlines between all features
+            sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+            sy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+            mag = cv2.magnitude(sx, sy)
+            mag_u8 = np.clip(mag, 0, 255).astype(np.uint8)
+            t = threshold if threshold is not None else 30
+            thresh_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+            _, binary = cv2.threshold(mag_u8, t, 255, thresh_type)
+            if edge_dilation > 0:
+                kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (edge_dilation * 2 + 1, edge_dilation * 2 + 1))
+                binary = cv2.dilate(binary, kd)
+        elif mode == "adaptive":
             bs = max(3, int(adaptive_block_size) | 1)
             thresh_type = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV
             binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, thresh_type, bs, int(adaptive_c))
@@ -141,10 +191,10 @@ class ImageTracer:
             t_low = max(10, t // 2)
             t_high = min(255, max(30, t))
             edges = cv2.Canny(gray, t_low, t_high)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-            binary = cv2.dilate(edges, kernel)
-            if invert:
-                binary = cv2.bitwise_not(binary)
+            if edge_dilation > 0:
+                kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (edge_dilation * 2 + 1, edge_dilation * 2 + 1))
+                edges = cv2.dilate(edges, kd)
+            binary = cv2.bitwise_not(edges) if invert else edges
         else:
             # Standard Global Threshold
             if threshold is None:
@@ -153,19 +203,16 @@ class ImageTracer:
             thresh_type = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV
             _, binary = cv2.threshold(gray, threshold, 255, thresh_type)
 
-        # Morphological clean up to eliminate single isolated pixel noise
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         return binary
 
     @staticmethod
     def trace_image(
         img: Optional[Image.Image] = None,
         threshold: Optional[int] = None,
-        mode: str = "threshold",
+        mode: str = "feature",
         invert: bool = False,
         blur_radius: float = 0.5,
-        smoothness: float = 1.0,
+        smoothness: float = 0.8,
         corner_sharpness_deg: float = 65.0,
         smooth_iterations: int = 1,
         min_area_pixels: float = 10.0,
@@ -173,6 +220,11 @@ class ImageTracer:
         ignore_border: bool = True,
         adaptive_block_size: int = 15,
         adaptive_c: float = 4.0,
+        contrast: float = 0.0,
+        brightness: float = 0.0,
+        high_pass: float = 0.0,
+        clahe: bool = False,
+        edge_dilation: int = 1,
         scale_x: float = 1.0,
         scale_y: float = 1.0,
         offset_x: float = 0.0,
@@ -195,7 +247,12 @@ class ImageTracer:
                 invert=invert,
                 blur_radius=blur_radius,
                 adaptive_block_size=adaptive_block_size,
-                adaptive_c=adaptive_c
+                adaptive_c=adaptive_c,
+                contrast=contrast,
+                brightness=brightness,
+                high_pass=high_pass,
+                clahe=clahe,
+                edge_dilation=edge_dilation
             )
 
         img_h, img_w = binary.shape[:2]
