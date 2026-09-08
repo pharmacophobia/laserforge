@@ -230,6 +230,66 @@ class TestLaserForgeCore(unittest.TestCase):
             if os.path.exists(img_path):
                 os.unlink(img_path)
 
+    def test_image_tracer_modes_and_smoothing(self):
+        from PIL import ImageDraw
+        import numpy as np
+        from laserforge.core.image_tracer import ImageTracer, corner_preserving_smooth
+
+        # 1. Test corner preserving smoothing: 90-degree rectangle corners kept, circle smoothed
+        rect = np.array([[0.0, 0.0], [50.0, 0.0], [50.0, 50.0], [0.0, 50.0], [0.0, 0.0]])
+        smooth_rect = corner_preserving_smooth(rect, corner_angle_thresh_deg=65.0, iterations=1)
+        self.assertEqual(len(smooth_rect), 5)  # Preserved 4 corners + closing point
+
+        # 2. Test Adaptive Mode and Hole Filtering
+        img = Image.new("RGB", (200, 200), (255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.rectangle([25, 25, 175, 175], fill=(0, 0, 0))
+        d.ellipse([60, 60, 140, 140], fill=(255, 255, 255))
+
+        # Standard with holes
+        c_all = ImageTracer.trace_image(img, mode="threshold", ignore_holes=False)
+        self.assertEqual(len(c_all), 2)
+
+        # Silhouette only (ignore holes)
+        c_sil = ImageTracer.trace_image(img, mode="threshold", ignore_holes=True)
+        self.assertEqual(len(c_sil), 1)
+
+        # Adaptive Gaussian mode
+        c_adapt = ImageTracer.trace_image(img, mode="adaptive", adaptive_block_size=15, adaptive_c=4.0)
+        self.assertGreaterEqual(len(c_adapt), 1)
+
+        # Canny edge mode
+        c_edge = ImageTracer.trace_image(img, mode="edge", threshold=100)
+        self.assertGreaterEqual(len(c_edge), 1)
+
+    def test_trace_image_dialog_presets(self):
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        from PyQt6.QtWidgets import QApplication
+        from PIL import Image, ImageDraw
+        from laserforge.ui.trace_image_dialog import TraceImageDialog
+
+        app = QApplication.instance() or QApplication(["test", "-platform", "offscreen"])
+        img = Image.new("RGB", (160, 160), (255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.rectangle([30, 30, 130, 130], fill=(0, 0, 0))
+        d.ellipse([50, 50, 110, 110], fill=(255, 255, 255))
+
+        dlg = TraceImageDialog(img, "test_item", initial_width_mm=50.0, initial_height_mm=50.0)
+        self.assertGreaterEqual(len(dlg.pixel_contours), 1)
+
+        # Switch to Silhouette preset
+        dlg._apply_preset("Outer Silhouette Only (No Holes)")
+        self.assertEqual(len(dlg.pixel_contours), 1)
+
+        # Switch to Clean Logo preset
+        dlg._apply_preset("Clean Logo / Clipart (Default)")
+        self.assertEqual(len(dlg.pixel_contours), 2)
+
+        # Apply and create PathEntity
+        dlg._apply_and_close()
+        self.assertIsNotNone(dlg.result_path_entity)
+        self.assertEqual(len(dlg.result_path_entity.contours), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
