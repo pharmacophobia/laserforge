@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# LaserForge AI Studio - Standalone Generative Companion Launcher
+# Launches SDXL Turbo Studio in isolated GPU Python environment (8GB VRAM optimized)
+# ==============================================================================
+set -e
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="$DIR:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
+export SDXL_STUDIO_GPU_EXEC="1"
+
+PYENV_PYTHON="$HOME/.pyenv/versions/3.10.13/bin/python"
+if [ -x "$PYENV_PYTHON" ]; then
+    exec "$PYENV_PYTHON" -m laserforge.apps.sdxl_turbo_studio "$@"
+else
+    exec python3 -m laserforge.apps.sdxl_turbo_studio "$@"
+fi

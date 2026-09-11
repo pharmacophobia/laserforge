@@ -9,9 +9,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QPushButton, QComboBox, QRadioButton, QButtonGroup,
     QProgressBar, QGroupBox, QSpinBox, QDoubleSpinBox,
-    QFrame
+    QFrame, QCheckBox, QScrollArea
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QIcon
 
 from laserforge.core.serial_controller import SerialController
@@ -21,8 +21,8 @@ class JogButton(QPushButton):
     """Square icon/text jog button with consistent sizing."""
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
-        self.setFixedSize(42, 38)
-        font = QFont("sans-serif", 11, QFont.Weight.Bold)
+        self.setFixedSize(30, 26)
+        font = QFont("sans-serif", 8, QFont.Weight.Bold)
         self.setFont(font)
 
 
@@ -30,10 +30,14 @@ class LaserControlPanel(QWidget):
     # Signals to parent window
     start_job_requested = pyqtSignal()
     frame_job_requested = pyqtSignal()
+    alignment_dialog_requested = pyqtSignal()
+    settings_requested = pyqtSignal()
+    park_requested = pyqtSignal()
 
-    def __init__(self, serial_ctrl: SerialController, parent=None):
+    def __init__(self, serial_ctrl: SerialController, parent=None, settings=None):
         super().__init__(parent)
         self.serial_ctrl = serial_ctrl
+        self.settings = settings
 
         self.step_distance = 10.0  # mm
         self.jog_speed = 3000.0     # mm/min
@@ -43,66 +47,100 @@ class LaserControlPanel(QWidget):
         self._connect_signals()
 
     def _init_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 6, 6, 6)
-        main_layout.setSpacing(6)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        container = QWidget()
+        main_layout = QVBoxLayout(container)
+        main_layout.setContentsMargins(3, 3, 3, 3)
+        main_layout.setSpacing(3)
 
         # 1. Connection Group
         conn_group = QGroupBox("Laser Connection")
         conn_layout = QVBoxLayout(conn_group)
-        conn_layout.setContentsMargins(6, 8, 6, 6)
-        conn_layout.setSpacing(4)
+        conn_layout.setContentsMargins(4, 4, 4, 4)
+        conn_layout.setSpacing(2)
 
         port_row = QHBoxLayout()
+        port_row.setSpacing(3)
         self.port_combo = QComboBox()
-        self.port_combo.setToolTip("Serial Port (e.g. /dev/ttyUSB0)")
+        self.port_combo.setToolTip("Serial Port (Laser candidates ranked first)")
         self.refresh_ports_btn = QPushButton("⟳")
-        self.refresh_ports_btn.setFixedWidth(28)
+        self.refresh_ports_btn.setFixedWidth(24)
         self.refresh_ports_btn.setToolTip("Refresh Port List")
         self.refresh_ports_btn.clicked.connect(self.refresh_ports)
-        port_row.addWidget(self.port_combo, 1)
-        port_row.addWidget(self.refresh_ports_btn)
-        conn_layout.addLayout(port_row)
-
-        baud_row = QHBoxLayout()
         self.baud_combo = QComboBox()
         self.baud_combo.addItems(["115200", "250000", "57600", "38400", "9600"])
         self.baud_combo.setCurrentText("115200")
+        self.baud_combo.setFixedWidth(76)
         self.connect_btn = QPushButton("Connect")
-        self.connect_btn.setStyleSheet("font-weight: bold; background-color: #2e7d32; color: white;")
+        self.connect_btn.setStyleSheet("font-weight: bold; background-color: #2e7d32; color: white; padding: 2px 6px;")
         self.connect_btn.clicked.connect(self._toggle_connection)
-        baud_row.addWidget(QLabel("Baud:"))
-        baud_row.addWidget(self.baud_combo)
-        baud_row.addWidget(self.connect_btn)
-        conn_layout.addLayout(baud_row)
+        port_row.addWidget(self.port_combo, 1)
+        port_row.addWidget(self.refresh_ports_btn)
+        port_row.addWidget(self.baud_combo)
+        port_row.addWidget(self.connect_btn)
+        conn_layout.addLayout(port_row)
 
-        # Status & Coordinates Banner
-        status_row = QHBoxLayout()
+        auto_row = QHBoxLayout()
+        auto_row.setSpacing(4)
+        self.btn_auto_connect = QPushButton("⚡ Auto-Connect")
+        self.btn_auto_connect.setStyleSheet(
+            "background-color: #0288d1; color: white; font-weight: bold; padding: 2px 6px; border-radius: 2px; font-size: 10px;"
+        )
+        self.btn_auto_connect.setToolTip("Auto-detect and handshake with connected laser engraver")
+        self.btn_auto_connect.clicked.connect(self._on_auto_connect_clicked)
+        auto_row.addWidget(self.btn_auto_connect)
+
+        self.chk_auto_plug = QCheckBox("Auto-plug")
+        self.chk_auto_plug.setChecked(True)
+        self.chk_auto_plug.setToolTip("Automatically connect when laser is plugged in via USB or powered on")
+        self.chk_auto_plug.toggled.connect(self._on_auto_plug_toggled)
+        auto_row.addWidget(self.chk_auto_plug)
+
         self.status_badge = QLabel("Disconnected")
         self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_badge.setStyleSheet(
             "background-color: #424242; color: #bdbdbd; font-weight: bold; "
-            "border-radius: 3px; padding: 3px 6px;"
+            "border-radius: 2px; padding: 2px 4px; font-size: 10px;"
         )
-        status_row.addWidget(self.status_badge)
+        auto_row.addWidget(self.status_badge)
 
-        self.pos_label = QLabel("X: 0.00  Y: 0.00")
-        self.pos_label.setStyleSheet("font-family: monospace; font-size: 11px; color: #00e5ff;")
+        self.pos_label = QLabel("X:0.0 Y:0.0")
+        self.pos_label.setStyleSheet("font-family: monospace; font-size: 10px; color: #00e5ff;")
         self.pos_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        status_row.addWidget(self.pos_label)
-        conn_layout.addLayout(status_row)
+        auto_row.addWidget(self.pos_label)
+        conn_layout.addLayout(auto_row)
+
+        # Scanning Progress Status
+        self.lbl_scan_status = QLabel("")
+        self.lbl_scan_status.setStyleSheet("color: #ffb74d; font-size: 10px; font-style: italic; padding: 1px 4px;")
+        self.lbl_scan_status.setVisible(False)
+        conn_layout.addWidget(self.lbl_scan_status)
+
+        self.lbl_pin_status = QLabel("")
+        self.lbl_pin_status.setStyleSheet("color: #ffb74d; font-size: 10px; font-weight: bold;")
+        self.lbl_pin_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_pin_status.setVisible(False)
+        conn_layout.addWidget(self.lbl_pin_status)
 
         main_layout.addWidget(conn_group)
 
         # 2. Jog / Movement Controls
         jog_group = QGroupBox("Move / Jog")
         jog_layout = QVBoxLayout(jog_group)
-        jog_layout.setContentsMargins(6, 6, 6, 6)
-        jog_layout.setSpacing(6)
+        jog_layout.setContentsMargins(4, 4, 4, 4)
+        jog_layout.setSpacing(3)
 
-        # Jog Step Selection
         step_row = QHBoxLayout()
         step_row.setSpacing(2)
+        step_row.addWidget(QLabel("Step:"))
         self.step_btn_group = QButtonGroup(self)
         steps = [("0.1", 0.1), ("1", 1.0), ("10", 10.0), ("50", 50.0), ("100", 100.0)]
         for label, val in steps:
@@ -112,11 +150,20 @@ class LaserControlPanel(QWidget):
             self.step_btn_group.addButton(rb)
             rb.toggled.connect(lambda chk, v=val: self._set_step_dist(chk, v))
             step_row.addWidget(rb)
+        step_row.addStretch(1)
+        step_row.addWidget(QLabel("Speed:"))
+        self.speed_spin = QSpinBox()
+        self.speed_spin.setRange(100, 10000)
+        self.speed_spin.setSingleStep(500)
+        self.speed_spin.setValue(int(self.jog_speed))
+        self.speed_spin.setFixedWidth(64)
+        self.speed_spin.valueChanged.connect(self._on_speed_changed)
+        step_row.addWidget(self.speed_spin)
         jog_layout.addLayout(step_row)
 
         # Jog 8-way Grid
         pad_grid = QGridLayout()
-        pad_grid.setSpacing(4)
+        pad_grid.setSpacing(2)
         pad_grid.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.btn_nw = JogButton("↖")
@@ -152,100 +199,145 @@ class LaserControlPanel(QWidget):
         pad_grid.addWidget(self.btn_se, 2, 2)
         jog_layout.addLayout(pad_grid)
 
-        # Jog Speed Spinbox
-        speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("Speed (mm/min):"))
-        self.speed_spin = QSpinBox()
-        self.speed_spin.setRange(100, 10000)
-        self.speed_spin.setSingleStep(500)
-        self.speed_spin.setValue(int(self.jog_speed))
-        self.speed_spin.valueChanged.connect(self._on_speed_changed)
-        speed_row.addWidget(self.speed_spin)
-        jog_layout.addLayout(speed_row)
-
-        # Movement Actions
+        # Movement Actions (Home, Unlock, Set 0, Park, Align)
         actions_grid = QGridLayout()
-        actions_grid.setSpacing(4)
+        actions_grid.setSpacing(2)
 
         self.btn_home = QPushButton("Home ($H)")
         self.btn_home.setToolTip("Run machine homing cycle ($H)")
+        self.btn_home.setStyleSheet("font-size: 10px; padding: 2px;")
         self.btn_home.clicked.connect(self.serial_ctrl.home)
 
         self.btn_unlock = QPushButton("Unlock ($X)")
         self.btn_unlock.setToolTip("Clear alarm lock ($X)")
+        self.btn_unlock.setStyleSheet("font-size: 10px; padding: 2px;")
         self.btn_unlock.clicked.connect(self.serial_ctrl.unlock)
 
-        self.btn_set_origin = QPushButton("Set Origin")
+        self.btn_set_origin = QPushButton("Set 0")
         self.btn_set_origin.setToolTip("Set current position as (0, 0)")
+        self.btn_set_origin.setStyleSheet("font-size: 10px; padding: 2px;")
         self.btn_set_origin.clicked.connect(lambda: self.serial_ctrl.set_zero(True, True, True))
 
-        self.btn_fire_laser = QPushButton("Fire Laser")
-        self.btn_fire_laser.setCheckable(True)
-        self.btn_fire_laser.setToolTip("Toggle low-power test beam (0.5% power) for focusing")
-        self.btn_fire_laser.clicked.connect(self._toggle_test_laser)
+        self.btn_park = QPushButton("🅿 Park")
+        self.btn_park.setToolTip("Move laser to configured Park position")
+        self.btn_park.setStyleSheet("font-size: 10px; padding: 2px;")
+        self.btn_park.clicked.connect(self._on_park_clicked)
 
         actions_grid.addWidget(self.btn_home, 0, 0)
         actions_grid.addWidget(self.btn_unlock, 0, 1)
-        actions_grid.addWidget(self.btn_set_origin, 1, 0)
-        actions_grid.addWidget(self.btn_fire_laser, 1, 1)
+        actions_grid.addWidget(self.btn_set_origin, 0, 2)
+        actions_grid.addWidget(self.btn_park, 0, 3)
+
+        self.btn_align = QPushButton("🎯 Align Workpiece Assistant...")
+        self.btn_align.setToolTip("Open visual targeting, continuous framing, and 2-point alignment assistant")
+        self.btn_align.setStyleSheet("font-weight: bold; background-color: #00838f; color: white; padding: 3px; font-size: 10px;")
+        self.btn_align.clicked.connect(self.alignment_dialog_requested.emit)
+        actions_grid.addWidget(self.btn_align, 1, 0, 1, 4)
         jog_layout.addLayout(actions_grid)
 
         main_layout.addWidget(jog_group)
 
+        # 2b. Laser Beam & Pulse Test Group
+        beam_group = QGroupBox("Laser Spot & Pulse Test")
+        beam_layout = QHBoxLayout(beam_group)
+        beam_layout.setContentsMargins(4, 3, 4, 3)
+        beam_layout.setSpacing(3)
+
+        self.btn_fire_laser = QPushButton("🔦 Guide (0.5%)")
+        self.btn_fire_laser.setCheckable(True)
+        self.btn_fire_laser.setToolTip("Toggle low-power visible framing beam for manual positioning")
+        self.btn_fire_laser.setStyleSheet("font-size: 10px; padding: 2px;")
+        self.btn_fire_laser.clicked.connect(self._toggle_test_laser)
+        beam_layout.addWidget(self.btn_fire_laser)
+
+        self.pulse_pow_spin = QDoubleSpinBox()
+        self.pulse_pow_spin.setRange(0.1, 100.0)
+        self.pulse_pow_spin.setSingleStep(0.5)
+        self.pulse_pow_spin.setValue(getattr(self.settings, "test_pulse_power_pct", 1.0) if self.settings else 1.0)
+        self.pulse_pow_spin.setSuffix("%")
+        self.pulse_pow_spin.setToolTip("Pulse power percentage")
+        self.pulse_pow_spin.setFixedWidth(54)
+
+        self.pulse_dur_spin = QSpinBox()
+        self.pulse_dur_spin.setRange(10, 5000)
+        self.pulse_dur_spin.setSingleStep(50)
+        self.pulse_dur_spin.setValue(getattr(self.settings, "test_pulse_duration_ms", 100) if self.settings else 100)
+        self.pulse_dur_spin.setSuffix("ms")
+        self.pulse_dur_spin.setToolTip("Pulse duration in milliseconds")
+        self.pulse_dur_spin.setFixedWidth(58)
+
+        self.btn_pulse = QPushButton("⚡ Pulse")
+        self.btn_pulse.setToolTip("Test fire laser beam momentarily to verify focus spot or mark reference point")
+        self.btn_pulse.setStyleSheet("background-color: #ef6c00; color: white; font-weight: bold; padding: 2px 6px; font-size: 10px;")
+        self.btn_pulse.clicked.connect(self._on_pulse_clicked)
+
+        beam_layout.addWidget(self.pulse_pow_spin)
+        beam_layout.addWidget(self.pulse_dur_spin)
+        beam_layout.addWidget(self.btn_pulse)
+        main_layout.addWidget(beam_group)
+
         # 3. Job Execution Group
         job_group = QGroupBox("Job Execution")
         job_layout = QVBoxLayout(job_group)
-        job_layout.setContentsMargins(6, 6, 6, 6)
-        job_layout.setSpacing(6)
+        job_layout.setContentsMargins(4, 4, 4, 4)
+        job_layout.setSpacing(3)
 
-        # Frame Button
-        self.btn_frame = QPushButton("⛶  Frame Bounding Box")
-        self.btn_frame.setToolTip("Trace job boundary with laser guide before cutting")
-        self.btn_frame.setStyleSheet("font-weight: bold; padding: 6px;")
-        self.btn_frame.clicked.connect(self.frame_job_requested.emit)
-        job_layout.addWidget(self.btn_frame)
-
-        # Big Run / Pause / Stop Buttons
         run_row = QHBoxLayout()
-        run_row.setSpacing(4)
+        run_row.setSpacing(3)
+
+        self.btn_frame = QPushButton("⛶ Frame")
+        self.btn_frame.setToolTip("Trace job boundary with laser guide before cutting")
+        self.btn_frame.setStyleSheet("font-weight: bold; padding: 5px; background-color: #00796b; color: white; font-size: 11px;")
+        self.btn_frame.clicked.connect(self.frame_job_requested.emit)
 
         self.btn_start = QPushButton("▶ Start")
         self.btn_start.setStyleSheet(
-            "background-color: #2e7d32; color: white; font-weight: bold; padding: 8px; font-size: 12px;"
+            "background-color: #2e7d32; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
         )
         self.btn_start.clicked.connect(self.start_job_requested.emit)
 
         self.btn_pause = QPushButton("⏸ Pause")
         self.btn_pause.setStyleSheet(
-            "background-color: #f57f17; color: white; font-weight: bold; padding: 8px; font-size: 12px;"
+            "background-color: #f57f17; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
         )
         self.btn_pause.clicked.connect(self._toggle_pause)
 
         self.btn_stop = QPushButton("⏹ Stop")
         self.btn_stop.setStyleSheet(
-            "background-color: #c62828; color: white; font-weight: bold; padding: 8px; font-size: 12px;"
+            "background-color: #c62828; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
         )
         self.btn_stop.clicked.connect(self.serial_ctrl.stop_streaming)
 
-        run_row.addWidget(self.btn_start, 2)
+        run_row.addWidget(self.btn_frame, 1)
+        run_row.addWidget(self.btn_start, 1)
         run_row.addWidget(self.btn_pause, 1)
         run_row.addWidget(self.btn_stop, 1)
         job_layout.addLayout(run_row)
 
-        # Progress Bar & Info
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(14)
         job_layout.addWidget(self.progress_bar)
 
         self.progress_label = QLabel("Idle")
-        self.progress_label.setStyleSheet("color: #9e9e9e; font-size: 10px;")
+        self.progress_label.setStyleSheet("color: #9e9e9e; font-size: 9px;")
         self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         job_layout.addWidget(self.progress_label)
 
         main_layout.addWidget(job_group)
+
+        self.btn_settings = QPushButton("⚙  Machine & Laser Settings...")
+        self.btn_settings.setToolTip("Open comprehensive Machine, Laser Kinematics, Overscan, and GRBL configuration")
+        self.btn_settings.setStyleSheet("font-weight: bold; padding: 3px; font-size: 10px;")
+        self.btn_settings.clicked.connect(self.settings_requested.emit)
+        main_layout.addWidget(self.btn_settings)
+
         main_layout.addStretch(1)
+
+        scroll.setWidget(container)
+        outer_layout.addWidget(scroll)
 
         # Populate ports initially
         self.refresh_ports()
@@ -256,41 +348,89 @@ class LaserControlPanel(QWidget):
         self.serial_ctrl.status_updated.connect(self._on_status_updated)
         self.serial_ctrl.job_progress.connect(self._on_job_progress)
         self.serial_ctrl.job_finished.connect(self._on_job_finished)
+        self.serial_ctrl.auto_connect_started.connect(self._on_auto_connect_started)
+        self.serial_ctrl.auto_connect_progress.connect(self._on_auto_connect_progress)
+        self.serial_ctrl.auto_connect_finished.connect(self._on_auto_connect_finished)
+        self.serial_ctrl.ports_changed.connect(lambda _: self.refresh_ports())
+
+        # Enable USB hotplug monitoring
+        self.serial_ctrl.enable_hotplug_watcher(self.chk_auto_plug.isChecked())
 
     def refresh_ports(self):
-        current = self.port_combo.currentText()
+        current_data = self.port_combo.currentData() or self.port_combo.currentText()
         self.port_combo.clear()
-        ports = self.serial_ctrl.list_available_ports()
-        if not ports:
-            self.port_combo.addItem("No ports found")
+        ranked = self.serial_ctrl.get_ranked_ports(include_dummy_tty=False)
+        if not ranked:
+            ranked = self.serial_ctrl.get_ranked_ports(include_dummy_tty=True)
+
+        if not ranked:
+            self.port_combo.addItem("No ports found", None)
         else:
-            self.port_combo.addItems(ports)
-            if current in ports:
-                self.port_combo.setCurrentText(current)
-            elif "/dev/ttyUSB0" in ports:
-                self.port_combo.setCurrentText("/dev/ttyUSB0")
+            selected_idx = 0
+            for idx, p in enumerate(ranked):
+                self.port_combo.addItem(p.display_name, p.device)
+                if p.device == current_data:
+                    selected_idx = idx
+            self.port_combo.setCurrentIndex(selected_idx)
 
     def _toggle_connection(self):
         if self.serial_ctrl.is_connected:
             self.serial_ctrl.disconnect()
         else:
-            port = self.port_combo.currentText()
+            port = self.port_combo.currentData() or self.port_combo.currentText()
             if not port or port == "No ports found":
                 return
             baud = int(self.baud_combo.currentText())
             self.serial_ctrl.connect(port, baud)
 
+    def _on_auto_connect_clicked(self):
+        if self.serial_ctrl.is_connected:
+            self.serial_ctrl.disconnect()
+        self.serial_ctrl.start_auto_connect()
+
+    def _on_auto_plug_toggled(self, checked: bool):
+        self.serial_ctrl.auto_reconnect_enabled = checked
+        self.serial_ctrl.enable_hotplug_watcher(checked)
+
+    def _on_auto_connect_started(self):
+        self.btn_auto_connect.setText("⏳ Scanning...")
+        self.btn_auto_connect.setEnabled(False)
+        self.connect_btn.setEnabled(False)
+        self.lbl_scan_status.setVisible(True)
+        self.lbl_scan_status.setText("Scanning ports for GRBL laser...")
+
+    def _on_auto_connect_progress(self, msg: str):
+        self.lbl_scan_status.setText(msg)
+
+    def _on_auto_connect_finished(self, success: bool, msg: str):
+        self.btn_auto_connect.setText("⚡  Auto-Connect")
+        self.btn_auto_connect.setEnabled(True)
+        self.connect_btn.setEnabled(True)
+        if success:
+            self.lbl_scan_status.setText("Laser connected!")
+            QTimer.singleShot(3000, lambda: self.lbl_scan_status.setVisible(False))
+        else:
+            self.lbl_scan_status.setText(msg)
+            QTimer.singleShot(5000, lambda: self.lbl_scan_status.setVisible(False))
+
     def _on_connected(self, port: str):
         self.connect_btn.setText("Disconnect")
         self.connect_btn.setStyleSheet("font-weight: bold; background-color: #c62828; color: white;")
+        self.btn_auto_connect.setEnabled(False)
         self.status_badge.setText("Connected")
         self.status_badge.setStyleSheet(
             "background-color: #1b5e20; color: #a5d6a7; font-weight: bold; border-radius: 3px; padding: 3px 6px;"
         )
+        # Select connected port in combo
+        for i in range(self.port_combo.count()):
+            if self.port_combo.itemData(i) == port or self.port_combo.itemText(i) == port:
+                self.port_combo.setCurrentIndex(i)
+                break
 
     def _on_disconnected(self):
         self.connect_btn.setText("Connect")
         self.connect_btn.setStyleSheet("font-weight: bold; background-color: #2e7d32; color: white;")
+        self.btn_auto_connect.setEnabled(True)
         self.status_badge.setText("Disconnected")
         self.status_badge.setStyleSheet(
             "background-color: #424242; color: #bdbdbd; font-weight: bold; border-radius: 3px; padding: 3px 6px;"
@@ -303,6 +443,7 @@ class LaserControlPanel(QWidget):
         state = status.get("state", "Idle")
         mpos = status.get("mpos", [0.0, 0.0, 0.0])
         wpos = status.get("wpos", [0.0, 0.0, 0.0])
+        pins = status.get("pins", "")
 
         color_map = {
             "Idle": ("#1b5e20", "#a5d6a7"),
@@ -319,6 +460,19 @@ class LaserControlPanel(QWidget):
 
         self.pos_label.setText(f"X: {wpos[0]:.2f}  Y: {wpos[1]:.2f}")
 
+        # Check for active hardware limit switches in Pn:
+        limit_axes = [ax for ax in ("X", "Y", "Z") if ax in pins]
+        if limit_axes:
+            self.lbl_pin_status.setText(f"⚠️ Limit {'+'.join(limit_axes)} Switch Closed (Move off endstop)")
+            self.lbl_pin_status.setVisible(True)
+        else:
+            self.lbl_pin_status.setVisible(False)
+
+        if state == "Alarm":
+            self.btn_unlock.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border: 1px solid #ff8a80;")
+        elif state == "Idle":
+            self.btn_unlock.setStyleSheet("")
+
     def _set_step_dist(self, checked: bool, val: float):
         if checked:
             self.step_distance = val
@@ -334,13 +488,37 @@ class LaserControlPanel(QWidget):
     def _toggle_test_laser(self):
         self.is_firing_test = self.btn_fire_laser.isChecked()
         if self.is_firing_test:
-            self.btn_fire_laser.setText("Laser ON (0.5%)")
+            self.btn_fire_laser.setText("🔦 Laser ON (0.5%)")
             self.btn_fire_laser.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
             self.serial_ctrl.toggle_test_laser(True, power_s=5) # 5 / 1000 = 0.5%
         else:
-            self.btn_fire_laser.setText("Fire Laser")
+            self.btn_fire_laser.setText("🔦 Continuous Guide Beam (0.5%)")
             self.btn_fire_laser.setStyleSheet("")
             self.serial_ctrl.toggle_test_laser(False)
+
+    def _on_pulse_clicked(self):
+        power_pct = self.pulse_pow_spin.value()
+        duration_ms = self.pulse_dur_spin.value()
+        self.btn_pulse.setEnabled(False)
+        self.btn_pulse.setText("⚡ Pulsing...")
+        self.btn_pulse.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 2px 6px; font-size: 10px;")
+        self.serial_ctrl.pulse_laser(power_pct=power_pct, duration_ms=duration_ms)
+        QTimer.singleShot(duration_ms + 150, self._restore_pulse_btn)
+
+    def _restore_pulse_btn(self):
+        self.btn_pulse.setEnabled(True)
+        self.btn_pulse.setText("⚡ Pulse")
+        self.btn_pulse.setStyleSheet("background-color: #ef6c00; color: white; font-weight: bold; padding: 2px 6px; font-size: 10px;")
+
+    def _on_park_clicked(self):
+        if self.settings:
+            self.serial_ctrl.go_to_park(
+                getattr(self.settings, "park_x", 0.0),
+                getattr(self.settings, "park_y", 0.0),
+                getattr(self.settings, "rapid_speed", 3000.0)
+            )
+        else:
+            self.park_requested.emit()
 
     def _toggle_pause(self):
         if not self.serial_ctrl.is_streaming:
@@ -360,3 +538,10 @@ class LaserControlPanel(QWidget):
         self.progress_bar.setValue(100 if success else 0)
         self.progress_label.setText(msg)
         self.btn_pause.setText("⏸ Pause")
+        if not success:
+            self.progress_label.setStyleSheet("color: #ef5350; font-size: 10px; font-weight: bold;")
+            if "ALARM" in msg or "alarm" in msg:
+                self.btn_unlock.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border: 1px solid #ff8a80;")
+        else:
+            self.progress_label.setStyleSheet("color: #81c784; font-size: 10px; font-weight: bold;")
+            self.btn_unlock.setStyleSheet("")

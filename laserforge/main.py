@@ -4,8 +4,12 @@ LaserForge - High-Performance Laser Engraving and Cutting Suite.
 LightBurn alternative for Linux and GRBL laser engravers.
 """
 
+import os
 import sys
 import signal
+
+
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 

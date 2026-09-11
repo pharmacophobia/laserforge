@@ -8,9 +8,10 @@ from typing import List, Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QDoubleSpinBox, QPushButton, QToolButton, QGroupBox,
-    QCheckBox, QComboBox
+    QCheckBox, QComboBox, QFontComboBox, QLineEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QFontMetricsF
 
 from laserforge.core.models import (
     LaserEntity, RectEntity, CircleEntity, LineEntity, PathEntity, TextEntity, ImageEntity
@@ -22,6 +23,9 @@ from laserforge.config import DEFAULT_BED_WIDTH_MM, DEFAULT_BED_HEIGHT_MM
 
 class ShapePropertiesPanel(QWidget):
     trace_image_requested = pyqtSignal()
+    photo_studio_requested = pyqtSignal()
+    crop_image_requested = pyqtSignal()
+    curved_text_requested = pyqtSignal()
 
     def __init__(self, scene: LaserCanvasScene, parent=None):
 
@@ -95,7 +99,75 @@ class ShapePropertiesPanel(QWidget):
 
         layout.addWidget(geo_group)
 
-        # 2. Alignment & Positioning Group
+        # 2. Text & Typography Group (Visible when TextEntity is selected)
+        self.text_group = QGroupBox("Text & Typography")
+        text_layout = QGridLayout(self.text_group)
+        text_layout.setContentsMargins(6, 8, 6, 6)
+        text_layout.setSpacing(4)
+
+        # Text Content
+        text_layout.addWidget(QLabel("Text:"), 0, 0)
+        self.text_input = QLineEdit()
+        self.text_input.setPlaceholderText("Text content...")
+        self.text_input.textChanged.connect(self._on_text_content_changed)
+        self.text_input.editingFinished.connect(self._on_text_editing_finished)
+        text_layout.addWidget(self.text_input, 0, 1, 1, 3)
+
+        # Font Family
+        text_layout.addWidget(QLabel("Font:"), 1, 0)
+        self.font_combo = QFontComboBox()
+        self.font_combo.currentFontChanged.connect(self._on_font_family_changed)
+        text_layout.addWidget(self.font_combo, 1, 1, 1, 3)
+
+        # Font Size & Formatting
+        text_layout.addWidget(QLabel("Size:"), 2, 0)
+        self.font_size_spin = QDoubleSpinBox()
+        self.font_size_spin.setRange(1.0, 500.0)
+        self.font_size_spin.setSingleStep(1.0)
+        self.font_size_spin.setDecimals(1)
+        self.font_size_spin.setSuffix(" mm")
+        self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
+        text_layout.addWidget(self.font_size_spin, 2, 1)
+
+        style_box = QHBoxLayout()
+        style_box.setSpacing(3)
+        self.btn_bold = QToolButton()
+        self.btn_bold.setText("B")
+        self.btn_bold.setCheckable(True)
+        self.btn_bold.setToolTip("Bold")
+        self.btn_bold.setStyleSheet("font-weight: bold; font-size: 12px; min-width: 24px; min-height: 22px;")
+        self.btn_bold.toggled.connect(self._on_bold_toggled)
+
+        self.btn_italic = QToolButton()
+        self.btn_italic.setText("I")
+        self.btn_italic.setCheckable(True)
+        self.btn_italic.setToolTip("Italic")
+        self.btn_italic.setStyleSheet("font-style: italic; font-size: 12px; font-family: serif; min-width: 24px; min-height: 22px;")
+        self.btn_italic.toggled.connect(self._on_italic_toggled)
+
+        self.btn_underline = QToolButton()
+        self.btn_underline.setText("U")
+        self.btn_underline.setCheckable(True)
+        self.btn_underline.setToolTip("Underline")
+        self.btn_underline.setStyleSheet("text-decoration: underline; font-size: 12px; min-width: 24px; min-height: 22px;")
+        self.btn_underline.toggled.connect(self._on_underline_toggled)
+
+        style_box.addWidget(self.btn_bold)
+        style_box.addWidget(self.btn_italic)
+        style_box.addWidget(self.btn_underline)
+        text_layout.addLayout(style_box, 2, 2, 1, 2)
+
+        # Outlined vs. Fill Mode
+        text_layout.addWidget(QLabel("Mode:"), 3, 0)
+        self.text_mode_combo = QComboBox()
+        self.text_mode_combo.addItems(["Fill (Solid Engrave)", "Outlined (Vector Cut)"])
+        self.text_mode_combo.currentIndexChanged.connect(self._on_text_mode_changed)
+        text_layout.addWidget(self.text_mode_combo, 3, 1, 1, 3)
+
+        self.text_group.setVisible(False)
+        layout.addWidget(self.text_group)
+
+        # 3. Alignment & Positioning Group
         align_group = QGroupBox("Alignment & Arrange")
         align_layout = QGridLayout(align_group)
         align_layout.setContentsMargins(6, 8, 6, 6)
@@ -104,9 +176,13 @@ class ShapePropertiesPanel(QWidget):
         btn_align_left = QPushButton("⇤ Left")
         btn_align_center_x = QPushButton("↔ Center")
         btn_align_right = QPushButton("Right ⇥")
-        btn_align_top = QPushButton("barwedge Top")
+        btn_align_top = QPushButton("⊼ Top")
         btn_align_center_y = QPushButton("↕ Middle")
         btn_align_bottom = QPushButton("Bottom ⊻")
+
+        btn_dist_h = QPushButton("⇥ Distribute H")
+        btn_dist_v = QPushButton("⇵ Distribute V")
+        btn_center_parent = QPushButton("🎯 In Shape")
         btn_bed_center = QPushButton("🎯 Bed Center")
 
         btn_align_left.clicked.connect(lambda: self._align("left"))
@@ -115,6 +191,9 @@ class ShapePropertiesPanel(QWidget):
         btn_align_top.clicked.connect(lambda: self._align("top"))
         btn_align_center_y.clicked.connect(lambda: self._align("center_y"))
         btn_align_bottom.clicked.connect(lambda: self._align("bottom"))
+        btn_dist_h.clicked.connect(lambda: self._align("distribute_h"))
+        btn_dist_v.clicked.connect(lambda: self._align("distribute_v"))
+        btn_center_parent.clicked.connect(lambda: self._align("center_in_parent"))
         btn_bed_center.clicked.connect(self._center_on_bed)
 
         align_layout.addWidget(btn_align_left, 0, 0)
@@ -123,18 +202,34 @@ class ShapePropertiesPanel(QWidget):
         align_layout.addWidget(btn_align_top, 1, 0)
         align_layout.addWidget(btn_align_center_y, 1, 1)
         align_layout.addWidget(btn_align_bottom, 1, 2)
-        align_layout.addWidget(btn_bed_center, 2, 0, 1, 3)
+        align_layout.addWidget(btn_dist_h, 2, 0)
+        align_layout.addWidget(btn_dist_v, 2, 1)
+        align_layout.addWidget(btn_center_parent, 2, 2)
+        align_layout.addWidget(btn_bed_center, 3, 0, 1, 3)
 
         layout.addWidget(align_group)
 
-        # 3. Image Vectorization Actions Group
-        self.img_group = QGroupBox("Bitmap Vectorization")
+        # 3. Image Photo Studio & Vectorization Group
+        self.img_group = QGroupBox("Photo & Bitmap Studio")
         img_layout = QVBoxLayout(self.img_group)
         img_layout.setContentsMargins(6, 8, 6, 6)
+        img_layout.setSpacing(6)
+
+        self.btn_photo_studio = QPushButton("📷 Open in Photo Engrave Studio...")
+        self.btn_photo_studio.setStyleSheet("background-color: #9c27b0; color: white; font-weight: bold; padding: 6px;")
+        self.btn_photo_studio.clicked.connect(self.photo_studio_requested.emit)
+        img_layout.addWidget(self.btn_photo_studio)
+
+        self.btn_crop_photo = QPushButton("✂️ Crop Photo...")
+        self.btn_crop_photo.setStyleSheet("background-color: #37474f; color: white; font-weight: bold; padding: 6px;")
+        self.btn_crop_photo.clicked.connect(self.crop_image_requested.emit)
+        img_layout.addWidget(self.btn_crop_photo)
+
         self.btn_trace_img = QPushButton("⚡ Trace Image to SVG...")
         self.btn_trace_img.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; padding: 6px;")
         self.btn_trace_img.clicked.connect(self.trace_image_requested.emit)
         img_layout.addWidget(self.btn_trace_img)
+
         self.img_group.setVisible(False)
         layout.addWidget(self.img_group)
 
@@ -159,6 +254,7 @@ class ShapePropertiesPanel(QWidget):
         if not selected_items:
             self.setEnabled(False)
             self.img_group.setVisible(False)
+            self.text_group.setVisible(False)
             self._is_updating_ui = True
             self.x_spin.setValue(0)
             self.y_spin.setValue(0)
@@ -171,7 +267,25 @@ class ShapePropertiesPanel(QWidget):
         self.setEnabled(True)
         has_image = any(isinstance(i.entity, ImageEntity) for i in selected_items)
         self.img_group.setVisible(has_image)
+
+        has_text = any(isinstance(i.entity, TextEntity) for i in selected_items)
+        self.text_group.setVisible(has_text)
+
         self._is_updating_ui = True
+
+        if has_text:
+            text_items = [i for i in selected_items if isinstance(i.entity, TextEntity)]
+            if text_items:
+                tent = text_items[0].entity
+                if not self.text_input.hasFocus() and self.text_input.text() != tent.text:
+                    self.text_input.setText(tent.text)
+                self.font_combo.setCurrentFont(QFont(tent.font_family))
+                self.font_size_spin.setValue(tent.font_size)
+                self.btn_bold.setChecked(tent.bold)
+                self.btn_italic.setChecked(tent.italic)
+                self.btn_underline.setChecked(getattr(tent, "underline", False))
+                mode_idx = 1 if getattr(tent, "fill_mode", "Fill") == "Outline" else 0
+                self.text_mode_combo.setCurrentIndex(mode_idx)
 
 
         if len(selected_items) == 1:
@@ -250,6 +364,11 @@ class ShapePropertiesPanel(QWidget):
                 ent.radius_x = new_w / 2.0
                 if self.lock_aspect_ratio:
                     ent.radius_y = ent.radius_x
+            elif isinstance(ent, TextEntity):
+                ent.width = new_w
+                if self.lock_aspect_ratio:
+                    ent.height *= scale_x
+                    ent.font_size = max(2.0, ent.font_size * scale_x)
             elif isinstance(ent, ImageEntity):
                 ent.width = new_w
                 if self.lock_aspect_ratio:
@@ -288,6 +407,11 @@ class ShapePropertiesPanel(QWidget):
                 ent.radius_y = new_h / 2.0
                 if self.lock_aspect_ratio:
                     ent.radius_x = ent.radius_y
+            elif isinstance(ent, TextEntity):
+                ent.height = new_h
+                if self.lock_aspect_ratio:
+                    ent.width *= scale_y
+                    ent.font_size = max(2.0, ent.font_size * scale_y)
             elif isinstance(ent, ImageEntity):
                 ent.height = new_h
                 if self.lock_aspect_ratio:
@@ -315,65 +439,95 @@ class ShapePropertiesPanel(QWidget):
         self.scene.entity_modified.emit()
 
     def _align(self, mode: str):
-        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
-        if len(selected_items) < 2:
-            return
-
-        boxes = [i.entity.get_bounds() for i in selected_items]
-        min_x = min(b[0] for b in boxes)
-        max_x = max(b[2] for b in boxes)
-        min_y = min(b[1] for b in boxes)
-        max_y = max(b[3] for b in boxes)
-        center_x = (min_x + max_x) / 2.0
-        center_y = (min_y + max_y) / 2.0
-
-        for item, b in zip(selected_items, boxes):
-            w = b[2] - b[0]
-            h = b[3] - b[1]
-
-            if mode == "left":
-                item.entity.x += (min_x - b[0])
-            elif mode == "right":
-                item.entity.x += (max_x - b[2])
-            elif mode == "center_x":
-                item.entity.x += (center_x - (b[0] + w / 2.0))
-            elif mode == "top":
-                item.entity.y += (min_y - b[1])
-            elif mode == "bottom":
-                item.entity.y += (max_y - b[3])
-            elif mode == "center_y":
-                item.entity.y += (center_y - (b[1] + h / 2.0))
-
-            item.sync_from_entity()
-
-        self.scene.entity_modified.emit()
+        self.scene.align_selected(mode, DEFAULT_BED_WIDTH_MM, DEFAULT_BED_HEIGHT_MM)
         self.update_from_selection()
 
     def _center_on_bed(self):
-        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
-        if not selected_items:
-            return
-
-        boxes = [i.entity.get_bounds() for i in selected_items]
-        min_x = min(b[0] for b in boxes)
-        max_x = max(b[2] for b in boxes)
-        min_y = min(b[1] for b in boxes)
-        max_y = max(b[3] for b in boxes)
-
-        curr_cx = (min_x + max_x) / 2.0
-        curr_cy = (min_y + max_y) / 2.0
-
-        target_cx = DEFAULT_BED_WIDTH_MM / 2.0
-        target_cy = DEFAULT_BED_HEIGHT_MM / 2.0
-
-
-        dx = target_cx - curr_cx
-        dy = target_cy - curr_cy
-
-        for item in selected_items:
-            item.entity.x += dx
-            item.entity.y += dy
-            item.sync_from_entity()
-
-        self.scene.entity_modified.emit()
+        self.scene.align_selected("bed_center", DEFAULT_BED_WIDTH_MM, DEFAULT_BED_HEIGHT_MM)
         self.update_from_selection()
+
+    # --- Typography Event Handlers ---
+
+    def _on_text_content_changed(self, text: str):
+        if self._is_updating_ui:
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.text = text
+                font = QFont(item.entity.font_family, max(4, int(round(item.entity.font_size * 2))))
+                fm = QFontMetricsF(font)
+                tw = max(10.0, fm.horizontalAdvance(text) + 6.0)
+                item.entity.width = max(item.entity.width, tw)
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_text_editing_finished(self):
+        if hasattr(self.scene, "push_undo_state"):
+            self.scene.push_undo_state()
+
+    def _on_font_family_changed(self, font: QFont):
+        if self._is_updating_ui:
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.font_family = font.family()
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_font_size_changed(self, size: float):
+        if self._is_updating_ui:
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                orig_sz = max(0.1, item.entity.font_size)
+                ratio = size / orig_sz
+                item.entity.font_size = size
+                if self.lock_aspect_ratio:
+                    item.entity.height = max(1.0, item.entity.height * ratio)
+                    item.entity.width = max(1.0, item.entity.width * ratio)
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_bold_toggled(self, checked: bool):
+        if self._is_updating_ui:
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.bold = checked
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_italic_toggled(self, checked: bool):
+        if self._is_updating_ui:
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.italic = checked
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_underline_toggled(self, checked: bool):
+        if self._is_updating_ui:
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.underline = checked
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_text_mode_changed(self, index: int):
+        if self._is_updating_ui:
+            return
+        mode_val = "Outline" if index == 1 else "Fill"
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.fill_mode = mode_val
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()

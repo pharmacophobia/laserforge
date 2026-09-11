@@ -9,7 +9,7 @@ import math
 from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QSlider, QComboBox, QTextEdit, QFileDialog,
-    QTabWidget, QSplitter, QFrame
+    QTabWidget, QSplitter, QFrame, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import (
@@ -17,7 +17,9 @@ from PyQt6.QtGui import (
     QWheelEvent, QMouseEvent
 )
 
+from laserforge.config import MachineSettings
 from laserforge.core.gcode_generator import GCodeJobResult, ToolpathSegment
+from laserforge.core.gcode_validator import GCodeValidator, ValidationReport
 
 
 class SimulationCanvas(QWidget):
@@ -138,11 +140,17 @@ class SimulationCanvas(QWidget):
 
 
 class PreviewDialog(QDialog):
-    def __init__(self, job_result: GCodeJobResult, parent=None):
+    def __init__(self, job_result: GCodeJobResult, parent=None, settings: Optional[MachineSettings] = None):
         super().__init__(parent)
         self.job = job_result
+        self.settings = settings or getattr(parent, "settings", None) or MachineSettings()
+
+        # Run GRBL G-Code Validation
+        validator = GCodeValidator(self.settings)
+        self.validation_report = validator.validate(self.job.gcode)
+
         self.setWindowTitle("LaserForge - Toolpath Simulation & G-Code Preview")
-        self.resize(900, 650)
+        self.resize(950, 680)
 
         self.play_timer = QTimer(self)
         self.play_timer.setInterval(20)  # 50 FPS
@@ -180,6 +188,18 @@ class PreviewDialog(QDialog):
         for lbl in (lbl_time, lbl_cut, lbl_rapid, lbl_segs):
             lbl.setStyleSheet("background-color: #2b2b2b; padding: 4px 8px; border-radius: 4px; color: #cfd8dc;")
             metrics_row.addWidget(lbl)
+
+        # Validation pill in metrics row
+        if self.validation_report.has_errors:
+            lbl_val = QLabel(f"❌ {len(self.validation_report.errors)} Error(s)")
+            lbl_val.setStyleSheet("background-color: #5c1d1d; color: #ff8a80; padding: 4px 8px; border-radius: 4px; font-weight: bold;")
+        elif self.validation_report.has_warnings:
+            lbl_val = QLabel(f"⚠️ {len(self.validation_report.warnings)} Warning(s)")
+            lbl_val.setStyleSheet("background-color: #5c431d; color: #ffd54f; padding: 4px 8px; border-radius: 4px; font-weight: bold;")
+        else:
+            lbl_val = QLabel("✅ GRBL 1.1 Valid")
+            lbl_val.setStyleSheet("background-color: #1b4d2e; color: #81c784; padding: 4px 8px; border-radius: 4px; font-weight: bold;")
+        metrics_row.addWidget(lbl_val)
 
         metrics_row.addStretch(1)
         btn_reset_view = QPushButton("⛶ Fit View")
@@ -252,6 +272,67 @@ class PreviewDialog(QDialog):
 
         gcode_layout.addLayout(gcode_btn_row)
         tabs.addTab(gcode_widget, "Generated G-Code")
+
+        # Tab 3: GRBL Validation Report
+        val_widget = QWidget()
+        val_layout = QVBoxLayout(val_widget)
+        val_layout.setContentsMargins(6, 6, 6, 6)
+        val_layout.setSpacing(8)
+
+        val_header = QFrame()
+        vh_layout = QHBoxLayout(val_header)
+        vh_layout.setContentsMargins(10, 8, 10, 8)
+        if self.validation_report.has_errors:
+            val_header.setStyleSheet("background-color: #4a1515; border-radius: 4px; border: 1px solid #d32f2f;")
+            vh_lbl = QLabel(f"<b>❌ G-Code Validation Failed:</b> {len(self.validation_report.errors)} error(s) must be resolved before cutting.")
+        elif self.validation_report.has_warnings:
+            val_header.setStyleSheet("background-color: #4a3415; border-radius: 4px; border: 1px solid #f57c00;")
+            vh_lbl = QLabel(f"<b>⚠️ G-Code Validation Passed with Warnings:</b> {len(self.validation_report.warnings)} warning(s) detected.")
+        else:
+            val_header.setStyleSheet("background-color: #153e20; border-radius: 4px; border: 1px solid #388e3c;")
+            vh_lbl = QLabel("<b>✅ Clean G-Code:</b> 100% compliant with GRBL 1.1 specification and machine bounds.")
+        vh_layout.addWidget(vh_lbl)
+        val_layout.addWidget(val_header)
+
+        if self.validation_report.issues:
+            table = QTableWidget()
+            table.setColumnCount(5)
+            table.setHorizontalHeaderLabels(["Severity", "Line", "Code", "Description", "G-Code"])
+            table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+            table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+            table.verticalHeader().setVisible(False)
+            table.setRowCount(len(self.validation_report.issues))
+
+            mono = QFont("monospace", 9)
+            for row, issue in enumerate(self.validation_report.issues):
+                item_s = QTableWidgetItem("🔴 ERROR" if issue.severity == "error" else "🟡 WARN")
+                item_s.setForeground(QColor("#ff5252" if issue.severity == "error" else "#ffd740"))
+                item_s.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 0, item_s)
+
+                item_l = QTableWidgetItem(f"L{issue.line_number}")
+                item_l.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, 1, item_l)
+
+                table.setItem(row, 2, QTableWidgetItem(issue.error_code))
+                table.setItem(row, 3, QTableWidgetItem(issue.message))
+
+                item_g = QTableWidgetItem(issue.line_text)
+                item_g.setFont(mono)
+                table.setItem(row, 4, item_g)
+
+            val_layout.addWidget(table, 1)
+        else:
+            lbl_all_good = QLabel("No syntax errors, out-of-bounds moves, or laser hazards found.")
+            lbl_all_good.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_all_good.setStyleSheet("color: #a5d6a7; font-size: 13px; padding: 40px;")
+            val_layout.addWidget(lbl_all_good, 1)
+
+        val_tab_title = f"Validation ({len(self.validation_report.issues)})" if self.validation_report.issues else "Validation"
+        tabs.addTab(val_widget, val_tab_title)
 
         main_layout.addWidget(tabs)
 

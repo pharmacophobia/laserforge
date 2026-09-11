@@ -8,6 +8,7 @@ Sorts toolpaths to:
 
 from typing import List, Tuple
 import math
+import numpy as np
 
 def point_dist_sq(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     dx = p1[0] - p2[0]
@@ -18,15 +19,20 @@ def point_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
 
 def polygon_bounds(pts: List[Tuple[float, float]]) -> Tuple[float, float, float, float]:
-    min_x = float("inf")
-    min_y = float("inf")
-    max_x = float("-inf")
-    max_y = float("-inf")
-    for p in pts:
-        if p[0] < min_x: min_x = p[0]
-        if p[0] > max_x: max_x = p[0]
-        if p[1] < min_y: min_y = p[1]
-        if p[1] > max_y: max_y = p[1]
+    if not pts:
+        return (0.0, 0.0, 0.0, 0.0)
+    if len(pts) > 64:
+        arr = np.asarray(pts, dtype=np.float32)
+        return (float(arr[:, 0].min()), float(arr[:, 1].min()), float(arr[:, 0].max()), float(arr[:, 1].max()))
+    min_x = pts[0][0]
+    max_x = min_x
+    min_y = pts[0][1]
+    max_y = min_y
+    for x, y in pts[1:]:
+        if x < min_x: min_x = x
+        elif x > max_x: max_x = x
+        if y < min_y: min_y = y
+        elif y > max_y: max_y = y
     return (min_x, min_y, max_x, max_y)
 
 def is_box_inside(inner: Tuple[float, float, float, float], outer: Tuple[float, float, float, float]) -> bool:

@@ -34,6 +34,7 @@ class ConsolePanel(QWidget):
         # Output Text View
         self.text_edit = QTextEdit()
         self.text_edit.setReadOnly(True)
+        self.text_edit.document().setMaximumBlockCount(1000)
         font = QFont("monospace", 9)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.text_edit.setFont(font)
@@ -78,6 +79,11 @@ class ConsolePanel(QWidget):
         # Skip periodic ? status queries to avoid spamming the log
         if text == "?" or text.startswith("<"):
             return
+
+        # Skip high-frequency stream chatter during active laser jobs to maintain 60FPS UI
+        if getattr(self.serial_ctrl, "is_streaming", False):
+            if text == "ok" or (direction == "tx" and text.startswith("G1")):
+                return
 
         if direction == "tx":
             color = "#40c4ff"  # Light blue / Cyan

@@ -26,6 +26,7 @@ class LayerCutSettings:
     show_on_canvas: bool = True
     overscan_pct: float = 3.0  # % overscan acceleration margin for raster
     is_tool: bool = False  # If true, framing/tool guide layer (not cut)
+    pass_delay_sec: float = 0.0  # Seconds to pause between multi-pass cuts for diode cooldown
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -45,7 +46,8 @@ class LayerCutSettings:
             "output_enabled": self.output_enabled,
             "show_on_canvas": self.show_on_canvas,
             "overscan_pct": self.overscan_pct,
-            "is_tool": self.is_tool
+            "is_tool": self.is_tool,
+            "pass_delay_sec": self.pass_delay_sec
         }
 
     @classmethod
@@ -150,8 +152,12 @@ class TextEntity(LaserEntity):
     font_size: float = 20.0  # mm
     bold: bool = False
     italic: bool = False
+    underline: bool = False
+    fill_mode: str = "Fill"  # "Fill" (solid engrave) or "Outline" (vector cut)
     width: float = 60.0
     height: float = 20.0
+    is_mirrored_h: bool = False
+    is_mirrored_v: bool = False
 
     def get_bounds(self) -> Tuple[float, float, float, float]:
         return (self.x, self.y, self.x + self.width, self.y + self.height)
@@ -160,6 +166,8 @@ class TextEntity(LaserEntity):
 @dataclass
 class ImageEntity(LaserEntity):
     image_path: str = ""
+    raw_image_path: str = ""
+    processed_image_path: str = ""
     width: float = 80.0   # mm on bed
     height: float = 80.0  # mm on bed
     dither_mode: str = "Floyd-Steinberg"  # "Floyd-Steinberg", "Atkinson", "Threshold", "Grayscale"
@@ -168,6 +176,15 @@ class ImageEntity(LaserEntity):
     brightness: float = 0.0
     threshold_value: int = 128  # 0-255
     dpi: float = 254.0
+    gamma: float = 1.0
+    sharpen: float = 0.0
+    equalize: bool = False
+    white_clip: int = 255
+    black_clip: int = 0
+    halftone_cell_size: float = 6.0
+    halftone_angle_deg: float = 45.0
+    is_mirrored_h: bool = False
+    is_mirrored_v: bool = False
 
     def get_bounds(self) -> Tuple[float, float, float, float]:
         return (self.x, self.y, self.x + self.width, self.y + self.height)

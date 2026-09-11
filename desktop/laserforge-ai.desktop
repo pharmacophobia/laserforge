@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=LaserForge AI Studio
+GenericName=Generative Laser Art Studio
+Comment=Standalone Generative AI Laser Artwork Creator (SDXL Turbo 8GB VRAM)
+Exec=/home/k/LaserForge/bin/laserforge-ai
+Icon=/home/k/LaserForge/assets/laserforge.png
+Path=/home/k/LaserForge
+Terminal=false
+StartupNotify=true
+Categories=Graphics;ArtificialIntelligence;Engineering;
+Keywords=laser;ai;stable-diffusion;sdxl;art;vector;engraver;

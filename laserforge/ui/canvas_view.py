@@ -9,7 +9,7 @@ import math
 from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QPen, QColor, QBrush, QFont, QWheelEvent, QMouseEvent,
-    QPaintEvent, QTransform
+    QPaintEvent, QTransform, QFontMetricsF
 )
 from PyQt6.QtWidgets import QGraphicsView, QWidget
 
@@ -140,6 +140,30 @@ class LaserCanvasView(QGraphicsView):
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
 
+        # Hardware OpenGL Viewport Acceleration
+        self.opengl_enabled = False
+        self.set_opengl_acceleration(True)
+
+    def set_opengl_acceleration(self, enable: bool):
+        """Enables or disables hardware-accelerated OpenGL rendering for canvas viewport."""
+        if enable:
+            try:
+                from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+                from PyQt6.QtGui import QSurfaceFormat
+                fmt = QSurfaceFormat()
+                fmt.setSamples(4)  # 4x Multi-Sample Anti-Aliasing (MSAA)
+                fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+                gl_widget = QOpenGLWidget()
+                gl_widget.setFormat(fmt)
+                self.setViewport(gl_widget)
+                self.opengl_enabled = True
+            except Exception:
+                self.setViewport(QWidget())
+                self.opengl_enabled = False
+        else:
+            self.setViewport(QWidget())
+            self.opengl_enabled = False
+
     def set_bed_size(self, w: float, h: float):
         self.bed_width = w
         self.bed_height = h
@@ -261,6 +285,116 @@ class LaserCanvasView(QGraphicsView):
             event.acceptProposedAction()
         else:
             super().dropEvent(event)
+
+    def contextMenuEvent(self, event):
+        from PyQt6.QtWidgets import QMenu, QInputDialog
+        from laserforge.ui.canvas_scene import LaserItemWrapper
+        from laserforge.core.models import ImageEntity, TextEntity
+
+        menu = QMenu(self)
+        scene_pos = self.mapToScene(event.pos())
+        clicked_item = self.scene().itemAt(scene_pos, self.transform())
+        main_win = self.window()
+
+        selected_text_ent = None
+        selected_text_item = None
+        if isinstance(clicked_item, LaserItemWrapper) and isinstance(clicked_item.entity, TextEntity):
+            selected_text_item = clicked_item
+            selected_text_ent = clicked_item.entity
+        else:
+            selected_items = [i for i in self.scene().selectedItems() if isinstance(i, LaserItemWrapper) and isinstance(i.entity, TextEntity)]
+            if selected_items:
+                selected_text_item = selected_items[0]
+                selected_text_ent = selected_text_item.entity
+
+        if selected_text_ent and selected_text_item:
+            def _do_edit_text():
+                new_text, ok = QInputDialog.getText(
+                    self, "Edit Text Content",
+                    "Enter text to engrave / cut:",
+                    text=selected_text_ent.text
+                )
+                if ok and new_text != selected_text_ent.text:
+                    if hasattr(self.scene(), "push_undo_state"):
+                        self.scene().push_undo_state()
+                    selected_text_ent.text = new_text
+                    font = QFont(selected_text_ent.font_family, max(4, int(round(selected_text_ent.font_size * 2))))
+                    fm = QFontMetricsF(font)
+                    tw = max(10.0, fm.horizontalAdvance(new_text) + 6.0)
+                    selected_text_ent.width = max(selected_text_ent.width, tw)
+                    selected_text_item.sync_from_entity()
+                    if hasattr(self.scene(), "entity_modified"):
+                        self.scene().entity_modified.emit()
+
+            act_edit_txt = menu.addAction("✏️ Edit Text Content...")
+            act_edit_txt.triggered.connect(_do_edit_text)
+            menu.addSeparator()
+
+        selected_image = None
+        if isinstance(clicked_item, LaserItemWrapper) and isinstance(clicked_item.entity, ImageEntity):
+            selected_image = clicked_item.entity
+        else:
+            selected_ents = getattr(self.scene(), "get_selected_entities", lambda: [])()
+            img_ents = [e for e in selected_ents if isinstance(e, ImageEntity)]
+            if img_ents:
+                selected_image = img_ents[0]
+
+        if selected_image:
+            act_crop = menu.addAction("✂️ Crop Image...")
+            act_crop.triggered.connect(lambda: getattr(main_win, "open_crop_tool_for_selected", lambda e: None)(selected_image))
+
+            act_photo = menu.addAction("📷 Open in Photo Engrave Studio...")
+            act_photo.triggered.connect(lambda: getattr(main_win, "open_photo_studio", lambda e: None)(selected_image))
+
+            act_trace = menu.addAction("⚡ Trace Image to SVG...")
+            act_trace.triggered.connect(lambda: getattr(main_win, "trace_image", lambda: None)())
+            menu.addSeparator()
+
+        act_qr = menu.addAction("📱 QR Code & Barcode Studio...")
+        act_qr.triggered.connect(lambda: getattr(main_win, "open_barcode_designer", lambda: None)())
+
+        act_sdxl = menu.addAction("🎨 SDXL Turbo Generative Studio...")
+        act_sdxl.triggered.connect(lambda: getattr(main_win, "open_sdxl_turbo_studio", lambda: None)())
+
+        selected_ents = getattr(self.scene(), "get_selected_entities", lambda: [])()
+        if len(selected_ents) >= 2:
+            act_weld = menu.addAction("⚡ Weld / Union Shapes (Ctrl+Shift+U)")
+            act_weld.triggered.connect(lambda: getattr(self.scene(), "boolean_operation", lambda m: None)("weld"))
+
+            act_sub = menu.addAction("➖ Subtract / Difference Shapes (Ctrl+Shift+D)")
+            act_sub.triggered.connect(lambda: getattr(self.scene(), "boolean_operation", lambda m: None)("subtract"))
+
+            act_inter = menu.addAction("✖ Intersect Shapes (Ctrl+Shift+X)")
+            act_inter.triggered.connect(lambda: getattr(self.scene(), "boolean_operation", lambda m: None)("intersect"))
+            menu.addSeparator()
+
+        menu.addSeparator()
+        act_undo = menu.addAction("↩ Undo (Ctrl+Z)")
+        act_undo.triggered.connect(lambda: getattr(self.scene(), "undo", lambda: None)())
+
+        act_redo = menu.addAction("↪ Redo (Ctrl+Y)")
+        act_redo.triggered.connect(lambda: getattr(self.scene(), "redo", lambda: None)())
+
+        menu.addSeparator()
+        if selected_ents:
+            act_flip_h = menu.addAction("↔ Flip Horizontally (H)")
+            act_flip_h.triggered.connect(lambda: getattr(self.scene(), "flip_selected_horizontal", lambda: None)())
+
+            act_flip_v = menu.addAction("↕ Flip Vertically (V)")
+            act_flip_v.triggered.connect(lambda: getattr(self.scene(), "flip_selected_vertical", lambda: None)())
+            menu.addSeparator()
+
+        act_dup = menu.addAction("Duplicate (Ctrl+D)")
+        act_dup.triggered.connect(lambda: getattr(self.scene(), "duplicate_selected", lambda: None)())
+
+        act_del = menu.addAction("Delete (Del)")
+        act_del.triggered.connect(lambda: getattr(self.scene(), "delete_selected", lambda: None)())
+
+        menu.addSeparator()
+        act_fit = menu.addAction("Fit Workbed in View (Ctrl+0)")
+        act_fit.triggered.connect(self.zoom_to_fit)
+
+        menu.exec(event.globalPos())
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
         """Draws the dark workspace, workbed boundary, and millimeter grid lines."""

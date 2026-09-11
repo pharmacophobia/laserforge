@@ -46,11 +46,70 @@ class MachineSettings:
     bed_height: float = DEFAULT_BED_HEIGHT_MM
     origin_corner: str = DEFAULT_ORIGIN_CORNER
     max_s_value: int = DEFAULT_MAX_S_VALUE
-    laser_mode: str = DEFAULT_LASER_MODE
+    min_s_value: int = 0
+    laser_mode: str = DEFAULT_LASER_MODE  # "M4", "M3", or "M106"
+    use_inline_power: bool = True         # Use inline G1 S... commands for smooth raster & vector moves
     rapid_speed: float = DEFAULT_RAPID_SPEED
     baud_rate: int = DEFAULT_BAUD_RATE
+    jog_speed: float = DEFAULT_JOG_SPEED
     framing_power_pct: float = DEFAULT_FRAMING_POWER
     framing_speed: float = DEFAULT_FRAMING_SPEED
+
+    # Laser Firing & Timing Controls
+    laser_fire_delay_ms: float = 0.0      # Dwell pause in ms after laser fires before moving
+    laser_off_delay_ms: float = 0.0       # Dwell pause in ms after laser shuts off
+    overscan_enabled: bool = False        # Lead-in/lead-out overscan to eliminate edge burn
+    overscan_pct: float = 2.5             # Overscan % of raster scanline length
+    overscan_mode: str = "Acceleration"   # "Acceleration" (d=v^2/2a), "Percentage", or "Fixed"
+    overscan_mm: float = 2.0              # Fixed overscan in mm
+    overscan_accel_multiplier: float = 1.2 # Safety margin above theoretical v^2 / (2*a)
+    white_space_skip_enabled: bool = True  # Rapid G0 jump across wide empty gaps
+    white_space_skip_threshold_mm: float = 8.0 # Minimum gap (mm) to trigger G0 white-space skip
+    kerf_width_mm: float = 0.08           # Diode laser beam spot width / kerf compensation
+    test_pulse_power_pct: float = 1.0     # Laser test fire pulse power %
+    test_pulse_duration_ms: int = 100     # Laser test fire pulse duration ms
+
+    # Kinematics & GRBL Parameters
+    x_steps_per_mm: float = 80.0
+    y_steps_per_mm: float = 80.0
+    z_steps_per_mm: float = 250.0
+    x_max_rate: float = 5000.0            # mm/min
+    y_max_rate: float = 5000.0            # mm/min
+    z_max_rate: float = 500.0             # mm/min
+    x_accel: float = 500.0                # mm/sec^2
+    y_accel: float = 500.0                # mm/sec^2
+    z_accel: float = 10.0                 # mm/sec^2
+    invert_x_dir: bool = False
+    invert_y_dir: bool = False
+    invert_z_dir: bool = False
+    software_mirror_x: bool = False       # Invert X axis coordinates in generated G-code
+    software_mirror_y: bool = False       # Invert Y axis coordinates in generated G-code
+    soft_limits_enabled: bool = False
+    hard_limits_enabled: bool = False
+    homing_enabled: bool = False
+
+    # Job Workflow & Post-Job Positioning
+    finish_position_mode: str = "Origin"  # "Origin", "Job Start", "Park Position", "Hold Current"
+    park_x: float = 0.0
+    park_y: float = 0.0
+    custom_start_gcode: str = ""
+    custom_end_gcode: str = ""
+    validate_gcode_before_start: bool = True  # Run pre-flight GRBL validator before job execution
+    strict_validation: bool = False           # If True, block execution on warnings as well as errors
+
+    # Air Assist & Peripherals
     air_assist_cmd: str = "M8"
     air_assist_off_cmd: str = "M9"
+    enable_air_assist_by_default: bool = False
+    air_assist_pre_delay_sec: float = 0.0
+    air_assist_post_delay_sec: float = 0.0
     enable_z_moves: bool = False
+
+    # Hardware GPU Acceleration & Display
+    enable_gpu_acceleration: bool = True  # Accelerates raster filtering, dithering, and contour tracing via CUDA/OpenCL
+    enable_opengl_canvas: bool = True     # Hardware OpenGL canvas viewport for 60-120 FPS rendering
+
+    # Connectivity
+    auto_connect: bool = True
+    last_connected_port: str = ""
+

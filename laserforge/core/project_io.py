@@ -48,15 +48,31 @@ class ProjectIO:
             elif isinstance(e, TextEntity):
                 e_dict.update({
                     "text": e.text, "font_family": e.font_family, "font_size": e.font_size,
-                    "bold": e.bold, "italic": e.italic, "width": e.width, "height": e.height
+                    "bold": e.bold, "italic": e.italic, "underline": getattr(e, "underline", False),
+                    "fill_mode": getattr(e, "fill_mode", "Fill"),
+                    "width": e.width, "height": e.height,
+                    "is_mirrored_h": getattr(e, "is_mirrored_h", False),
+                    "is_mirrored_v": getattr(e, "is_mirrored_v", False)
                 })
             elif isinstance(e, ImageEntity):
                 e_dict.update({
-                    "image_path": e.image_path, "width": e.width, "height": e.height,
+                    "image_path": e.image_path,
+                    "raw_image_path": getattr(e, "raw_image_path", ""),
+                    "processed_image_path": getattr(e, "processed_image_path", ""),
+                    "width": e.width, "height": e.height,
                     "dither_mode": e.dither_mode, "invert": e.invert,
                     "contrast": e.contrast, "brightness": e.brightness,
                     "threshold_value": e.threshold_value,
-                    "dpi": getattr(e, "dpi", 254.0)
+                    "dpi": getattr(e, "dpi", 254.0),
+                    "gamma": getattr(e, "gamma", 1.0),
+                    "sharpen": getattr(e, "sharpen", 0.0),
+                    "equalize": getattr(e, "equalize", False),
+                    "white_clip": getattr(e, "white_clip", 255),
+                    "black_clip": getattr(e, "black_clip", 0),
+                    "halftone_cell_size": getattr(e, "halftone_cell_size", 6.0),
+                    "halftone_angle_deg": getattr(e, "halftone_angle_deg", 45.0),
+                    "is_mirrored_h": getattr(e, "is_mirrored_h", False),
+                    "is_mirrored_v": getattr(e, "is_mirrored_v", False)
                 })
             entities_data.append(e_dict)
 
@@ -70,9 +86,33 @@ class ProjectIO:
                 "bed_width": getattr(machine_settings, "bed_width", 400.0),
                 "bed_height": getattr(machine_settings, "bed_height", 400.0),
                 "origin_corner": getattr(machine_settings, "origin_corner", "Bottom-Left"),
+                "software_mirror_x": getattr(machine_settings, "software_mirror_x", False),
+                "software_mirror_y": getattr(machine_settings, "software_mirror_y", False),
                 "max_s_value": getattr(machine_settings, "max_s_value", 1000),
+                "min_s_value": getattr(machine_settings, "min_s_value", 0),
                 "laser_mode": getattr(machine_settings, "laser_mode", "M4"),
-                "rapid_speed": getattr(machine_settings, "rapid_speed", 3000.0)
+                "use_inline_power": getattr(machine_settings, "use_inline_power", True),
+                "rapid_speed": getattr(machine_settings, "rapid_speed", 3000.0),
+                "jog_speed": getattr(machine_settings, "jog_speed", 2000.0),
+                "framing_power_pct": getattr(machine_settings, "framing_power_pct", 0.5),
+                "framing_speed": getattr(machine_settings, "framing_speed", 2000.0),
+                "laser_fire_delay_ms": getattr(machine_settings, "laser_fire_delay_ms", 0.0),
+                "laser_off_delay_ms": getattr(machine_settings, "laser_off_delay_ms", 0.0),
+                "overscan_enabled": getattr(machine_settings, "overscan_enabled", False),
+                "overscan_pct": getattr(machine_settings, "overscan_pct", 2.5),
+                "overscan_mode": getattr(machine_settings, "overscan_mode", "Percentage"),
+                "overscan_mm": getattr(machine_settings, "overscan_mm", 2.0),
+                "kerf_width_mm": getattr(machine_settings, "kerf_width_mm", 0.08),
+                "finish_position_mode": getattr(machine_settings, "finish_position_mode", "Origin"),
+                "park_x": getattr(machine_settings, "park_x", 0.0),
+                "park_y": getattr(machine_settings, "park_y", 0.0),
+                "custom_start_gcode": getattr(machine_settings, "custom_start_gcode", ""),
+                "custom_end_gcode": getattr(machine_settings, "custom_end_gcode", ""),
+                "air_assist_cmd": getattr(machine_settings, "air_assist_cmd", "M8"),
+                "air_assist_off_cmd": getattr(machine_settings, "air_assist_off_cmd", "M9"),
+                "enable_air_assist_by_default": getattr(machine_settings, "enable_air_assist_by_default", False),
+                "air_assist_pre_delay_sec": getattr(machine_settings, "air_assist_pre_delay_sec", 0.0),
+                "air_assist_post_delay_sec": getattr(machine_settings, "air_assist_post_delay_sec", 0.0),
             }
 
         data = {
@@ -98,16 +138,9 @@ class ProjectIO:
         # Restore machine settings
         m = data.get("machine", {})
         if machine_settings is not None:
-            if hasattr(machine_settings, "bed_width") and "bed_width" in m:
-                machine_settings.bed_width = float(m["bed_width"])
-            if hasattr(machine_settings, "bed_height") and "bed_height" in m:
-                machine_settings.bed_height = float(m["bed_height"])
-            if hasattr(machine_settings, "origin_corner") and "origin_corner" in m:
-                machine_settings.origin_corner = m["origin_corner"]
-            if hasattr(machine_settings, "max_s_value") and "max_s_value" in m:
-                machine_settings.max_s_value = int(m["max_s_value"])
-            if hasattr(machine_settings, "laser_mode") and "laser_mode" in m:
-                machine_settings.laser_mode = m["laser_mode"]
+            for k, v in m.items():
+                if hasattr(machine_settings, k):
+                    setattr(machine_settings, k, v)
 
         # Restore layers
         for l_data in data.get("layers", []):
@@ -141,15 +174,31 @@ class ProjectIO:
                 entities.append(TextEntity(
                     **base_kwargs, text=d.get("text", ""), font_family=d.get("font_family", "Sans Serif"),
                     font_size=float(d.get("font_size", 20)), bold=bool(d.get("bold", False)),
-                    italic=bool(d.get("italic", False)), width=float(d.get("width", 60)), height=float(d.get("height", 20))
+                    italic=bool(d.get("italic", False)), underline=bool(d.get("underline", False)),
+                    fill_mode=d.get("fill_mode", "Fill"),
+                    width=float(d.get("width", 60)), height=float(d.get("height", 20)),
+                    is_mirrored_h=bool(d.get("is_mirrored_h", False)),
+                    is_mirrored_v=bool(d.get("is_mirrored_v", False))
                 ))
             elif etype == "ImageEntity":
                 entities.append(ImageEntity(
-                    **base_kwargs, image_path=d.get("image_path", ""), width=float(d.get("width", 80)),
+                    **base_kwargs, image_path=d.get("image_path", ""),
+                    raw_image_path=d.get("raw_image_path", ""),
+                    processed_image_path=d.get("processed_image_path", ""),
+                    width=float(d.get("width", 80)),
                     height=float(d.get("height", 80)), dither_mode=d.get("dither_mode", "Floyd-Steinberg"),
                     invert=bool(d.get("invert", False)), contrast=float(d.get("contrast", 1.0)),
                     brightness=float(d.get("brightness", 0.0)), threshold_value=int(d.get("threshold_value", 128)),
-                    dpi=float(d.get("dpi", 254.0))
+                    dpi=float(d.get("dpi", 254.0)),
+                    gamma=float(d.get("gamma", 1.0)),
+                    sharpen=float(d.get("sharpen", 0.0)),
+                    equalize=bool(d.get("equalize", False)),
+                    white_clip=int(d.get("white_clip", 255)),
+                    black_clip=int(d.get("black_clip", 0)),
+                    halftone_cell_size=float(d.get("halftone_cell_size", 6.0)),
+                    halftone_angle_deg=float(d.get("halftone_angle_deg", 45.0)),
+                    is_mirrored_h=bool(d.get("is_mirrored_h", False)),
+                    is_mirrored_v=bool(d.get("is_mirrored_v", False))
                 ))
 
         return entities, layer_manager, m
@@ -158,165 +207,11 @@ class ProjectIO:
     @staticmethod
     def import_svg(filepath: str, default_layer_id: int = 0) -> List[LaserEntity]:
         """Parses an SVG file and converts primitives/paths into LaserForge entities."""
-        entities = []
-        try:
-            tree = ET.parse(filepath)
-            root = tree.getroot()
-            # Strip namespaces
-            for elem in root.iter():
-                if "}" in elem.tag:
-                    elem.tag = elem.tag.split("}", 1)[1]
-
-            for elem in root.iter():
-                tag = elem.tag.lower()
-                if tag == "rect":
-                    x = float(elem.get("x", 0))
-                    y = float(elem.get("y", 0))
-                    w = float(elem.get("width", 0))
-                    h = float(elem.get("height", 0))
-                    if w > 0 and h > 0:
-                        entities.append(RectEntity(layer_id=default_layer_id, name="SVG Rect", x=x, y=y, width=w, height=h))
-
-                elif tag == "circle":
-                    cx = float(elem.get("cx", 0))
-                    cy = float(elem.get("cy", 0))
-                    r = float(elem.get("r", 0))
-                    if r > 0:
-                        entities.append(CircleEntity(layer_id=default_layer_id, name="SVG Circle", x=cx, y=cy, radius_x=r, radius_y=r))
-
-                elif tag == "ellipse":
-                    cx = float(elem.get("cx", 0))
-                    cy = float(elem.get("cy", 0))
-                    rx = float(elem.get("rx", 0))
-                    ry = float(elem.get("ry", 0))
-                    if rx > 0 and ry > 0:
-                        entities.append(CircleEntity(layer_id=default_layer_id, name="SVG Ellipse", x=cx, y=cy, radius_x=rx, radius_y=ry))
-
-                elif tag == "line":
-                    x1 = float(elem.get("x1", 0))
-                    y1 = float(elem.get("y1", 0))
-                    x2 = float(elem.get("x2", 0))
-                    y2 = float(elem.get("y2", 0))
-                    entities.append(LineEntity(layer_id=default_layer_id, name="SVG Line", x=x1, y=y1, x2=x2, y2=y2))
-
-                elif tag in ("polyline", "polygon"):
-                    points_str = elem.get("points", "")
-                    raw_coords = [float(c) for c in re.findall(r"[-+]?[0-9]*\.?[0-9]+", points_str)]
-                    pts = [(raw_coords[i], raw_coords[i+1]) for i in range(0, len(raw_coords) - 1, 2)]
-                    if pts:
-                        closed = (tag == "polygon")
-                        if closed and pts[0] != pts[-1]:
-                            pts.append(pts[0])
-                        min_x = min(p[0] for p in pts)
-                        min_y = min(p[1] for p in pts)
-                        norm_pts = [(p[0] - min_x, p[1] - min_y) for p in pts]
-                        entities.append(PathEntity(layer_id=default_layer_id, name=f"SVG {tag.capitalize()}", x=min_x, y=min_y, contours=[norm_pts], closed=closed))
-
-                elif tag == "path":
-                    d_attr = elem.get("d", "")
-                    contours = ProjectIO._parse_svg_path_d(d_attr)
-                    if contours:
-                        all_pts = [p for c in contours for p in c]
-                        if all_pts:
-                            min_x = min(p[0] for p in all_pts)
-                            min_y = min(p[1] for p in all_pts)
-                            norm_contours = [[(p[0] - min_x, p[1] - min_y) for p in c] for c in contours]
-                            entities.append(PathEntity(layer_id=default_layer_id, name="SVG Path", x=min_x, y=min_y, contours=norm_contours, closed=True))
-
-        except Exception as e:
-            print(f"SVG Import error: {e}")
-
-        return entities
+        from laserforge.core.svg_importer import SVGImporter
+        return SVGImporter.import_svg_file(filepath, default_layer_id=default_layer_id)
 
     @staticmethod
     def _parse_svg_path_d(d: str) -> List[List[Tuple[float, float]]]:
-        """Simple tokenizer & linearizer for common SVG path commands (M, L, H, V, C, Z)."""
-        tokens = re.findall(r"([a-df-zA-DF-Z]|[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", d)
-        contours = []
-        cur_contour = []
-        cur_x, cur_y = 0.0, 0.0
-        start_x, start_y = 0.0, 0.0
-
-        i = 0
-        cur_cmd = "M"
-
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok.isalpha():
-                cur_cmd = tok
-                i += 1
-            else:
-                cmd = cur_cmd
-                if cmd in ("M", "m"):
-                    px = float(tokens[i])
-                    py = float(tokens[i+1])
-                    i += 2
-                    if cmd == "m":
-                        cur_x += px
-                        cur_y += py
-                    else:
-                        cur_x, cur_y = px, py
-                    if cur_contour:
-                        contours.append(cur_contour)
-                        cur_contour = []
-                    start_x, start_y = cur_x, cur_y
-                    cur_contour.append((cur_x, cur_y))
-                    cur_cmd = "l" if cmd == "m" else "L"
-
-                elif cmd in ("L", "l"):
-                    px = float(tokens[i])
-                    py = float(tokens[i+1])
-                    i += 2
-                    if cmd == "l":
-                        cur_x += px
-                        cur_y += py
-                    else:
-                        cur_x, cur_y = px, py
-                    cur_contour.append((cur_x, cur_y))
-
-                elif cmd in ("H", "h"):
-                    px = float(tokens[i])
-                    i += 1
-                    cur_x = cur_x + px if cmd == "h" else px
-                    cur_contour.append((cur_x, cur_y))
-
-                elif cmd in ("V", "v"):
-                    py = float(tokens[i])
-                    i += 1
-                    cur_y = cur_y + py if cmd == "v" else py
-                    cur_contour.append((cur_x, cur_y))
-
-                elif cmd in ("C", "c"):
-                    if i + 5 < len(tokens):
-                        x1 = float(tokens[i]); y1 = float(tokens[i+1])
-                        x2 = float(tokens[i+2]); y2 = float(tokens[i+3])
-                        x3 = float(tokens[i+4]); y3 = float(tokens[i+5])
-                        i += 6
-                        if cmd == "c":
-                            x1 += cur_x; y1 += cur_y
-                            x2 += cur_x; y2 += cur_y
-                            x3 += cur_x; y3 += cur_y
-
-                        # Linearize cubic bezier into 8 steps
-                        for step in range(1, 9):
-                            t = step / 8.0
-                            bx = ((1-t)**3 * cur_x) + (3*(1-t)**2 * t * x1) + (3*(1-t)*t**2 * x2) + (t**3 * x3)
-                            by = ((1-t)**3 * cur_y) + (3*(1-t)**2 * t * y1) + (3*(1-t)*t**2 * y2) + (t**3 * y3)
-                            cur_contour.append((bx, by))
-                        cur_x, cur_y = x3, y3
-                    else:
-                        break
-
-                elif cmd in ("Z", "z"):
-                    cur_x, cur_y = start_x, start_y
-                    cur_contour.append((cur_x, cur_y))
-                    contours.append(cur_contour)
-                    cur_contour = []
-                    i += 1
-                else:
-                    i += 1
-
-        if cur_contour:
-            contours.append(cur_contour)
-
-        return contours
+        """Tokenizer & linearizer for SVG path commands (delegates to SVGImporter)."""
+        from laserforge.core.svg_importer import SVGImporter
+        return SVGImporter.parse_path_d(d)

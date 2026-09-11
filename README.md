@@ -14,6 +14,24 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - Vector creation tools: Selection, Rectangle, Circle/Ellipse, Line, and Text.
   - Real-time transform handles, bounding box snapping, and rotation.
   - Multi-shape alignment tools (Left, Right, Top, Bottom, Centers, and Bed Center).
+  - Multi-level **Undo / Redo** (`Ctrl+Z`, `Ctrl+Y`) with snapshot state history across transforms and edits.
+- **Vector Booleans CSG Operations (Weld, Subtract, Intersect)**:
+  - **Weld / Union** (`Ctrl+Shift+U`): Merges overlapping vector geometries and text into a continuous outer perimeter.
+  - **Subtract / Difference** (`Ctrl+Shift+D`): Subtracts top overlapping shapes from the base shape (creating cutouts, mortises, and stencil holes).
+  - **Intersect** (`Ctrl+Shift+X`): Retains only the overlapping intersections between shapes.
+  - Preserves layer attributes, path direction, and automatic inner-first cutout detection.
+- **High-Speed Raster Acceleration CAM & Rapid Blank-Space Skipping**:
+  - **Physics-Based Overscan ($d = \frac{v^2}{2a}$)**: Dynamically calculates required acceleration lead-in and lead-out travel based on cut feedrate and machine $X$-axis acceleration, eliminating edge turnaround burns and deceleration scorch marks.
+  - **Whitespace Rapid Skipping**: Automatically detects blank-space gaps ($\ge 8$ mm default) between shapes along scanlines and executes high-speed $G0$ non-burning rapids instead of slow $G1$ traversals, slashing sparse multi-part raster times.
+  - Automatic clamping to machine bed boundaries $[0, \text{bed\_width}]$ to prevent soft/hard limit alarm trips.
+- **Overhead USB Camera Vision & Bed Alignment Overlay**:
+  - **4-Step Calibration Wizard** (`Ctrl+Shift+K`): OpenCV checkerboard lens undistortion ($K, D$) and 4-point laser-burned fiducial homography ($H$).
+  - **Live Rectified Bed Overlay** (`Ctrl+Shift+B`): Projects an orthophoto background image of the physical workbed directly onto the 2D CAD canvas at $1:1$ millimeter scale for rapid visual stock alignment.
+  - Adjustable overlay opacity slider, toggle switch, and built-in simulator camera for headless systems.
+- **Decoupled Standalone AI Companion Studio**:
+  - Independent desktop application launcher (`laserforge-ai.desktop` / `bin/laserforge-ai`).
+  - Completely decouples PyTorch and CUDA dependencies from core LaserForge, keeping core startup instant ($<0.2$ s).
+  - Generates 8GB VRAM-optimized SDXL Turbo laser art and transfers directly into LaserForge via IPC mailbox.
 - **LightBurn-Style Cuts / Layers**:
   - Color-coded layers (C00 to C11 + T1 Tool Layer).
   - Independent per-layer cut modes: `Line` (vector cut/score), `Fill` (raster engraving), `Fill + Line` (combined fill with crisp perimeter outline), and `Image` (photo engraving).
@@ -35,11 +53,16 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - **Dust / Speckle Filter**: Rejects speckle noise smaller than configurable pixel threshold.
   - **Interactive Tracing Studio**: Real-time side-by-side / overlay preview with image fade slider, threshold adjustment, invert toggle, and layer assignment.
   - **Export to SVG**: One-click export to standalone `.svg` vector files or direct insertion onto the cutting bed.
+- **Design Studio & Production Tools**:
+  - **Material Library & Test Matrix Generator**: Pre-calibrated material profiles for 3W blue diode lasers, custom material persistence, and automatic parametric Power vs. Speed test grid generator.
+  - **Parametric Barcode & QR Code Designer**: Vector and raster barcode generator supporting Code 128, Code 39, EAN-13, UPC-A, and 2D QR codes with direct laser hatching.
+  - **Curved Text on Path & Typography**: Wraps text along arcs and custom curves with adjustable radius and letter spacing.
+  - **Parametric Templates & Shape Generator**: Parametric box joint maker, living hinges, test cards, stars, gears, and polygons.
+  - **Pre-Flight G-Code Safety Validator**: Inspects generated G-code programs to prevent machine alarms, out-of-bounds bed crashes, and unconstrained laser dwell burns.
 - **Interactive Toolpath Simulation Preview**:
   - Real-time 2D animated simulation canvas showing rapid moves (red dotted) and laser burn moves (layer colored).
   - Animated laser head scrubber slider with Play / Pause / Reset and speed multipliers (1x to 50x).
   - Raw G-code viewer with one-click export (`.nc` / `.gcode`) and clipboard copy.
-
 - **Real-Time Machine Controller**:
   - Background threaded USB serial communications with GRBL 1.1+.
   - 8-directional jog pad with configurable step sizes (0.1, 1, 10, 50, 100 mm) and speed control.
@@ -103,6 +126,13 @@ python3 -m laserforge.main
 | **Circle Tool** | `C` |
 | **Line Tool** | `L` |
 | **Text Tool** | `T` |
+| **Undo** | `Ctrl + Z` |
+| **Redo** | `Ctrl + Y` |
+| **Weld / Union** | `Ctrl + Shift + U` |
+| **Subtract / Difference** | `Ctrl + Shift + D` |
+| **Intersect** | `Ctrl + Shift + X` |
+| **Camera Calibration Wizard** | `Ctrl + Shift + K` |
+| **Update Camera Bed Overlay** | `Ctrl + Shift + B` |
 | **Select All** | `Ctrl + A` |
 | **Duplicate Selected** | `Ctrl + D` |
 | **Delete Selected** | `Delete` |
@@ -121,11 +151,16 @@ python3 -m laserforge.main
 cd /home/k/LaserForge
 python3 -m unittest discover tests
 ```
-All 10 test suites verify:
+All automated test suites (87 unit tests) verify:
 - Geometric entity definitions and boundary math
 - Multi-layer parameter configuration
 - Floyd-Steinberg and Atkinson dithering
-- G-code generation and dynamic M4 spindle modulation
+- G-code generation with Dynamic Laser Power (M4)
 - Framing bounding box generation
 - Project serialization (`.laserproj`) and SVG vector import
 - Inner-first contour nesting and TSP rapid travel optimization
+- Constructive Solid Geometry (CSG) vector booleans (Weld, Subtract, Intersect) and Undo/Redo stacks
+- High-speed raster acceleration overscan calculations and whitespace rapid skipping
+- OpenCV camera lens calibration, perspective homography rectification, and canvas orthophoto overlays
+- GRBL G-code program pre-flight safety and limits validation
+- GPU / CPU accelerated raster calculations

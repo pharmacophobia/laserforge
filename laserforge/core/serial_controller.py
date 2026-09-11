@@ -6,20 +6,125 @@ homing, framing, and emergency stop abort handling via PyQt6 QThread signals.
 
 import time
 import threading
-from typing import List, Optional, Tuple, Dict
+import queue
+from typing import List, Optional, Tuple, Dict, Any
 import serial
 import serial.tools.list_ports
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
+from laserforge.core.auto_connect import (
+    PortDetector, AutoConnectWorker, USBHotplugWatcher, RankedPort
+)
+
+# Standard GRBL 1.1 Error Code Reference
+GRBL_ERRORS: Dict[int, str] = {
+    1: "Letter format missing in G-code word",
+    2: "Numeric value format is not valid",
+    3: "Grbl '$' system command not recognized",
+    4: "Negative value for expected positive value",
+    5: "Homing cycle failure",
+    6: "Minimum step pulse must be > 3usec",
+    7: "EEPROM read failed",
+    8: "Command not allowed unless Grbl is IDLE",
+    9: "G-code locked out in Alarm or Jog state (click Unlock $X first)",
+    10: "Soft limits cannot be enabled without homing",
+    11: "Line characters exceeded buffer limit",
+    12: "Step rate exceeded maximum supported",
+    13: "Safety door opened",
+    14: "Build info line exceeded EEPROM limit",
+    15: "Jog target exceeds machine travel",
+    16: "Jog command invalid format",
+    17: "Laser mode requires PWM output",
+    20: "Unsupported or invalid G-code command (buffer overflow or corrupted block)",
+    21: "Multiple commands from same modal group in block",
+    22: "Feed rate undefined or missing",
+    23: "G-code command requires integer value",
+    24: "More than two axis words found",
+    25: "Repeated G-code word in block",
+    26: "No axis words found for move",
+    27: "Line number value not less than 50,000",
+    28: "G-code command requires a P value",
+    29: "Grbl supports coordinate systems G54-G59",
+    30: "G53 invalid with current motion mode",
+    31: "Axis words found without active motion mode",
+    32: "Arc requires target pointer",
+    33: "Motion command target is invalid",
+    34: "Arc radius error",
+    35: "Arc requires in-plane offset word",
+    36: "Unused value words found in block",
+    37: "Dynamic tool length offset error",
+    38: "Tool number greater than max",
+}
+
+# Standard GRBL 1.1 Alarm Reference
+GRBL_ALARMS: Dict[int, str] = {
+    1: "Hard limit switch triggered (carriage hit limit switch or end of travel)",
+    2: "Soft limit alarm (target motion exceeds machine travel bounds)",
+    3: "Reset while in motion",
+    4: "Probe fail: probe not in expected initial state",
+    5: "Probe fail: probe did not contact workpiece within travel",
+    6: "Homing fail: active homing cycle was reset",
+    7: "Homing fail: safety door was opened during homing",
+    8: "Homing fail: pull-off travel failed to clear limit switch",
+    9: "Homing fail: limit switch search distance exceeded",
+    10: "Homing fail: dual-axis switch not cleared",
+}
+
+# Standard GRBL 1.1 Firmware Parameter Descriptions
+GRBL_SETTING_DESCRIPTIONS: Dict[str, Tuple[str, str, str]] = {
+    "$0": ("Step pulse time", "microseconds", "Sets time length per step pulse (min 3us)"),
+    "$1": ("Step idle delay", "milliseconds", "Time to keep stepper motors energized after move. 255 = keep locked"),
+    "$2": ("Step pulse invert", "mask", "Inverts step pulse pin signal (active high/low)"),
+    "$3": ("Direction invert", "mask", "Inverts motor direction: 1=X, 2=Y, 4=Z"),
+    "$4": ("Step enable invert", "bool", "Inverts stepper driver enable pin"),
+    "$5": ("Limit pins invert", "bool", "Inverts limit switch input pins (normally open vs closed)"),
+    "$6": ("Probe pin invert", "bool", "Inverts probe pin input signal"),
+    "$10": ("Status report options", "mask", "Controls GRBL status report fields (WPos vs MPos, buffer, pins)"),
+    "$11": ("Junction deviation", "mm", "Cornering speed factor. Lower = slower through sharp corners"),
+    "$12": ("Arc tolerance", "mm", "G2/G3 arc discretization precision"),
+    "$13": ("Report inches", "bool", "0 = mm, 1 = inches"),
+    "$20": ("Soft limits enable", "bool", "Prevents machine from exceeding travel bounds in G-code"),
+    "$21": ("Hard limits enable", "bool", "Immediately halts machine if endstop switch is tripped"),
+    "$22": ("Homing cycle enable", "bool", "Enables $H homing cycle to find mechanical limits"),
+    "$23": ("Homing dir invert", "mask", "Homing direction invert mask (1=X, 2=Y, 4=Z)"),
+    "$24": ("Homing feed", "mm/min", "Slow pull-off touch speed during homing"),
+    "$25": ("Homing seek", "mm/min", "Initial fast search speed during homing"),
+    "$26": ("Homing debounce", "milliseconds", "Switch debounce delay for noisy endstops"),
+    "$27": ("Homing pull-off", "mm", "Distance moved off limit switch after trigger"),
+    "$30": ("Max spindle speed / PWM ($30)", "RPM / PWM", "Maximum laser power S-value (e.g. 1000 for 100% duty cycle)"),
+    "$31": ("Min spindle speed / PWM ($31)", "RPM / PWM", "Minimum laser power S-value (usually 0)"),
+    "$32": ("Laser-mode enable ($32)", "bool", "1 = Diode/CO2 laser mode (dynamic M4 power scaling), 0 = Spindle"),
+    "$100": ("X Steps/mm", "step/mm", "Number of stepper pulses to move X axis by 1.0 mm"),
+    "$101": ("Y Steps/mm", "step/mm", "Number of stepper pulses to move Y axis by 1.0 mm"),
+    "$102": ("Z Steps/mm", "step/mm", "Number of stepper pulses to move Z axis by 1.0 mm"),
+    "$110": ("X Max rate", "mm/min", "Maximum rapid travel speed for X axis"),
+    "$111": ("Y Max rate", "mm/min", "Maximum rapid travel speed for Y axis"),
+    "$112": ("Z Max rate", "mm/min", "Maximum rapid travel speed for Z axis"),
+    "$120": ("X Acceleration", "mm/sec^2", "Acceleration rate for X axis motion planner"),
+    "$121": ("Y Acceleration", "mm/sec^2", "Acceleration rate for Y axis motion planner"),
+    "$122": ("Z Acceleration", "mm/sec^2", "Acceleration rate for Z axis motion planner"),
+    "$130": ("X Max travel", "mm", "Maximum travel distance of X axis before soft limit alarm"),
+    "$131": ("Y Max travel", "mm", "Maximum travel distance of Y axis before soft limit alarm"),
+    "$132": ("Z Max travel", "mm", "Maximum travel distance of Z axis before soft limit alarm"),
+}
 
 class SerialController(QObject):
     # Signals for UI updates
     connected = pyqtSignal(str)          # Port name
     disconnected = pyqtSignal()
     connection_failed = pyqtSignal(str)  # Error message
-    status_updated = pyqtSignal(dict)    # Status dict: state, mpos, wpos
+    status_updated = pyqtSignal(dict)    # Status dict: state, mpos, wpos, pins
     log_received = pyqtSignal(str, str)  # (direction: "tx"|"rx"|"err", text)
     job_progress = pyqtSignal(float, int, int) # (pct 0..100, cur_line, total_lines)
     job_finished = pyqtSignal(bool, str) # (success, message)
+    machine_parameters_loaded = pyqtSignal(dict) # {"bed_width": float, "bed_height": float, ...}
+    grbl_setting_received = pyqtSignal(str, str) # ($key, val)
+    grbl_settings_updated = pyqtSignal(dict)     # Full {key: val} dictionary
+
+    # Automated Connection Signals
+    auto_connect_started = pyqtSignal()
+    auto_connect_progress = pyqtSignal(str)
+    auto_connect_finished = pyqtSignal(bool, str)
+    ports_changed = pyqtSignal(list)     # List of RankedPort
 
     def __init__(self):
         super().__init__()
@@ -32,6 +137,29 @@ class SerialController(QObject):
         self.machine_state = "Disconnected"
         self.mpos = [0.0, 0.0, 0.0]
         self.wpos = [0.0, 0.0, 0.0]
+        self.wco = [0.0, 0.0, 0.0]
+        self.active_pins = ""
+        self.grbl_settings: Dict[str, str] = {}
+        self.machine_limits: Dict[str, Any] = {
+            "bed_width": 400.0,
+            "bed_height": 400.0,
+            "max_s_value": 1000,
+            "min_s_value": 0,
+            "laser_mode": "M4",
+            "hard_limits": False,
+            "soft_limits": False,
+            "homing_enabled": False,
+            "x_steps_per_mm": 80.0,
+            "y_steps_per_mm": 80.0,
+            "z_steps_per_mm": 250.0,
+            "x_max_rate": 5000.0,
+            "y_max_rate": 5000.0,
+            "x_accel": 500.0,
+            "y_accel": 500.0,
+            "invert_x_dir": False,
+            "invert_y_dir": False,
+            "invert_z_dir": False
+        }
 
         # Streaming state
         self.is_streaming = False
@@ -40,19 +168,81 @@ class SerialController(QObject):
         self.gcode_lines: List[str] = []
         self.current_line_idx = 0
 
-        # Background worker thread
+        # Automated connection & hotplug worker
+        self.auto_connect_worker: Optional[AutoConnectWorker] = None
+        self.hotplug_watcher: Optional[USBHotplugWatcher] = None
+        self.auto_reconnect_enabled = True
+
+        # Background worker thread & FIFO response queue
         self.worker_thread: Optional[threading.Thread] = None
         self.stop_worker = False
         self.lock = threading.Lock()
-        self.ack_event = threading.Event()
-        self.ack_status = False
-
+        self.ack_queue: queue.Queue = queue.Queue()
 
     @staticmethod
-    def list_available_ports() -> List[str]:
-        """Returns list of connected serial port devices."""
-        ports = serial.tools.list_ports.comports()
+    def list_available_ports(include_dummy_tty: bool = False) -> List[str]:
+        """Returns sorted list of connected serial port devices with laser candidates first."""
+        ports = PortDetector.get_ranked_ports(include_dummy_tty=include_dummy_tty)
+        if not ports and not include_dummy_tty:
+            ports = PortDetector.get_ranked_ports(include_dummy_tty=True)
         return [p.device for p in ports]
+
+    @staticmethod
+    def get_ranked_ports(include_dummy_tty: bool = False) -> List[RankedPort]:
+        """Returns ranked list of serial ports with metadata and device descriptions."""
+        ports = PortDetector.get_ranked_ports(include_dummy_tty=include_dummy_tty)
+        if not ports and not include_dummy_tty:
+            ports = PortDetector.get_ranked_ports(include_dummy_tty=True)
+        return ports
+
+    def start_auto_connect(self, preferred_port: Optional[str] = None):
+        """Launches background probe to locate and connect to GRBL laser engraver."""
+        if self.is_connected:
+            self.disconnect()
+
+        if self.auto_connect_worker and self.auto_connect_worker.isRunning():
+            self.auto_connect_worker.abort()
+            self.auto_connect_worker.wait(timeout=1000)
+
+        target_pref = preferred_port or self.port_name
+        self.auto_connect_worker = AutoConnectWorker(preferred_port=target_pref, parent=self)
+        self.auto_connect_worker.probe_started.connect(self.auto_connect_started.emit)
+        self.auto_connect_worker.probe_progress.connect(self.auto_connect_progress.emit)
+        self.auto_connect_worker.laser_found.connect(self._on_auto_laser_found)
+        self.auto_connect_worker.probe_finished.connect(self._on_auto_probe_finished)
+        self.auto_connect_worker.start()
+
+    def stop_auto_connect(self):
+        """Cancels any in-flight auto-connect scan."""
+        if self.auto_connect_worker and self.auto_connect_worker.isRunning():
+            self.auto_connect_worker.abort()
+            self.auto_connect_worker.wait(timeout=500)
+
+    def _on_auto_laser_found(self, port: str, baud: int, summary: str):
+        self.log_received.emit("rx", f"Auto-detected GRBL laser on {port} ({summary})")
+        self.connect(port, baud)
+
+    def _on_auto_probe_finished(self, success: bool, msg: str):
+        self.auto_connect_finished.emit(success, msg)
+
+    def enable_hotplug_watcher(self, enabled: bool = True):
+        """Starts or stops the background USB device plug-in watcher."""
+        if enabled:
+            if not self.hotplug_watcher:
+                self.hotplug_watcher = USBHotplugWatcher(check_interval_ms=1500, parent=self)
+                self.hotplug_watcher.ports_changed.connect(self.ports_changed.emit)
+                self.hotplug_watcher.device_inserted.connect(self._on_usb_device_inserted)
+                self.hotplug_watcher.start()
+        else:
+            if self.hotplug_watcher:
+                self.hotplug_watcher.stop()
+                self.hotplug_watcher = None
+
+    def _on_usb_device_inserted(self, device_path: str):
+        """Fires when a new USB serial device is plugged into the system."""
+        self.log_received.emit("rx", f"USB serial device detected: {device_path}")
+        if not self.is_connected and self.auto_reconnect_enabled:
+            self.start_auto_connect(preferred_port=device_path)
 
     def connect(self, port: str, baud: int = 115200) -> bool:
         """Opens connection to the laser engraver."""
@@ -69,14 +259,19 @@ class SerialController(QObject):
             self.port_name = port
             self.baud_rate = baud
 
-            # Wake up GRBL with newlines and check status
-            self.serial_port.write(b"\r\n\r\n")
+            # Wake up GRBL with clean newlines and check status
+            self.serial_port.write(b"\n\n")
             time.sleep(0.2)
 
             # Start background reader and poller thread
             self.stop_worker = False
             self.worker_thread = threading.Thread(target=self._reader_loop, daemon=True)
             self.worker_thread.start()
+
+            # Query controller settings ($$) and build info ($I) asynchronously
+            time.sleep(0.1)
+            self.send_command("$$")
+            self.send_command("$I")
 
             self.connected.emit(port)
             self.log_received.emit("rx", f"Connected to {port} at {baud} baud.")
@@ -89,19 +284,20 @@ class SerialController(QObject):
 
     def disconnect(self):
         """Safely disconnects from the laser."""
-        if not self.is_connected:
-            return
-
-        self.stop_streaming()
+        was_connected = self.is_connected
         self.stop_worker = True
+        self.stop_streaming()
 
         if self.worker_thread and self.worker_thread.is_alive():
-            self.worker_thread.join(timeout=1.0)
+            try:
+                self.worker_thread.join(timeout=1.0)
+            except Exception:
+                pass
 
         with self.lock:
             if self.serial_port and self.serial_port.is_open:
                 try:
-                    self.serial_port.write(b"M5\r\n") # Ensure laser is OFF
+                    self.serial_port.write(b"M5\n") # Ensure laser is OFF
                     self.serial_port.close()
                 except Exception:
                     pass
@@ -109,11 +305,15 @@ class SerialController(QObject):
             self.is_connected = False
             self.machine_state = "Disconnected"
 
-        self.disconnected.emit()
-        self.log_received.emit("rx", "Disconnected from machine.")
+        if was_connected:
+            try:
+                self.disconnected.emit()
+                self.log_received.emit("rx", "Disconnected from machine.")
+            except RuntimeError:
+                pass
 
     def send_command(self, cmd: str):
-        """Sends a raw command or G-code line to GRBL."""
+        """Sends a raw command or G-code line to GRBL using standard \\n terminator."""
         if not self.is_connected or not self.serial_port:
             self.log_received.emit("err", "Cannot send command: Not connected.")
             return
@@ -124,7 +324,7 @@ class SerialController(QObject):
 
         with self.lock:
             try:
-                self.serial_port.write((clean_cmd + "\r\n").encode("latin1"))
+                self.serial_port.write((clean_cmd + "\n").encode("latin1"))
                 self.log_received.emit("tx", clean_cmd)
             except Exception as e:
                 self.log_received.emit("err", f"Send error: {e}")
@@ -177,9 +377,57 @@ class SerialController(QObject):
     def toggle_test_laser(self, on: bool, power_s: int = 5):
         """Toggles low-power framing laser beam for focusing / alignment."""
         if on:
-            self.send_command(f"M3 S{power_s}")
+            # In GRBL Laser Mode ($32=1), stationary laser firing requires G1 modal state
+            self.send_command(f"M3 G1 S{power_s} F1")
         else:
-            self.send_command("M5")
+            self.send_command("M5 S0")
+            self.send_command("G0")
+
+    def pulse_laser(self, power_pct: float = 1.0, duration_ms: int = 100):
+        """Test fires the laser beam for a precise duration in milliseconds."""
+        max_s = self.machine_limits.get("max_s_value", 1000)
+        s_val = max(1, int(round((power_pct / 100.0) * max_s)))
+        dwell_sec = max(0.01, duration_ms / 1000.0)
+
+        if not self.is_connected:
+            self.log_received.emit("err", "Cannot pulse laser: Laser is not connected.")
+            return
+
+        def _run_pulse():
+            try:
+                # 1. In GRBL Laser Mode ($32=1), stationary laser emission requires active G1 modal state
+                self.send_command(f"M3 G1 S{s_val} F1")
+                self.log_received.emit("tx", f"Laser Pulse ON: M3 G1 S{s_val} ({power_pct:.1f}%, {duration_ms}ms)")
+                # 2. Wait for pulse duration
+                time.sleep(dwell_sec)
+                # 3. Safely extinguish beam and restore rapid G0 modal state
+                self.send_command("M5 S0")
+                self.send_command("G0")
+                self.log_received.emit("tx", "Laser Pulse OFF: M5 S0 (G0 restored)")
+            except Exception as e:
+                self.log_received.emit("err", f"Pulse laser error: {e}")
+                try:
+                    self.send_command("M5 S0")
+                    self.send_command("G0")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run_pulse, daemon=True).start()
+
+    def go_to_park(self, park_x: float = 0.0, park_y: float = 0.0, rapid_speed: float = 3000.0):
+        """Moves laser head to park position."""
+        self.send_command(f"G0 X{park_x:.3f} Y{park_y:.3f} F{rapid_speed:.0f}")
+
+    def query_grbl_settings(self):
+        """Requests $$ configuration from connected GRBL controller."""
+        self.send_command("$$")
+
+    def set_grbl_setting(self, setting_num: Any, val: Any):
+        """Writes an individual $ parameter to GRBL EEPROM."""
+        s_str = str(setting_num).strip()
+        if not s_str.startswith("$"):
+            s_str = f"${s_str}"
+        self.send_command(f"{s_str}={val}")
 
     def start_job(self, gcode_text: str):
         """Begins streaming the G-code program to the laser."""
@@ -225,23 +473,37 @@ class SerialController(QObject):
         self.abort_requested = True
         self.is_streaming = False
         self.is_paused = False
-        self.ack_event.set()
+        self.ack_queue.put(("abort", "Aborted by user"))
         if self.is_connected and self.serial_port:
-
             with self.lock:
                 try:
-                    self.serial_port.write(b"M5\r\n\x18") # Turn off laser + soft reset
+                    self.serial_port.write(b"M5\n\x18") # Turn off laser + soft reset
                 except Exception:
                     pass
             time.sleep(0.1)
             self.unlock()
 
     def _streaming_loop(self):
-        """High-speed character-counting / ping-pong G-code streamer."""
+        """
+        High-speed character-counting G-code streaming engine for GRBL.
+        Maintains saturated planner buffer (up to 120 bytes in flight) to eliminate
+        motor stuttering and false timeouts during laser engraving.
+        """
         total = len(self.gcode_lines)
         self.log_received.emit("rx", f"Starting G-Code stream ({total} lines)...")
 
-        for idx, line in enumerate(self.gcode_lines):
+        # Drain residual tokens from ack_queue before starting
+        while not self.ack_queue.empty():
+            try:
+                self.ack_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        in_flight: List[int] = []  # Length of lines in flight (bytes including \n)
+        max_buffer_bytes = 120    # Safe threshold for GRBL's 128-byte RX buffer
+        idx = 0
+
+        while idx < total or in_flight:
             if self.abort_requested:
                 self.log_received.emit("err", "Job Aborted by user.")
                 self.job_finished.emit(False, "Aborted by user")
@@ -253,51 +515,110 @@ class SerialController(QObject):
                     self.job_finished.emit(False, "Aborted while paused")
                     return
 
-            # Send line and wait for 'ok' or 'error'
-            success = self._send_and_wait_ack(line)
-            if not success:
-                self.log_received.emit("err", f"Error on line {idx+1}: {line}")
-                self.job_finished.emit(False, f"Error executing line: {line}")
-                self.is_streaming = False
-                return
+            # Check if we can send another line into GRBL's RX buffer
+            can_send = False
+            if idx < total:
+                next_line = self.gcode_lines[idx]
+                line_bytes = len(next_line) + 1  # include \n
+                if sum(in_flight) + line_bytes <= max_buffer_bytes:
+                    can_send = True
 
-            self.current_line_idx = idx + 1
-            pct = (self.current_line_idx / total) * 100.0
-            self.job_progress.emit(pct, self.current_line_idx, total)
+            if can_send:
+                with self.lock:
+                    if not self.serial_port or not self.serial_port.is_open:
+                        self.job_finished.emit(False, "Serial port disconnected during stream")
+                        self.is_streaming = False
+                        return
+                    try:
+                        self.serial_port.write((next_line + "\n").encode("latin1"))
+                        if not self.is_streaming or next_line.startswith(";") or not next_line.startswith("G1") or idx % 50 == 0:
+                            self.log_received.emit("tx", next_line)
+                        in_flight.append(line_bytes)
+                        idx += 1
+                    except Exception as e:
+                        self.job_finished.emit(False, f"Serial write failed: {e}")
+                        self.is_streaming = False
+                        return
+            else:
+                # Buffer is full or all lines dispatched: wait for ACK
+                try:
+                    token_type, token_val = self.ack_queue.get(timeout=0.20)
+                    if token_type == "ok":
+                        if in_flight:
+                            in_flight.pop(0)
+                        self.current_line_idx = min(total, idx - len(in_flight))
+                        pct = (self.current_line_idx / total) * 100.0 if total > 0 else 100.0
+                        self.job_progress.emit(pct, self.current_line_idx, total)
+                    elif token_type in ("error", "alarm"):
+                        err_msg = f"Laser controller {token_type}: {token_val} (near line {idx})"
+                        self.log_received.emit("err", err_msg)
+                        self.job_finished.emit(False, err_msg)
+                        self.is_streaming = False
+                        return
+                    elif token_type == "abort":
+                        self.job_finished.emit(False, "Aborted by user")
+                        self.is_streaming = False
+                        return
+                except queue.Empty:
+                    now = time.time()
+                    if self.machine_state in ("Run", "Jog", "Hold"):
+                        continue
+                    if now - getattr(self, "last_rx_time", now) > 60.0:
+                        err_msg = f"Controller response timed out after 60s (near line {idx})"
+                        self.log_received.emit("err", err_msg)
+                        self.job_finished.emit(False, err_msg)
+                        self.is_streaming = False
+                        return
 
         self.is_streaming = False
         self.log_received.emit("rx", "Job Completed Successfully!")
         self.job_finished.emit(True, "Job Completed Successfully")
 
-    def _send_and_wait_ack(self, line: str, max_idle_timeout: float = 15.0) -> bool:
-        """Sends a line and waits for GRBL 'ok' response using event synchronization."""
-        self.ack_event.clear()
-        self.ack_status = False
+    def _send_and_wait_ack(self, line: str, max_idle_timeout: float = 60.0) -> Tuple[bool, str]:
+        """
+        Sends a single line and synchronously waits for GRBL 'ok' or error response.
+        Used for discrete calibration and manual control moves.
+        """
+        # Drain residual tokens before sending
+        while not self.ack_queue.empty():
+            try:
+                self.ack_queue.get_nowait()
+            except queue.Empty:
+                break
 
         with self.lock:
             if not self.serial_port or not self.serial_port.is_open:
-                return False
+                return False, "Serial port not connected"
             try:
-                self.serial_port.write((line + "\r\n").encode("latin1"))
+                self.serial_port.write((line + "\n").encode("latin1"))
                 self.log_received.emit("tx", line)
-            except Exception:
-                return False
+            except Exception as e:
+                return False, f"Write error: {e}"
 
-        # Wait for acknowledgment event; permit long moves while machine is running
         send_time = time.time()
+        last_progress_time = send_time
+
         while not self.abort_requested:
-            if self.ack_event.wait(timeout=0.25):
-                return self.ack_status and not self.abort_requested
+            try:
+                token_type, token_val = self.ack_queue.get(timeout=0.20)
+                if token_type == "ok":
+                    return True, ""
+                elif token_type in ("error", "alarm"):
+                    return False, token_val
+                elif token_type == "abort":
+                    return False, "Aborted by user"
+            except queue.Empty:
+                pass
 
             now = time.time()
             if self.machine_state in ("Run", "Jog", "Hold"):
-                # Actively processing move on hardware
+                last_progress_time = now
                 continue
-            if now - getattr(self, "last_rx_time", send_time) > max_idle_timeout:
-                # Timed out with no communication
-                return False
 
-        return False
+            if now - last_progress_time > max_idle_timeout:
+                return False, f"Controller response timed out after {max_idle_timeout:.0f}s"
+
+        return False, "Job aborted by user"
 
     def _reader_loop(self):
         """Continuously reads incoming data from serial port and polls status."""
@@ -339,18 +660,41 @@ class SerialController(QObject):
                     if clean_line:
                         self._handle_incoming_line(clean_line)
 
-            time.sleep(0.01)
+            if raw_data:
+                time.sleep(0.001)
+            else:
+                time.sleep(0.005)
+
+        # Handle unexpected serial port drop (e.g. USB cable unplugged or laser powered down)
+        if not self.stop_worker and self.is_connected:
+            with self.lock:
+                if self.serial_port:
+                    try: self.serial_port.close()
+                    except Exception: pass
+                self.serial_port = None
+            self.is_connected = False
+            self.machine_state = "Disconnected"
+            self.disconnected.emit()
+            self.log_received.emit("err", "Laser disconnected unexpectedly (USB cable unplugged or power loss).")
 
     def _handle_incoming_line(self, line: str):
         """Parses GRBL status string or normal response."""
+        if self.stop_worker:
+            return
+        try:
+            self._do_handle_incoming_line(line)
+        except RuntimeError:
+            return
+
+    def _do_handle_incoming_line(self, line: str):
         if line.startswith("<") and line.endswith(">"):
-            # Status report: <Idle|MPos:0.000,0.000,0.000|FS:0,0>
+            # Status report: <Idle|MPos:0.000,0.000,0.000|FS:0,0|Pn:PX>
             content = line[1:-1]
             parts = content.split("|")
             state = parts[0]
             self.machine_state = state
 
-            status_dict = {"state": state, "mpos": self.mpos, "wpos": self.wpos}
+            status_dict = {"state": state, "mpos": self.mpos, "wpos": self.wpos, "pins": self.active_pins}
 
             for p in parts[1:]:
                 if p.startswith("MPos:"):
@@ -367,21 +711,113 @@ class SerialController(QObject):
                         status_dict["wpos"] = coords
                     except ValueError:
                         pass
+                elif p.startswith("WCO:"):
+                    try:
+                        coords = [float(c) for c in p[4:].split(",")]
+                        self.wco = coords
+                    except ValueError:
+                        pass
+                elif p.startswith("Pn:"):
+                    pins = p[3:]
+                    self.active_pins = pins
+                    status_dict["pins"] = pins
+
+            # If controller only reports MPos ($10=1), compute WPos = MPos - WCO
+            if not any(p.startswith("WPos:") for p in parts[1:]):
+                self.wpos = [m - w for m, w in zip(self.mpos, self.wco)]
+                status_dict["wpos"] = self.wpos
 
             self.status_updated.emit(status_dict)
         elif line == "ok":
-            self.ack_status = True
-            self.ack_event.set()
-            self.log_received.emit("rx", line)
+            self.ack_queue.put(("ok", line))
+            if not self.is_streaming:
+                self.log_received.emit("rx", line)
         elif line.startswith("error:"):
-            self.ack_status = False
-            self.ack_event.set()
-            self.log_received.emit("err", line)
+            try:
+                code = int(line.split(":")[1].strip())
+                desc = GRBL_ERRORS.get(code, "Command error")
+                err_desc = f"error:{code} ({desc})"
+            except Exception:
+                err_desc = line
+            self.ack_queue.put(("error", err_desc))
+            self.log_received.emit("err", err_desc)
         elif line.startswith("ALARM:"):
             self.machine_state = "Alarm"
-            self.ack_status = False
-            self.ack_event.set()
-            self.log_received.emit("err", line)
+            try:
+                code = int(line.split(":")[1].strip())
+                desc = GRBL_ALARMS.get(code, "Machine alarm")
+                alarm_desc = f"ALARM:{code} ({desc})"
+            except Exception:
+                alarm_desc = line
+            self.ack_queue.put(("alarm", alarm_desc))
+            self.log_received.emit("err", alarm_desc)
+        elif line.startswith("$"):
+            self._handle_setting_line(line)
+            self.log_received.emit("rx", line)
+        elif line.startswith("["):
+            self.log_received.emit("rx", line)
         else:
             self.log_received.emit("rx", line)
+
+    def _handle_setting_line(self, line: str):
+        """Parses $$ parameters like $130 (max X travel) and $131 (max Y travel)."""
+        if "=" not in line:
+            return
+        key, raw_val = line.split("=", 1)
+        key = key.strip()
+        # Strip potential parenthesized comment: "80.000 (x, step/mm)"
+        clean_val = raw_val.split("(")[0].strip() if "(" in raw_val else raw_val.strip()
+        self.grbl_settings[key] = clean_val
+        self.grbl_setting_received.emit(key, clean_val)
+        self.grbl_settings_updated.emit(self.grbl_settings)
+
+        try:
+            if key == "$130":
+                w = float(clean_val)
+                if w > 0:
+                    self.machine_limits["bed_width"] = w
+            elif key == "$131":
+                h = float(clean_val)
+                if h > 0:
+                    self.machine_limits["bed_height"] = h
+            elif key == "$30":
+                s = int(float(clean_val))
+                if s > 0:
+                    self.machine_limits["max_s_value"] = s
+            elif key == "$31":
+                self.machine_limits["min_s_value"] = int(float(clean_val))
+            elif key == "$32":
+                is_laser = int(float(clean_val)) == 1
+                self.machine_limits["laser_mode"] = "M4" if is_laser else "M3"
+            elif key == "$21":
+                self.machine_limits["hard_limits"] = int(float(clean_val)) == 1
+            elif key == "$20":
+                self.machine_limits["soft_limits"] = int(float(clean_val)) == 1
+            elif key == "$22":
+                self.machine_limits["homing_enabled"] = int(float(clean_val)) == 1
+            elif key == "$100":
+                self.machine_limits["x_steps_per_mm"] = float(clean_val)
+            elif key == "$101":
+                self.machine_limits["y_steps_per_mm"] = float(clean_val)
+            elif key == "$102":
+                self.machine_limits["z_steps_per_mm"] = float(clean_val)
+            elif key == "$110":
+                self.machine_limits["x_max_rate"] = float(clean_val)
+            elif key == "$111":
+                self.machine_limits["y_max_rate"] = float(clean_val)
+            elif key == "$120":
+                self.machine_limits["x_accel"] = float(clean_val)
+            elif key == "$121":
+                self.machine_limits["y_accel"] = float(clean_val)
+            elif key == "$3":
+                mask = int(float(clean_val))
+                self.machine_limits["invert_x_dir"] = bool(mask & 1)
+                self.machine_limits["invert_y_dir"] = bool(mask & 2)
+                self.machine_limits["invert_z_dir"] = bool(mask & 4)
+
+            if key in ("$131", "$132"):
+                self.machine_parameters_loaded.emit(self.machine_limits)
+        except Exception:
+            pass
+
 

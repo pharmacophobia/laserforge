@@ -8,7 +8,7 @@ from typing import Optional, List
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPixmap, QIcon
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QDialog, QLabel, QDoubleSpinBox, QSpinBox,
     QComboBox, QCheckBox, QGroupBox, QFormLayout, QDialogButtonBox
 )
@@ -80,6 +80,15 @@ class CutSettingsDialog(QDialog):
         self.spin_interval.setSuffix(" mm")
         form.addRow("Fill Line Interval:", self.spin_interval)
 
+        # Diode Cooldown Delay (3W Laser Protection)
+        self.spin_pass_delay = QDoubleSpinBox()
+        self.spin_pass_delay.setRange(0.0, 60.0)
+        self.spin_pass_delay.setSingleStep(0.5)
+        self.spin_pass_delay.setValue(getattr(self.layer, "pass_delay_sec", 0.0))
+        self.spin_pass_delay.setSuffix(" s")
+        self.spin_pass_delay.setToolTip("Pause time between passes to let 3W diode laser cool down")
+        form.addRow("Diode Cooling Pause:", self.spin_pass_delay)
+
         # Air assist
         self.chk_air = QCheckBox("Enable Air Assist (M8)")
         self.chk_air.setChecked(self.layer.air_assist)
@@ -100,6 +109,7 @@ class CutSettingsDialog(QDialog):
         self.layer.passes = self.spin_passes.value()
         self.layer.z_step = self.spin_zstep.value()
         self.layer.line_interval = self.spin_interval.value()
+        self.layer.pass_delay_sec = self.spin_pass_delay.value()
         self.layer.air_assist = self.chk_air.isChecked()
         self.accept()
 
@@ -107,6 +117,7 @@ class CutSettingsDialog(QDialog):
 class CutsPanel(QWidget):
     layer_selected = pyqtSignal(int)
     layers_updated = pyqtSignal()
+    material_library_requested = pyqtSignal()
 
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
@@ -115,8 +126,17 @@ class CutsPanel(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(3)
+
+        # Top Bar: Material Library Button
+        top_bar = QHBoxLayout()
+        btn_mat_lib = QPushButton("📋  3W Material Presets...")
+        btn_mat_lib.setToolTip("Apply pre-calibrated 3W laser settings for metal cards, wood, leather, acrylic")
+        btn_mat_lib.setStyleSheet("font-weight: bold; padding: 3px;")
+        btn_mat_lib.clicked.connect(self.material_library_requested.emit)
+        top_bar.addWidget(btn_mat_lib)
+        layout.addLayout(top_bar)
 
         # Table of Layers
         self.table = QTableWidget()
@@ -126,39 +146,42 @@ class CutsPanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setMaximumHeight(100)
+        self.table.setMinimumHeight(65)
         self.table.doubleClicked.connect(self._on_row_double_clicked)
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table)
 
         # Bottom Color Swatch Palette (LightBurn style)
         swatch_group = QGroupBox("Color Palette")
-        swatch_layout = QHBoxLayout(swatch_group)
-        swatch_layout.setContentsMargins(4, 4, 4, 4)
-        swatch_layout.setSpacing(3)
+        swatch_layout = QGridLayout(swatch_group)
+        swatch_layout.setContentsMargins(3, 2, 3, 2)
+        swatch_layout.setSpacing(2)
 
-        for p in LAYER_PALETTE:
+        for idx, p in enumerate(LAYER_PALETTE):
             lid = p["id"]
             color_hex = p["color"]
             btn = QPushButton(p["name"])
-            btn.setFixedSize(36, 26)
+            btn.setFixedSize(30, 20)
             btn.setToolTip(f"{p['label']} ({color_hex})")
             btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {color_hex};
                     color: {'#000000' if lid in (4, 11) else '#ffffff'};
                     font-weight: bold;
-                    font-size: 10px;
+                    font-size: 9px;
                     border: 1px solid #555555;
-                    border-radius: 3px;
+                    border-radius: 2px;
                 }}
                 QPushButton:hover {{
                     border: 2px solid #ffffff;
                 }}
             """)
             btn.clicked.connect(lambda checked, layer_id=lid: self.layer_selected.emit(layer_id))
-            swatch_layout.addWidget(btn)
+            r = idx // 6
+            c = idx % 6
+            swatch_layout.addWidget(btn, r, c)
 
-        swatch_layout.addStretch()
         layout.addWidget(swatch_group)
 
         self.refresh_table()

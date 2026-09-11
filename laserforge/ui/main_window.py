@@ -9,14 +9,18 @@ LightBurn-inspired layout integrating:
 """
 
 import os
+import json
+import time
 from typing import Optional, Tuple, List, Dict
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QToolBar,
     QDockWidget, QTabWidget, QFileDialog, QMessageBox, QLabel,
-    QStatusBar, QPushButton, QInputDialog, QButtonGroup
+    QStatusBar, QPushButton, QInputDialog, QButtonGroup,
+    QDoubleSpinBox, QComboBox, QFontComboBox, QToolButton, QMenu,
+    QLineEdit
 )
-from PyQt6.QtCore import Qt, QSize, QPointF
-from PyQt6.QtGui import QAction, QIcon, QKeySequence, QColor, QPixmap, QPainter, QFont, QPen
+from PyQt6.QtCore import Qt, QSize, QPointF, QTimer
+from PyQt6.QtGui import QAction, QIcon, QKeySequence, QColor, QPixmap, QImage, QPainter, QFont, QPen, QFontMetricsF
 
 
 from laserforge.config import MachineSettings, LAYER_PALETTE
@@ -29,7 +33,7 @@ from laserforge.core.gcode_generator import GCodeGenerator
 from laserforge.core.project_io import ProjectIO
 
 from laserforge.ui.canvas_scene import (
-    LaserCanvasScene, TOOL_SELECT, TOOL_RECT, TOOL_CIRCLE, TOOL_LINE, TOOL_TEXT
+    LaserCanvasScene, LaserItemWrapper, TOOL_SELECT, TOOL_RECT, TOOL_CIRCLE, TOOL_LINE, TOOL_TEXT
 )
 from laserforge.ui.canvas_view import LaserCanvasWidget
 from laserforge.ui.cuts_panel import CutsPanel
@@ -37,8 +41,27 @@ from laserforge.ui.laser_control_panel import LaserControlPanel
 from laserforge.ui.console_panel import ConsolePanel
 from laserforge.ui.shape_properties import ShapePropertiesPanel
 from laserforge.ui.preview_dialog import PreviewDialog
+from laserforge.ui.validation_dialog import ValidationDialog
 from laserforge.ui.machine_settings_dialog import MachineSettingsDialog
+from laserforge.core.gcode_validator import GCodeValidator, ValidationReport
+from laserforge.core.gpu_accelerator import GPUAccelerator
 from laserforge.ui.trace_image_dialog import TraceImageDialog
+from laserforge.ui.business_card_dialog import BusinessCardStudioDialog
+from laserforge.ui.material_library_dialog import MaterialLibraryDialog, TestMatrixDialog
+from laserforge.ui.alignment_dialog import LaserAlignmentDialog
+from laserforge.ui.photo_engrave_dialog import PhotoEngraveDialog
+from laserforge.ui.templates_dialog import TemplatesStudioDialog
+from laserforge.ui.shape_generator_dialog import ShapeGeneratorDialog
+from laserforge.ui.curved_text_dialog import CurvedTextDialog
+from laserforge.ui.grid_array_dialog import GridArrayDialog
+from laserforge.ui.serial_generator_dialog import SerialGeneratorDialog
+from laserforge.ui.crop_image_dialog import CropImageDialog
+from laserforge.ui.barcode_designer_dialog import BarcodeDesignerDialog
+from laserforge.apps.sdxl_turbo_studio import SDXLTurboStudioWindow, IMPORT_QUEUE_DIR
+from laserforge.core.shape_generator import ShapeGenerator
+from laserforge.core.font_tools import FontTools
+from laserforge.core.business_card_generator import BusinessCardGenerator, generate_qr_contours
+from laserforge.core.materials_database import MaterialProfile
 
 
 
@@ -71,6 +94,8 @@ class MainWindow(QMainWindow):
         self.layer_manager = LayerManager()
         self.serial_ctrl = SerialController()
         self.gcode_gen = GCodeGenerator(self.settings, self.layer_manager)
+        from laserforge.core.camera_engine import CameraEngine
+        self.camera_engine = CameraEngine()
 
         # Scene and Canvas
         self.scene = LaserCanvasScene(self.layer_manager, self)
@@ -85,6 +110,8 @@ class MainWindow(QMainWindow):
         self._create_menus()
         self._create_cad_toolbar()
         self._create_top_toolbar()
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        self._create_font_toolbar()
         self._create_dock_panels()
         self._create_bottom_palette_dock()
         self._create_status_bar()
@@ -95,6 +122,17 @@ class MainWindow(QMainWindow):
         # Set canvas bed bounds
         self.canvas_widget.view.set_bed_size(self.settings.bed_width, self.settings.bed_height)
         self.canvas_widget.view.zoom_to_fit()
+
+        # Automated auto-import queue listener (for standalone SDXL Turbo Studio)
+        self.sdxl_studio_window: Optional[SDXLTurboStudioWindow] = None
+        self._init_auto_import_watcher()
+
+        # Automated laser connection on startup if enabled
+        if self.settings.auto_connect:
+            QTimer.singleShot(400, lambda: self.serial_ctrl.start_auto_connect(self.settings.last_connected_port))
+
+        # Maximize to fit display cleanly
+        self.showMaximized()
 
     def _create_actions(self):
         # File Actions
@@ -127,15 +165,48 @@ class MainWindow(QMainWindow):
         self.act_trace_image.triggered.connect(self.trace_image)
 
         self.act_export_gcode = QAction("Export G-Code...", self)
-
         self.act_export_gcode.setShortcut("Ctrl+E")
         self.act_export_gcode.triggered.connect(self.export_gcode)
+
+        # Specialized Tools Actions
+        self.act_business_card = QAction("Business Card Studio...", self)
+        self.act_business_card.setShortcut("Ctrl+B")
+        self.act_business_card.setToolTip("Design business cards, vector QR codes, cutting jigs & batch arrays")
+        self.act_business_card.triggered.connect(self.open_business_card_studio)
+
+        self.act_material_lib = QAction("3W Material Library & Presets...", self)
+        self.act_material_lib.setShortcut("Ctrl+M")
+        self.act_material_lib.setToolTip("Pre-calibrated speed & power database tuned for 3W blue diode lasers")
+        self.act_material_lib.triggered.connect(self.open_material_library)
+
+        self.act_test_matrix = QAction("Generate Material Test Matrix...", self)
+        self.act_test_matrix.setToolTip("Parametric Power vs. Speed test grid for 3W laser calibration")
+        self.act_test_matrix.triggered.connect(self.open_test_matrix_dialog)
+
+        self.act_align_workpiece = QAction("Workpiece Alignment & Laser Targeting...", self)
+        self.act_align_workpiece.setShortcut("Ctrl+L")
+        self.act_align_workpiece.setToolTip("Target workpiece with low-power beam, 2-point Print & Cut rotation, corner jigs")
+        self.act_align_workpiece.triggered.connect(self.open_alignment_assistant)
+
+        self.act_gen_qr = QAction("Insert Vector QR Code...", self)
+        self.act_gen_qr.setToolTip("Generate scalable vector QR code polygon loops for laser engraving")
+        self.act_gen_qr.triggered.connect(self.generate_vector_qr_code)
 
         self.act_exit = QAction("Exit", self)
         self.act_exit.setShortcut(QKeySequence.StandardKey.Quit)
         self.act_exit.triggered.connect(self.close)
 
-        # Edit Actions
+        # Edit & Undo Actions
+        self.act_undo = QAction("Undo", self)
+        self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.act_undo.setToolTip("Undo last canvas action (Ctrl+Z)")
+        self.act_undo.triggered.connect(self.scene.undo)
+
+        self.act_redo = QAction("Redo", self)
+        self.act_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.act_redo.setToolTip("Redo last undone canvas action (Ctrl+Y / Ctrl+Shift+Z)")
+        self.act_redo.triggered.connect(self.scene.redo)
+
         self.act_select_all = QAction("Select All", self)
         self.act_select_all.setShortcut(QKeySequence.StandardKey.SelectAll)
         self.act_select_all.triggered.connect(lambda: [i.setSelected(True) for i in self.scene.items()])
@@ -148,15 +219,149 @@ class MainWindow(QMainWindow):
         self.act_duplicate.setShortcut("Ctrl+D")
         self.act_duplicate.triggered.connect(self.scene.duplicate_selected)
 
+        # Vector Boolean CSG Actions
+        self.act_weld = QAction("⚡ Weld / Union Shapes", self)
+        self.act_weld.setShortcut("Ctrl+Shift+U")
+        self.act_weld.setToolTip("Weld selected overlapping vector shapes into a single perimeter (Ctrl+Shift+U)")
+        self.act_weld.triggered.connect(lambda: self.scene.boolean_operation("weld"))
+
+        self.act_subtract = QAction("➖ Subtract / Difference Shapes", self)
+        self.act_subtract.setShortcut("Ctrl+Shift+D")
+        self.act_subtract.setToolTip("Subtract overlapping shapes from base shape (cutout / hole) (Ctrl+Shift+D)")
+        self.act_subtract.triggered.connect(lambda: self.scene.boolean_operation("subtract"))
+
+        self.act_intersect = QAction("✖ Intersect Shapes", self)
+        self.act_intersect.setShortcut("Ctrl+Shift+X")
+        self.act_intersect.setToolTip("Keep only common overlapping area between selected shapes (Ctrl+Shift+X)")
+        self.act_intersect.triggered.connect(lambda: self.scene.boolean_operation("intersect"))
+
+        # Design Aid & Workflow Actions
+        self.act_photo_studio = QAction("Photo Engrave Studio...", self)
+        self.act_photo_studio.setShortcut("Ctrl+Shift+I")
+        self.act_photo_studio.setToolTip("Advanced photograph conversion studio with material burn simulation")
+        self.act_photo_studio.triggered.connect(lambda: self.open_photo_studio())
+
+        self.act_templates_studio = QAction("Project Templates & Calibration Studio...", self)
+        self.act_templates_studio.setShortcut("Ctrl+Shift+T")
+        self.act_templates_studio.setToolTip("Parametric templates for coasters, tumblers, keychains, tags, ornaments, and rulers")
+        self.act_templates_studio.triggered.connect(self.open_templates_studio)
+
+        self.act_shapes_lib = QAction("Parametric Shapes Generator...", self)
+        self.act_shapes_lib.setShortcut("Ctrl+Shift+S")
+        self.act_shapes_lib.setToolTip("Generate regular polygons, stars, gears, hearts, slots, and rings")
+        self.act_shapes_lib.triggered.connect(lambda: self.open_shapes_library(0))
+
+        self.act_offset_border = QAction("Offset / Cut Border...", self)
+        self.act_offset_border.setShortcut("Ctrl+Shift+O")
+        self.act_offset_border.setToolTip("Generate an outward cut contour or inward border around selected artwork")
+        self.act_offset_border.triggered.connect(lambda: self.open_shapes_library(1))
+
+        self.act_grid_array = QAction("Grid Array Duplication...", self)
+        self.act_grid_array.setShortcut("Ctrl+Shift+A")
+        self.act_grid_array.setToolTip("Batch duplicate selected objects into an X by Y grid with spacing")
+        self.act_grid_array.triggered.connect(self.open_grid_array_dialog)
+
+        self.act_curved_text = QAction("Curved / Arc Text Tool...", self)
+        self.act_curved_text.setToolTip("Engrave text along a circular curve or coaster rim")
+        self.act_curved_text.triggered.connect(self.open_curved_text_dialog)
+
+        self.act_serial_gen = QAction("Sequential Serial Number Batch...", self)
+        self.act_serial_gen.setToolTip("Generate serialized text numbers and tags across the bed")
+        self.act_serial_gen.triggered.connect(self.open_serial_generator_dialog)
+
+        self.act_barcode_studio = QAction("QR Code & Barcode Studio...", self)
+        self.act_barcode_studio.setShortcut("Ctrl+Q")
+        self.act_barcode_studio.setToolTip("Design custom 2D QR codes (URL, Wi-Fi, vCard) and 1D barcodes (Code 128, EAN, UPC)")
+        self.act_barcode_studio.triggered.connect(self.open_barcode_designer)
+
+        self.act_sdxl_turbo = QAction("SDXL Turbo Generative Studio...", self)
+        self.act_sdxl_turbo.setShortcut("Ctrl+Alt+S")
+        self.act_sdxl_turbo.setToolTip("Real-time AI laser artwork generator optimized for 8GB VRAM")
+        self.act_sdxl_turbo.triggered.connect(self.open_sdxl_turbo_studio)
+
+        self.act_crop_image = QAction("Crop Selected Image...", self)
+        self.act_crop_image.setShortcut("Ctrl+K")
+        self.act_crop_image.setToolTip("Interactively crop selected image workpiece with handles and aspect ratio presets")
+        self.act_crop_image.triggered.connect(self.open_crop_tool_for_selected)
+
+        # Camera & Vision Alignment Actions
+        self.act_camera_wizard = QAction("Camera Calibration Wizard...", self)
+        self.act_camera_wizard.setShortcut("Ctrl+Shift+K")
+        self.act_camera_wizard.setToolTip("Open 4-step Camera Lens Calibration & Bed Alignment Wizard (Ctrl+Shift+K)")
+        self.act_camera_wizard.triggered.connect(self.open_camera_wizard)
+
+        self.act_camera_update = QAction("Update Camera Bed Overlay", self)
+        self.act_camera_update.setShortcut("Ctrl+Shift+B")
+        self.act_camera_update.setToolTip("Capture fresh high-resolution rectified image onto laser bed (Ctrl+Shift+B)")
+        self.act_camera_update.triggered.connect(self.update_camera_overlay)
+
+        self.act_camera_toggle = QAction("Show Camera Overlay", self)
+        self.act_camera_toggle.setCheckable(True)
+        self.act_camera_toggle.setChecked(True)
+        self.act_camera_toggle.setToolTip("Toggle camera background visibility on canvas")
+        self.act_camera_toggle.toggled.connect(self.scene.set_camera_overlay_visible)
+
+        # Alignment & Distribution Actions
+        self.act_bed_center = QAction("Center on Laser Bed", self)
+        self.act_bed_center.setShortcut("Ctrl+Shift+C")
+        self.act_bed_center.triggered.connect(lambda: self.scene.align_selected("bed_center", self.settings.bed_width, self.settings.bed_height))
+
+        self.act_center_in_parent = QAction("Center Inside Bounding Shape", self)
+        self.act_center_in_parent.triggered.connect(lambda: self.scene.align_selected("center_in_parent"))
+
+        self.act_distribute_h = QAction("Distribute Horizontally", self)
+        self.act_distribute_h.triggered.connect(lambda: self.scene.align_selected("distribute_h"))
+
+        self.act_distribute_v = QAction("Distribute Vertically", self)
+        self.act_distribute_v.triggered.connect(lambda: self.scene.align_selected("distribute_v"))
+
+        self.act_flip_h = QAction("↔ Flip Horizontally", self)
+        self.act_flip_h.setShortcut("H")
+        self.act_flip_h.setToolTip("Mirror selected shape(s) horizontally (Shortcut: H)")
+        self.act_flip_h.triggered.connect(self.scene.flip_selected_horizontal)
+
+        self.act_flip_v = QAction("↕ Flip Vertically", self)
+        self.act_flip_v.setShortcut("V")
+        self.act_flip_v.setToolTip("Mirror selected shape(s) vertically (Shortcut: V)")
+        self.act_flip_v.triggered.connect(self.scene.flip_selected_vertical)
+
+        self.act_align_left = QAction("Align Left", self)
+        self.act_align_left.triggered.connect(lambda: self.scene.align_selected("left"))
+
+        self.act_align_center_x = QAction("Align Center X", self)
+        self.act_align_center_x.triggered.connect(lambda: self.scene.align_selected("center_x"))
+
+        self.act_align_right = QAction("Align Right", self)
+        self.act_align_right.triggered.connect(lambda: self.scene.align_selected("right"))
+
+        self.act_align_top = QAction("Align Top", self)
+        self.act_align_top.triggered.connect(lambda: self.scene.align_selected("top"))
+
+        self.act_align_center_y = QAction("Align Center Y", self)
+        self.act_align_center_y.triggered.connect(lambda: self.scene.align_selected("center_y"))
+
+        self.act_align_bottom = QAction("Align Bottom", self)
+        self.act_align_bottom.triggered.connect(lambda: self.scene.align_selected("bottom"))
+
         # View Actions
         self.act_zoom_fit = QAction("Zoom to Fit Bed", self)
         self.act_zoom_fit.setShortcut("Ctrl+0")
         self.act_zoom_fit.triggered.connect(self.canvas_widget.view.zoom_to_fit)
 
         # Laser & Simulation Actions
+        self.act_auto_connect = QAction("Auto-Detect & Connect Laser", self)
+        self.act_auto_connect.setShortcut("F3")
+        self.act_auto_connect.setToolTip("Scan serial ports and automatically handshake with GRBL laser (F3)")
+        self.act_auto_connect.triggered.connect(lambda: self.serial_ctrl.start_auto_connect(self.settings.last_connected_port))
+
         self.act_preview = QAction("Preview Toolpaths (Simulation)...", self)
         self.act_preview.setShortcut("Alt+P")
         self.act_preview.triggered.connect(self.preview_simulation)
+
+        self.act_validate_gcode = QAction("Validate G-Code (GRBL Check)...", self)
+        self.act_validate_gcode.setShortcut("Ctrl+Shift+V")
+        self.act_validate_gcode.setToolTip("Runs pre-flight syntax, modal group, and workbed travel safety checks")
+        self.act_validate_gcode.triggered.connect(self.validate_current_job)
 
         self.act_frame = QAction("Frame Bounding Box", self)
         self.act_frame.setShortcut("Ctrl+F")
@@ -204,17 +409,44 @@ class MainWindow(QMainWindow):
 
         # Edit Menu
         menu_edit = menubar.addMenu("&Edit")
+        menu_edit.addAction(self.act_undo)
+        menu_edit.addAction(self.act_redo)
+        menu_edit.addSeparator()
         menu_edit.addAction(self.act_select_all)
         menu_edit.addAction(self.act_duplicate)
         menu_edit.addAction(self.act_delete)
+        menu_edit.addSeparator()
+        menu_edit.addAction(self.act_flip_h)
+        menu_edit.addAction(self.act_flip_v)
+        menu_edit.addSeparator()
+
+        # Vector Booleans submenu & actions
+        menu_bool = menu_edit.addMenu("📐 Vector Booleans (CSG)")
+        menu_bool.addAction(self.act_weld)
+        menu_bool.addAction(self.act_subtract)
+        menu_bool.addAction(self.act_intersect)
+        menu_edit.addAction(self.act_weld)
+        menu_edit.addAction(self.act_subtract)
+        menu_edit.addAction(self.act_intersect)
 
         # Laser Menu
         menu_laser = menubar.addMenu("&Laser")
+        menu_laser.addAction(self.act_auto_connect)
+        menu_laser.addSeparator()
         menu_laser.addAction(self.act_preview)
+        menu_laser.addAction(self.act_validate_gcode)
         menu_laser.addAction(self.act_frame)
         menu_laser.addAction(self.act_start_job)
         menu_laser.addAction(self.act_pause_job)
         menu_laser.addAction(self.act_stop_job)
+        menu_laser.addSeparator()
+        menu_laser.addAction(self.act_align_workpiece)
+        menu_laser.addAction(self.act_material_lib)
+        menu_laser.addAction(self.act_test_matrix)
+        menu_laser.addSeparator()
+        menu_laser.addAction(self.act_camera_wizard)
+        menu_laser.addAction(self.act_camera_update)
+        menu_laser.addAction(self.act_camera_toggle)
         menu_laser.addSeparator()
         menu_laser.addAction(self.act_home)
         menu_laser.addAction(self.act_unlock)
@@ -223,9 +455,52 @@ class MainWindow(QMainWindow):
 
         # Tools Menu
         menu_tools = menubar.addMenu("&Tools")
-        menu_tools.addAction(self.act_preview)
+        menu_tools.addAction(self.act_camera_wizard)
+        menu_tools.addAction(self.act_camera_update)
+        menu_tools.addSeparator()
+        menu_tools.addAction(self.act_photo_studio)
+        menu_tools.addAction(self.act_templates_studio)
+        menu_tools.addAction(self.act_shapes_lib)
+        menu_tools.addAction(self.act_offset_border)
+        menu_tools.addAction(self.act_grid_array)
+        menu_tools.addSeparator()
+        menu_tools.addAction(self.act_curved_text)
+        menu_tools.addAction(self.act_serial_gen)
+        menu_tools.addSeparator()
+        menu_tools.addAction(self.act_business_card)
+        menu_tools.addAction(self.act_barcode_studio)
+        menu_tools.addAction(self.act_sdxl_turbo)
+        menu_tools.addAction(self.act_crop_image)
+        menu_tools.addAction(self.act_gen_qr)
         menu_tools.addAction(self.act_trace_image)
+        menu_tools.addSeparator()
+        menu_tools.addAction(self.act_material_lib)
+        menu_tools.addAction(self.act_test_matrix)
+        menu_tools.addAction(self.act_align_workpiece)
+        menu_tools.addSeparator()
+        menu_tools.addAction(self.act_preview)
         menu_tools.addAction(self.act_zoom_fit)
+
+        # Arrange & Design Aids Menu
+        menu_arrange = menubar.addMenu("&Arrange")
+        menu_arrange.addAction(self.act_bed_center)
+        menu_arrange.addAction(self.act_center_in_parent)
+        menu_arrange.addSeparator()
+        menu_arrange.addAction(self.act_align_left)
+        menu_arrange.addAction(self.act_align_center_x)
+        menu_arrange.addAction(self.act_align_right)
+        menu_arrange.addAction(self.act_align_top)
+        menu_arrange.addAction(self.act_align_center_y)
+        menu_arrange.addAction(self.act_align_bottom)
+        menu_arrange.addSeparator()
+        menu_arrange.addAction(self.act_distribute_h)
+        menu_arrange.addAction(self.act_distribute_v)
+        menu_arrange.addSeparator()
+        menu_arrange.addAction(self.act_flip_h)
+        menu_arrange.addAction(self.act_flip_v)
+        menu_arrange.addSeparator()
+        menu_arrange.addAction(self.act_grid_array)
+        menu_arrange.addAction(self.act_offset_border)
 
         # Help Menu
         menu_help = menubar.addMenu("&Help")
@@ -234,36 +509,285 @@ class MainWindow(QMainWindow):
         menu_help.addAction(act_about)
 
     def _create_top_toolbar(self):
-        tb = QToolBar("Main Controls")
-        tb.setMovable(False)
-        tb.setIconSize(QSize(22, 22))
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb)
+        # 1. Main File & Project Controls Toolbar
+        tb_file = QToolBar("File Controls")
+        tb_file.setMovable(True)
+        tb_file.setIconSize(QSize(20, 20))
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb_file)
 
-        tb.addAction(self.act_new)
-        tb.addAction(self.act_open)
-        tb.addAction(self.act_save)
-        tb.addSeparator()
-        tb.addAction(self.act_import_svg)
-        tb.addAction(self.act_import_img)
-        tb.addAction(self.act_trace_image)
-        tb.addSeparator()
-        tb.addAction(self.act_zoom_fit)
-        tb.addSeparator()
+        def add_file_btn(act, text, tooltip):
+            btn = QPushButton(text)
+            btn.setStyleSheet("font-weight: 500; padding: 3px 6px; font-size: 11px;")
+            btn.setToolTip(tooltip)
+            btn.clicked.connect(act.trigger)
+            tb_file.addWidget(btn)
 
+        add_file_btn(self.act_new, "📄 New", "New Project (Ctrl+N)")
+        add_file_btn(self.act_open, "📂 Open", "Open Project (Ctrl+O)")
+        add_file_btn(self.act_save, "💾 Save", "Save Project (Ctrl+S)")
+        tb_file.addSeparator()
+        add_file_btn(self.act_undo, "↩ Undo", "Undo Last Action (Ctrl+Z)")
+        add_file_btn(self.act_redo, "↪ Redo", "Redo (Ctrl+Y / Ctrl+Shift+Z)")
+        tb_file.addSeparator()
+        add_file_btn(self.act_import_svg, "📐 SVG", "Import SVG / Vector (Ctrl+I)")
+        add_file_btn(self.act_import_img, "🖼 Image", "Import Bitmap Image")
+        add_file_btn(self.act_trace_image, "⚡ Trace", "Trace Image to Vector (Ctrl+T)")
+        tb_file.addSeparator()
+        add_file_btn(self.act_zoom_fit, "🔍 Fit Bed", "Zoom to Fit Bed (F)")
+        tb_file.addSeparator()
+        add_file_btn(self.act_flip_h, "↔ Flip H", "Mirror Selected Horizontally (H)")
+        add_file_btn(self.act_flip_v, "↕ Flip V", "Mirror Selected Vertically (V)")
+        tb_file.addSeparator()
 
         # Preview Button on top
-        btn_preview = QPushButton("  Preview (Alt+P)")
-        btn_preview.setIcon(create_tool_icon("👁", fg_color="#ffd600"))
-        btn_preview.setStyleSheet("font-weight: bold; padding: 4px 8px;")
+        btn_preview = QPushButton("👁 Preview")
+        btn_preview.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_preview.setToolTip("Preview laser path simulation & time estimate (Alt+P)")
         btn_preview.clicked.connect(self.preview_simulation)
-        tb.addWidget(btn_preview)
+        tb_file.addWidget(btn_preview)
+
+        # 2. Design Studios & Specialized Tools Toolbar
+        tb_studios = QToolBar("Laser Studios")
+        tb_studios.setMovable(True)
+        tb_studios.setIconSize(QSize(20, 20))
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb_studios)
+        self.studio_toolbar = tb_studios
+
+        # Business Card Studio Button
+        btn_cards = QPushButton("📇 Cards")
+        btn_cards.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_cards.setToolTip("Business Card Studio (Ctrl+B) - Metal blanks, QR codes & multi-pocket cutting jigs")
+        btn_cards.clicked.connect(self.open_business_card_studio)
+        tb_studios.addWidget(btn_cards)
+
+        # Photo Studio Button
+        btn_photo = QPushButton("📷 Photo")
+        btn_photo.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_photo.setToolTip("Photo Engrave Studio (Ctrl+Shift+I) - Advanced photograph laser preparation & simulation")
+        btn_photo.clicked.connect(lambda: self.open_photo_studio())
+        tb_studios.addWidget(btn_photo)
+
+        # QR Code & Barcode Studio Button
+        btn_barcode = QPushButton("📱 QR/Barcode")
+        btn_barcode.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_barcode.setToolTip("QR Code & Barcode Studio (Ctrl+Q) - Custom 2D QR codes and 1D barcodes")
+        btn_barcode.clicked.connect(self.open_barcode_designer)
+        tb_studios.addWidget(btn_barcode)
+
+        # SDXL Turbo Generative Studio Button
+        btn_sdxl = QPushButton("🎨 SDXL Turbo")
+        btn_sdxl.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_sdxl.setToolTip("SDXL Turbo Generative Studio (Ctrl+Alt+S) - 8GB VRAM optimized AI laser art")
+        btn_sdxl.clicked.connect(self.open_sdxl_turbo_studio)
+        tb_studios.addWidget(btn_sdxl)
+
+        # Templates Studio Button
+        btn_templates = QPushButton("📐 Templates")
+        btn_templates.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_templates.setToolTip("Project Templates Studio (Ctrl+Shift+T) - Coasters, tumblers, keychains, ornaments & rulers")
+        btn_templates.clicked.connect(self.open_templates_studio)
+        tb_studios.addWidget(btn_templates)
+
+        # Shapes & Offset Button
+        btn_shapes = QPushButton("⭐ Shapes")
+        btn_shapes.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_shapes.setToolTip("Parametric Shapes & Contour Offset Border Tool (Ctrl+Shift+S / Ctrl+Shift+O)")
+        btn_shapes.clicked.connect(lambda: self.open_shapes_library(0))
+        tb_studios.addWidget(btn_shapes)
+
+        # Grid Array Button
+        btn_array = QPushButton("⊞ Array")
+        btn_array.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_array.setToolTip("Grid Array Matrix Duplication Tool (Ctrl+Shift+A)")
+        btn_array.clicked.connect(self.open_grid_array_dialog)
+        tb_studios.addWidget(btn_array)
+
+        # 3W Material Library Button
+        btn_mat = QPushButton("⚡ Materials")
+        btn_mat.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_mat.setToolTip("3W Diode Laser Material Library (Ctrl+M) - Calibrated speeds, powers & test grids")
+        btn_mat.clicked.connect(self.open_material_library)
+        tb_studios.addWidget(btn_mat)
+
+        # Workpiece Alignment Button
+        btn_align = QPushButton("🎯 Align")
+        btn_align.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_align.setToolTip("Workpiece Alignment Assistant (Ctrl+L) - 5-point targeting & 2-point Print & Cut")
+        btn_align.clicked.connect(self.open_alignment_assistant)
+        tb_studios.addWidget(btn_align)
 
         # Machine Settings Button
-        btn_set = QPushButton("  Settings")
-        btn_set.setIcon(create_tool_icon("⚙", fg_color="#b0bec5"))
-        btn_set.setStyleSheet("padding: 4px 8px;")
+        btn_set = QPushButton("⚙ Settings")
+        btn_set.setStyleSheet("padding: 3px 6px; font-size: 11px;")
+        btn_set.setToolTip("Machine & GRBL Settings (Ctrl+,)")
         btn_set.clicked.connect(self.open_machine_settings)
-        tb.addWidget(btn_set)
+        tb_studios.addWidget(btn_set)
+
+        # Camera Vision Alignment Button
+        btn_cam = QToolButton()
+        btn_cam.setText("📷 Cam Overlay")
+        btn_cam.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_cam.setToolTip("Capture Camera Bed Overlay (Ctrl+Shift+B) / Calibration Wizard (Ctrl+Shift+K)")
+        btn_cam.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        btn_cam.clicked.connect(self.update_camera_overlay)
+        cam_menu = QMenu(btn_cam)
+        cam_menu.addAction(self.act_camera_update)
+        cam_menu.addAction(self.act_camera_wizard)
+        cam_menu.addAction(self.act_camera_toggle)
+        btn_cam.setMenu(cam_menu)
+        tb_studios.addWidget(btn_cam)
+
+        # 3. Vector Booleans CSG Toolbar
+        tb_booleans = QToolBar("Vector Booleans")
+        tb_booleans.setMovable(True)
+        tb_booleans.setIconSize(QSize(20, 20))
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb_booleans)
+
+        btn_weld = QPushButton("⚡ Weld")
+        btn_weld.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px; color: #69f0ae;")
+        btn_weld.setToolTip("Weld / Union selected vector shapes into one perimeter (Ctrl+Shift+U)")
+        btn_weld.clicked.connect(self.act_weld.trigger)
+        tb_booleans.addWidget(btn_weld)
+
+        btn_sub = QPushButton("➖ Subtract")
+        btn_sub.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px; color: #ff5252;")
+        btn_sub.setToolTip("Subtract top selected shapes from base shape (cutout / hole) (Ctrl+Shift+D)")
+        btn_sub.clicked.connect(self.act_subtract.trigger)
+        tb_booleans.addWidget(btn_sub)
+
+        btn_inter = QPushButton("✖ Intersect")
+        btn_inter.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px; color: #ffd740;")
+        btn_inter.setToolTip("Keep overlapping intersection between selected shapes (Ctrl+Shift+X)")
+        btn_inter.clicked.connect(self.act_intersect.trigger)
+        tb_booleans.addWidget(btn_inter)
+
+    def _create_font_toolbar(self):
+        """Creates the LightBurn-style typography and font formatting toolbar."""
+        self.font_toolbar = QToolBar("Typography & Font Tools")
+        self.font_toolbar.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.font_toolbar)
+
+        lbl = QLabel(" Text: ")
+        lbl.setStyleSheet("color: #b0bec5; font-weight: bold; font-size: 11px;")
+        self.font_toolbar.addWidget(lbl)
+
+        # 0. Text Content Input Box
+        self.tb_text_input = QLineEdit()
+        self.tb_text_input.setPlaceholderText("Enter text here...")
+        self.tb_text_input.setToolTip("Edit text content for selected text element")
+        self.tb_text_input.setMinimumWidth(150)
+        self.tb_text_input.setMaximumWidth(280)
+        self.tb_text_input.textChanged.connect(self._on_tb_text_changed)
+        self.tb_text_input.editingFinished.connect(self._on_tb_text_editing_finished)
+        self.font_toolbar.addWidget(self.tb_text_input)
+
+        self.font_toolbar.addSeparator()
+
+        lbl_font = QLabel(" Font: ")
+        lbl_font.setStyleSheet("color: #b0bec5; font-size: 11px;")
+        self.font_toolbar.addWidget(lbl_font)
+
+        # 1. Font Family Combo
+        self.tb_font_combo = QFontComboBox()
+        self.tb_font_combo.setToolTip("Font Style / Family")
+        self.tb_font_combo.setMaximumWidth(160)
+        self.tb_font_combo.currentFontChanged.connect(self._on_tb_font_family_changed)
+        self.font_toolbar.addWidget(self.tb_font_combo)
+
+        # 2. Font Size Spinbox
+        lbl_sz = QLabel(" Size: ")
+        lbl_sz.setStyleSheet("color: #b0bec5; font-size: 11px;")
+        self.font_toolbar.addWidget(lbl_sz)
+
+        self.tb_font_size_spin = QDoubleSpinBox()
+        self.tb_font_size_spin.setRange(1.0, 500.0)
+        self.tb_font_size_spin.setValue(15.0)
+        self.tb_font_size_spin.setSingleStep(1.0)
+        self.tb_font_size_spin.setDecimals(1)
+        self.tb_font_size_spin.setSuffix(" mm")
+        self.tb_font_size_spin.setToolTip("Font Size (mm)")
+        self.tb_font_size_spin.valueChanged.connect(self._on_tb_font_size_changed)
+        self.font_toolbar.addWidget(self.tb_font_size_spin)
+
+        self.font_toolbar.addSeparator()
+
+        # 3. Bold, Italic, Underline
+        self.tb_btn_bold = QToolButton()
+        self.tb_btn_bold.setText("B")
+        self.tb_btn_bold.setCheckable(True)
+        self.tb_btn_bold.setToolTip("Bold (B)")
+        self.tb_btn_bold.setStyleSheet("font-weight: bold; font-size: 12px; min-width: 24px; min-height: 22px;")
+        self.tb_btn_bold.toggled.connect(self._on_tb_bold_toggled)
+        self.font_toolbar.addWidget(self.tb_btn_bold)
+
+        self.tb_btn_italic = QToolButton()
+        self.tb_btn_italic.setText("I")
+        self.tb_btn_italic.setCheckable(True)
+        self.tb_btn_italic.setToolTip("Italic (I)")
+        self.tb_btn_italic.setStyleSheet("font-style: italic; font-size: 12px; font-family: serif; min-width: 24px; min-height: 22px;")
+        self.tb_btn_italic.toggled.connect(self._on_tb_italic_toggled)
+        self.font_toolbar.addWidget(self.tb_btn_italic)
+
+        self.tb_btn_underline = QToolButton()
+        self.tb_btn_underline.setText("U")
+        self.tb_btn_underline.setCheckable(True)
+        self.tb_btn_underline.setToolTip("Underline (U)")
+        self.tb_btn_underline.setStyleSheet("text-decoration: underline; font-size: 12px; min-width: 24px; min-height: 22px;")
+        self.tb_btn_underline.toggled.connect(self._on_tb_underline_toggled)
+        self.font_toolbar.addWidget(self.tb_btn_underline)
+
+        self.font_toolbar.addSeparator()
+
+        # 4. Outlined vs Fill Mode
+        self.tb_mode_combo = QComboBox()
+        self.tb_mode_combo.addItems(["Fill (Solid Engrave)", "Outlined (Vector Cut)"])
+        self.tb_mode_combo.setToolTip("Text Rendering: Solid raster engraving vs vector contour cut")
+        self.tb_mode_combo.currentIndexChanged.connect(self._on_tb_mode_changed)
+        self.font_toolbar.addWidget(self.tb_mode_combo)
+
+        self.font_toolbar.addSeparator()
+
+        # 5. Quick Style Presets
+        lbl_style = QLabel(" Style: ")
+        lbl_style.setStyleSheet("color: #b0bec5; font-size: 11px;")
+        self.font_toolbar.addWidget(lbl_style)
+
+        self.tb_quick_style_combo = QComboBox()
+        self.tb_quick_style_combo.addItem("Presets...", None)
+        self.tb_quick_style_combo.addItem("Modern Clean (Sans)", "modern")
+        self.tb_quick_style_combo.addItem("Industrial Bold (Cut)", "industrial")
+        self.tb_quick_style_combo.addItem("Classic Serif", "serif")
+        self.tb_quick_style_combo.addItem("Calligraphy (Script)", "script")
+        self.tb_quick_style_combo.addItem("Monogram Initial", "monogram")
+        self.tb_quick_style_combo.currentIndexChanged.connect(self._on_quick_style_selected)
+        self.font_toolbar.addWidget(self.tb_quick_style_combo)
+
+        self.font_toolbar.addSeparator()
+
+        # 6. Curved Text & Serial Batch
+        btn_arc_text = QToolButton()
+        btn_arc_text.setText("⌒ Arc Text...")
+        btn_arc_text.setToolTip("Curved / Circular Arc Text Tool (text along a radius)")
+        btn_arc_text.setStyleSheet("font-weight: bold; font-size: 11px; padding: 3px 6px;")
+        btn_arc_text.clicked.connect(self.open_curved_text_dialog)
+        self.font_toolbar.addWidget(btn_arc_text)
+
+        btn_serial = QToolButton()
+        btn_serial.setText("123 Serial...")
+        btn_serial.setToolTip("Sequential Serial Number Batch Generator")
+        btn_serial.setStyleSheet("font-weight: bold; font-size: 11px; padding: 3px 6px;")
+        btn_serial.clicked.connect(self.open_serial_generator_dialog)
+        self.font_toolbar.addWidget(btn_serial)
+
+        btn_center_in_parent = QToolButton()
+        btn_center_in_parent.setText("🎯 In Shape")
+        btn_center_in_parent.setToolTip("Center text inside selected parent shape")
+        btn_center_in_parent.setStyleSheet("font-weight: bold; font-size: 11px; padding: 3px 6px;")
+        btn_center_in_parent.clicked.connect(lambda: self.scene.align_selected("center_in_parent"))
+        self.font_toolbar.addWidget(btn_center_in_parent)
+
+        # Initially disabled until text is selected
+        self.font_toolbar.setEnabled(False)
 
     def _create_cad_toolbar(self):
         cad_tb = QToolBar("CAD Drawing Tools")
@@ -308,6 +832,56 @@ class MainWindow(QMainWindow):
         act_trace.triggered.connect(self.trace_image)
         cad_tb.addAction(act_trace)
 
+        # Business Card quick tool
+        act_cad_cards = QAction(create_tool_icon("📇", fg_color="#00e5ff"), "Business Card Studio (Ctrl+B)", self)
+        act_cad_cards.triggered.connect(self.open_business_card_studio)
+        cad_tb.addAction(act_cad_cards)
+
+        # Workpiece Alignment quick tool
+        act_cad_align = QAction(create_tool_icon("🎯", fg_color="#ff4081"), "Align Workpiece (Ctrl+L)", self)
+        act_cad_align.triggered.connect(self.open_alignment_assistant)
+        cad_tb.addAction(act_cad_align)
+
+        # Photo Studio quick tool
+        act_cad_photo = QAction(create_tool_icon("📷", fg_color="#e040fb"), "Photo Engrave Studio (Ctrl+Shift+I)", self)
+        act_cad_photo.triggered.connect(lambda: self.open_photo_studio())
+        cad_tb.addAction(act_cad_photo)
+
+        # Crop Image quick tool
+        act_cad_crop = QAction(create_tool_icon("✂️", fg_color="#ffd54f"), "Crop Selected Image (Ctrl+K)", self)
+        act_cad_crop.triggered.connect(self.open_crop_tool_for_selected)
+        cad_tb.addAction(act_cad_crop)
+
+        # Barcode & QR quick tool
+        act_cad_bc = QAction(create_tool_icon("📱", fg_color="#00e5ff"), "QR Code & Barcode Studio (Ctrl+Q)", self)
+        act_cad_bc.triggered.connect(self.open_barcode_designer)
+        cad_tb.addAction(act_cad_bc)
+
+        # SDXL Turbo quick tool
+        act_cad_sdxl = QAction(create_tool_icon("🎨", fg_color="#ff4081"), "SDXL Turbo Generative Studio (Ctrl+Alt+S)", self)
+        act_cad_sdxl.triggered.connect(self.open_sdxl_turbo_studio)
+        cad_tb.addAction(act_cad_sdxl)
+
+        # Templates Studio quick tool
+        act_cad_templates = QAction(create_tool_icon("📐", fg_color="#ffab40"), "Templates Studio (Ctrl+Shift+T)", self)
+        act_cad_templates.triggered.connect(self.open_templates_studio)
+        cad_tb.addAction(act_cad_templates)
+
+        # Shapes Generator quick tool
+        act_cad_shapes = QAction(create_tool_icon("⭐", fg_color="#69f0ae"), "Shapes Generator (Ctrl+Shift+S)", self)
+        act_cad_shapes.triggered.connect(lambda: self.open_shapes_library(0))
+        cad_tb.addAction(act_cad_shapes)
+
+        # Offset Border quick tool
+        act_cad_offset = QAction(create_tool_icon("⭕", fg_color="#ff4081"), "Offset / Cut Border (Ctrl+Shift+O)", self)
+        act_cad_offset.triggered.connect(lambda: self.open_shapes_library(1))
+        cad_tb.addAction(act_cad_offset)
+
+        # Grid Array quick tool
+        act_cad_array = QAction(create_tool_icon("⊞", fg_color="#00e5ff"), "Grid Array Matrix (Ctrl+Shift+A)", self)
+        act_cad_array.triggered.connect(self.open_grid_array_dialog)
+        cad_tb.addAction(act_cad_array)
+
         cad_tb.addSeparator()
 
 
@@ -339,13 +913,22 @@ class MainWindow(QMainWindow):
         right_tab_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
 
         tab_widget = QTabWidget()
-        self.laser_panel = LaserControlPanel(self.serial_ctrl, self)
+        self.laser_panel = LaserControlPanel(self.serial_ctrl, parent=self, settings=self.settings)
+        self.laser_panel.settings_requested.connect(self.open_machine_settings)
+        self.laser_panel.park_requested.connect(
+            lambda: self.serial_ctrl.go_to_park(
+                getattr(self.settings, "park_x", 0.0),
+                getattr(self.settings, "park_y", 0.0),
+                getattr(self.settings, "rapid_speed", 3000.0)
+            )
+        )
         self.console_panel = ConsolePanel(self.serial_ctrl, self)
         self.props_panel = ShapePropertiesPanel(self.scene, self)
 
         tab_widget.addTab(self.laser_panel, "Laser")
         tab_widget.addTab(self.console_panel, "Console")
         tab_widget.addTab(self.props_panel, "Properties")
+        self.right_tab_widget = tab_widget
 
         right_tab_dock.setWidget(tab_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, right_tab_dock)
@@ -395,6 +978,11 @@ class MainWindow(QMainWindow):
         self.status_entity_count.setStyleSheet("padding-right: 15px; color: #cfd8dc;")
         sb.addPermanentWidget(self.status_entity_count)
 
+        gpu_info = GPUAccelerator.get_hardware_info()
+        self.status_gpu = QLabel(gpu_info.summary_short())
+        self.status_gpu.setStyleSheet("padding-right: 15px; color: #81c784; font-weight: bold;")
+        sb.addPermanentWidget(self.status_gpu)
+
         self.status_machine = QLabel("Laser: Disconnected")
         self.status_machine.setStyleSheet("font-weight: bold; padding-right: 10px; color: #ef5350;")
         sb.addPermanentWidget(self.status_machine)
@@ -412,20 +1000,53 @@ class MainWindow(QMainWindow):
         # Cuts panel signals
         self.cuts_panel.layer_selected.connect(self._on_palette_layer_clicked)
         self.cuts_panel.layers_updated.connect(lambda: self.scene.update())
+        self.cuts_panel.material_library_requested.connect(self.open_material_library)
 
         # Laser control signals
         self.laser_panel.start_job_requested.connect(self.start_job)
         self.laser_panel.frame_job_requested.connect(self.frame_job)
+        self.laser_panel.alignment_dialog_requested.connect(self.open_alignment_assistant)
 
         # Properties panel signals
         self.props_panel.trace_image_requested.connect(self.trace_image)
+        self.props_panel.photo_studio_requested.connect(lambda: self.open_photo_studio())
+        self.props_panel.crop_image_requested.connect(lambda: self.open_crop_tool_for_selected())
+        self.props_panel.curved_text_requested.connect(self.open_curved_text_dialog)
 
-        # Serial status badge
+        # Serial status and auto-connect tracking
+        self.serial_ctrl.connected.connect(self._on_laser_connected)
+        self.serial_ctrl.disconnected.connect(self._on_laser_disconnected)
+        self.serial_ctrl.machine_parameters_loaded.connect(self._on_machine_parameters_loaded)
+        self.serial_ctrl.auto_connect_progress.connect(lambda msg: self.statusBar().showMessage(msg, 2500))
 
-        self.serial_ctrl.connected.connect(lambda p: self.status_machine.setText(f"Laser: Connected ({p})"))
-        self.serial_ctrl.connected.connect(lambda: self.status_machine.setStyleSheet("font-weight: bold; color: #66bb6a;"))
-        self.serial_ctrl.disconnected.connect(lambda: self.status_machine.setText("Laser: Disconnected"))
-        self.serial_ctrl.disconnected.connect(lambda: self.status_machine.setStyleSheet("font-weight: bold; color: #ef5350;"))
+    def _on_laser_connected(self, port: str):
+        self.settings.last_connected_port = port
+        self.status_machine.setText(f"Laser: Connected ({port})")
+        self.status_machine.setStyleSheet("font-weight: bold; color: #66bb6a;")
+        self.statusBar().showMessage(f"Laser connected on {port} (GRBL Ready)", 4000)
+
+    def _on_machine_parameters_loaded(self, params: dict):
+        w = params.get("bed_width", self.settings.bed_width)
+        h = params.get("bed_height", self.settings.bed_height)
+        s_max = params.get("max_s_value", self.settings.max_s_value)
+        l_mode = params.get("laser_mode", self.settings.laser_mode)
+
+        self.settings.max_s_value = s_max
+        self.settings.laser_mode = l_mode
+
+        if abs(w - self.settings.bed_width) > 1.0 or abs(h - self.settings.bed_height) > 1.0:
+            self.settings.bed_width = w
+            self.settings.bed_height = h
+            self.canvas_widget.view.set_bed_size(w, h)
+            self.canvas_widget.view.zoom_to_fit()
+            self.statusBar().showMessage(
+                f"Auto-configured laser workbed: {w:.0f} × {h:.0f} mm (Max S: {s_max})", 5000
+            )
+
+    def _on_laser_disconnected(self):
+        self.status_machine.setText("Laser: Disconnected")
+        self.status_machine.setStyleSheet("font-weight: bold; color: #ef5350;")
+        self.statusBar().showMessage("Laser disconnected.", 3000)
 
     def _on_cursor_moved(self, x: float, y: float):
         self.status_pos.setText(f"X: {x:6.2f} mm  Y: {y:6.2f} mm")
@@ -434,6 +1055,172 @@ class MainWindow(QMainWindow):
         entities = self.scene.get_all_entities()
         selected = self.scene.get_selected_entities()
         self.status_entity_count.setText(f"Objects: {len(entities)} (Selected: {len(selected)})")
+
+        # Synchronize typography toolbar
+        self._sync_font_toolbar_from_selection()
+        selected_text = [e for e in selected if isinstance(e, TextEntity)]
+        if selected_text and hasattr(self, "right_tab_widget") and hasattr(self, "props_panel"):
+            self.right_tab_widget.setCurrentWidget(self.props_panel)
+
+    def _sync_font_toolbar_from_selection(self):
+        selected = self.scene.get_selected_entities()
+        selected_text = [e for e in selected if isinstance(e, TextEntity)]
+        if hasattr(self, "font_toolbar"):
+            if selected_text:
+                self.font_toolbar.setEnabled(True)
+                tent = selected_text[0]
+                self._is_syncing_font_tb = True
+                if hasattr(self, "tb_text_input"):
+                    if not self.tb_text_input.hasFocus() and self.tb_text_input.text() != tent.text:
+                        self.tb_text_input.setText(tent.text)
+                self.tb_font_combo.setCurrentFont(QFont(tent.font_family))
+                self.tb_font_size_spin.setValue(tent.font_size)
+                self.tb_btn_bold.setChecked(tent.bold)
+                self.tb_btn_italic.setChecked(tent.italic)
+                self.tb_btn_underline.setChecked(getattr(tent, "underline", False))
+                self.tb_mode_combo.setCurrentIndex(1 if getattr(tent, "fill_mode", "Fill") == "Outline" else 0)
+                self._is_syncing_font_tb = False
+            else:
+                self.font_toolbar.setEnabled(False)
+                if hasattr(self, "tb_text_input"):
+                    self._is_syncing_font_tb = True
+                    if not self.tb_text_input.hasFocus() and self.tb_text_input.text():
+                        self.tb_text_input.clear()
+                    self._is_syncing_font_tb = False
+
+    # --- Typography Toolbar Handlers ---
+
+    def _on_tb_text_changed(self, text: str):
+        if getattr(self, "_is_syncing_font_tb", False):
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.text = text
+                font = QFont(item.entity.font_family, max(4, int(round(item.entity.font_size * 2))))
+                fm = QFontMetricsF(font)
+                tw = max(10.0, fm.horizontalAdvance(text) + 6.0)
+                item.entity.width = max(item.entity.width, tw)
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_tb_text_editing_finished(self):
+        if hasattr(self.scene, "push_undo_state"):
+            self.scene.push_undo_state()
+
+    def _on_tb_font_family_changed(self, font: QFont):
+        if getattr(self, "_is_syncing_font_tb", False):
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.font_family = font.family()
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_tb_font_size_changed(self, size: float):
+        if getattr(self, "_is_syncing_font_tb", False):
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                orig_sz = max(0.1, item.entity.font_size)
+                ratio = size / orig_sz
+                item.entity.font_size = size
+                item.entity.height = max(1.0, item.entity.height * ratio)
+                item.entity.width = max(1.0, item.entity.width * ratio)
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_tb_bold_toggled(self, checked: bool):
+        if getattr(self, "_is_syncing_font_tb", False):
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.bold = checked
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_tb_italic_toggled(self, checked: bool):
+        if getattr(self, "_is_syncing_font_tb", False):
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.italic = checked
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_tb_underline_toggled(self, checked: bool):
+        if getattr(self, "_is_syncing_font_tb", False):
+            return
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.underline = checked
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_tb_mode_changed(self, index: int):
+        if getattr(self, "_is_syncing_font_tb", False):
+            return
+        mode_val = "Outline" if index == 1 else "Fill"
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                item.entity.fill_mode = mode_val
+                item.sync_from_entity()
+        self.scene.entity_modified.emit()
+
+    def _on_quick_style_selected(self, index: int):
+        style_key = self.tb_quick_style_combo.currentData()
+        if not style_key:
+            return
+
+        selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        for item in selected_items:
+            if isinstance(item.entity, TextEntity):
+                if style_key == "modern":
+                    item.entity.font_family = "Sans Serif"
+                    item.entity.font_size = 14.0
+                    item.entity.bold = True
+                    item.entity.italic = False
+                    item.entity.underline = False
+                    item.entity.fill_mode = "Fill"
+                elif style_key == "industrial":
+                    item.entity.font_family = "Sans Serif"
+                    item.entity.font_size = 18.0
+                    item.entity.bold = True
+                    item.entity.italic = False
+                    item.entity.underline = False
+                    item.entity.fill_mode = "Outline"
+                elif style_key == "serif":
+                    item.entity.font_family = "Serif"
+                    item.entity.font_size = 14.0
+                    item.entity.bold = False
+                    item.entity.italic = False
+                    item.entity.underline = False
+                    item.entity.fill_mode = "Fill"
+                elif style_key == "script":
+                    item.entity.font_family = "Serif"
+                    item.entity.font_size = 16.0
+                    item.entity.bold = False
+                    item.entity.italic = True
+                    item.entity.underline = False
+                    item.entity.fill_mode = "Fill"
+                elif style_key == "monogram":
+                    item.entity.font_family = "Serif"
+                    item.entity.font_size = 32.0
+                    item.entity.bold = True
+                    item.entity.italic = False
+                    item.entity.underline = False
+                    item.entity.fill_mode = "Fill"
+
+                item.sync_from_entity()
+
+        self.scene.entity_modified.emit()
+        self._sync_font_toolbar_from_selection()
 
     def _on_palette_layer_clicked(self, layer_id: int):
         self.scene.set_active_layer(layer_id)
@@ -702,9 +1489,34 @@ class MainWindow(QMainWindow):
         self.serial_ctrl.start_job(frame_gcode)
         self.statusBar().showMessage("Framing bounding box with laser guide beam...", 3000)
 
+    def validate_current_job(self):
+        """Generates G-code for current canvas items and displays full validation report."""
+        entities = self.scene.get_all_entities()
+        if not entities:
+            QMessageBox.information(self, "Validate G-Code", "Canvas is empty. Add shapes or artwork to validate.")
+            return
+
+        try:
+            job = self.gcode_gen.generate_job(entities)
+            validator = GCodeValidator(self.settings, strict=getattr(self.settings, "strict_validation", False))
+            report = validator.validate(job.gcode)
+            dlg = ValidationDialog(report, parent=self, allow_proceed=False)
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Validation Error", f"Failed to generate and validate G-code: {e}")
+
     def start_job(self):
         if not self.serial_ctrl.is_connected:
             QMessageBox.warning(self, "Start Error", "Laser is not connected. Please connect in the Laser tab first.")
+            return
+
+        if self.serial_ctrl.machine_state == "Alarm":
+            QMessageBox.warning(
+                self, "Machine in ALARM State",
+                "<b>Laser is currently locked in ALARM state!</b><br><br>"
+                "A hardware limit switch was triggered or the machine was reset.<br>"
+                "Please ensure the carriage is clear of endstops and click <b>'Unlock ($X)'</b> in the Laser panel."
+            )
             return
 
         entities = self.scene.get_all_entities()
@@ -712,21 +1524,86 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Start Error", "Canvas is empty.")
             return
 
-        # Confirm job execution
+        try:
+            job = self.gcode_gen.generate_job(entities)
+        except Exception as e:
+            QMessageBox.critical(self, "Generation Error", f"Failed to generate G-code: {e}")
+            return
+
+        # 1. Pre-Flight GRBL G-Code Simulation & Validation
+        active_gcode = job.gcode
+        active_job = job
+        bed_w = self.settings.bed_width
+        bed_h = self.settings.bed_height
+        max_s = self.settings.max_s_value
+        min_x, min_y, max_x, max_y = job.bounding_box
+        is_out_of_bounds = (max_x > bed_w + 0.5 or max_y > bed_h + 0.5 or min_x < -0.5 or min_y < -0.5)
+
+        validator = GCodeValidator(self.settings, strict=getattr(self.settings, "strict_validation", False))
+        report = validator.validate(active_gcode)
+
+        # 2. Automated Simulation & Error Repair Check
+        if report.has_errors or is_out_of_bounds:
+            # Run automated repair engine to fix out-of-bounds, missing F, Marlin codes, unclamped S, etc.
+            repaired_gcode, repairs_applied = GCodeValidator.repair_gcode(
+                active_gcode,
+                bed_width=bed_w,
+                bed_height=bed_h,
+                max_s=max_s,
+                default_feedrate=getattr(self.settings, "rapid_speed", 1000.0)
+            )
+
+            # Re-validate repaired G-code
+            repaired_report = validator.validate(repaired_gcode)
+            repaired_job = GCodeValidator.simulate_to_job(repaired_gcode, self.settings)
+
+            val_dlg = ValidationDialog(
+                report=report if report.has_errors else repaired_report,
+                parent=self,
+                allow_proceed=True,
+                repaired_gcode=repaired_gcode,
+                repairs_applied=repairs_applied,
+                job_result=repaired_job,
+                settings=self.settings
+            )
+            val_dlg.exec()
+
+            if not val_dlg.proceed_chosen:
+                return
+
+            active_gcode = val_dlg.final_gcode or repaired_gcode
+            active_job = repaired_job
+
+        elif report.has_warnings and getattr(self.settings, "validate_gcode_before_start", True):
+            val_dlg = ValidationDialog(
+                report,
+                parent=self,
+                allow_proceed=True,
+                job_result=job,
+                settings=self.settings
+            )
+            val_dlg.exec()
+            if not val_dlg.proceed_chosen:
+                return
+
+        # 3. Final Safety Confirmation before burning
         res = QMessageBox.question(
-            self, "Start Job",
-            "Are laser safety glasses on and work area clear?\nStart laser engraving job now?",
+            self, "Start Laser Job",
+            f"<b>Safety Checklist:</b><br>"
+            f"• Laser safety glasses worn?<br>"
+            f"• Exhaust / fume extraction on?<br>"
+            f"• Work area clear and focused?<br><br>"
+            f"Start burning job now? ({len(active_job.segments)} moves, est. {active_job.estimated_time_sec:.0f}s)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if res != QMessageBox.StandardButton.Yes:
             return
 
         try:
-            job = self.gcode_gen.generate_job(entities)
-            self.serial_ctrl.start_job(job.gcode)
-            self.statusBar().showMessage("Laser job streaming started.", 3000)
+            self.serial_ctrl.start_job(active_gcode)
+            self.statusBar().showMessage(f"Laser job started ({len(active_job.segments)} moves).", 3000)
         except Exception as e:
-            QMessageBox.critical(self, "Execution Error", f"Failed to generate and stream G-code: {e}")
+            QMessageBox.critical(self, "Execution Error", f"Failed to stream G-code: {e}")
 
     def _toggle_pause_job(self):
         if hasattr(self, "laser_panel"):
@@ -738,12 +1615,12 @@ class MainWindow(QMainWindow):
                 self.serial_ctrl.pause_job()
 
     def open_machine_settings(self):
-
-        dlg = MachineSettingsDialog(self.settings, self)
+        dlg = MachineSettingsDialog(self.settings, parent=self, serial_ctrl=self.serial_ctrl)
         if dlg.exec() == MachineSettingsDialog.DialogCode.Accepted:
             self.canvas_widget.view.set_bed_size(self.settings.bed_width, self.settings.bed_height)
+            self.canvas_widget.view.set_opengl_acceleration(getattr(self.settings, "enable_opengl_canvas", True))
             self.canvas_widget.view.zoom_to_fit()
-            self.statusBar().showMessage("Machine settings updated.", 3000)
+            self.statusBar().showMessage("Machine & Laser settings updated.", 3000)
 
     def _show_about(self):
         QMessageBox.about(
@@ -759,3 +1636,658 @@ class MainWindow(QMainWindow):
             "</ul>"
             "<p><i>Built for makers and fabricators.</i></p>"
         )
+
+    # -------------------------------------------------------------
+    # Business Card Studio, 3W Material Library & Alignment
+    # -------------------------------------------------------------
+    def open_business_card_studio(self):
+        """Opens the interactive Business Card Studio Dialog."""
+        dlg = BusinessCardStudioDialog(self)
+        if dlg.exec() == BusinessCardStudioDialog.DialogCode.Accepted and dlg.generated_entities:
+            self.scene.clearSelection()
+            for ent in dlg.generated_entities:
+                w = self.scene.add_entity(ent)
+                w.setSelected(True)
+            self.canvas_widget.view.zoom_to_fit()
+            self.statusBar().showMessage(
+                f"Generated {len(dlg.generated_entities)} business card entities on canvas.", 4000
+            )
+
+    def open_material_library(self):
+        """Opens the 3W Laser Material Library & Calibrated Presets."""
+        dlg = MaterialLibraryDialog(self)
+        dlg.applied_to_layer.connect(self._on_material_applied_to_layer)
+        if dlg.exec() == MaterialLibraryDialog.DialogCode.Accepted:
+            if dlg.test_matrix_entities:
+                self.scene.clearSelection()
+                for ent in dlg.test_matrix_entities:
+                    w = self.scene.add_entity(ent)
+                    w.setSelected(True)
+                self.canvas_widget.view.zoom_to_fit()
+                self.statusBar().showMessage(
+                    f"Generated {len(dlg.test_matrix_entities)} test matrix swatches on canvas.", 4000
+                )
+
+    def _on_material_applied_to_layer(self, profile: MaterialProfile):
+        """Applies a selected 3W diode laser material profile to the active layer."""
+        active_lid = self.scene.active_layer_id
+        layer_cfg = self.layer_manager.get_layer(active_lid)
+        layer_cfg.speed = profile.speed
+        layer_cfg.power_max = profile.power_pct
+        layer_cfg.passes = profile.passes
+        layer_cfg.line_interval = profile.line_interval
+        layer_cfg.pass_delay_sec = profile.pass_delay_sec
+        layer_cfg.air_assist = profile.air_assist
+        if profile.mode in ("Line", "Fill", "Fill + Line"):
+            layer_cfg.mode = profile.mode
+        self.cuts_panel.refresh_table()
+        self.scene.update()
+        self.statusBar().showMessage(
+            f"Applied 3W preset '{profile.name}' to Layer C{active_lid:02d} ({profile.speed:.0f} mm/min, {profile.power_pct:.0f}% power)",
+            4000
+        )
+
+    def open_test_matrix_dialog(self):
+        """Opens the Parametric Material Test Matrix Grid Dialog."""
+        dlg = TestMatrixDialog(self)
+        if dlg.exec() == TestMatrixDialog.DialogCode.Accepted and dlg.generated_entities:
+            self.scene.clearSelection()
+            for ent in dlg.generated_entities:
+                w = self.scene.add_entity(ent)
+                w.setSelected(True)
+            self.canvas_widget.view.zoom_to_fit()
+            self.statusBar().showMessage(
+                f"Generated {len(dlg.generated_entities)} material test matrix swatches.", 4000
+            )
+
+    def open_camera_wizard(self):
+        """Opens the interactive Camera Calibration and Bed Alignment Wizard."""
+        from laserforge.ui.camera_calibration_wizard import CameraCalibrationWizardDialog
+        dlg = CameraCalibrationWizardDialog(
+            self.camera_engine,
+            bed_width_mm=self.settings.bed_width,
+            bed_height_mm=self.settings.bed_height,
+            parent=self
+        )
+        dlg.calibration_applied.connect(self._on_camera_calibration_applied)
+        dlg.exec()
+
+    def _on_camera_calibration_applied(self, calib):
+        self.statusBar().showMessage("Camera calibration applied successfully! Updating bed overlay...", 5000)
+        self.update_camera_overlay()
+
+    def update_camera_overlay(self):
+        """Captures a rectified top-down frame and maps it to the canvas bed background."""
+        try:
+            ortho = self.camera_engine.rectify_bed_image()
+            if ortho is not None and ortho.size > 0:
+                h, w, ch = ortho.shape
+                bytes_per_line = ch * w
+                qimg = QImage(ortho.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                pix = QPixmap.fromImage(qimg)
+                self.scene.set_camera_overlay_pixmap(pix, self.settings.bed_width, self.settings.bed_height)
+                self.act_camera_toggle.setChecked(True)
+                self.statusBar().showMessage(f"Camera bed overlay updated ({w}x{h} px)", 3000)
+            else:
+                self.statusBar().showMessage("Could not capture camera frame. Check device connection.", 5000)
+        except Exception as e:
+            self.statusBar().showMessage(f"Camera overlay error: {e}", 5000)
+
+    def open_alignment_assistant(self):
+        """Opens the Workpiece Alignment & Targeting Assistant dialog."""
+        entities = self.scene.get_selected_entities()
+        if not entities:
+            entities = self.scene.get_all_entities()
+
+        if entities:
+            all_min_x, all_min_y, all_max_x, all_max_y = float("inf"), float("inf"), float("-inf"), float("-inf")
+            for ent in entities:
+                b = ent.get_bounds()
+                all_min_x = min(all_min_x, b[0])
+                all_min_y = min(all_min_y, b[1])
+                all_max_x = max(all_max_x, b[2])
+                all_max_y = max(all_max_y, b[3])
+            bbox = (all_min_x, all_min_y, all_max_x, all_max_y)
+        else:
+            # Default to standard business card blank (85.6 x 54 mm) at (20, 20)
+            bbox = (20.0, 20.0, 105.6, 74.0)
+
+        dlg = LaserAlignmentDialog(serial_ctrl=self.serial_ctrl, bbox=bbox, parent=self)
+        dlg.align_canvas_requested.connect(self._align_canvas_artwork)
+        dlg.generate_jig_requested.connect(self._generate_l_jig)
+        dlg.exec()
+
+    def _align_canvas_artwork(self, angle_deg: float, shift_x: float, shift_y: float):
+        """Rotates and translates canvas artwork to align with the physically measured workpiece."""
+        from laserforge.ui.canvas_scene import LaserItemWrapper
+        import math
+
+        target_wrappers = [
+            item for item in self.scene.items()
+            if isinstance(item, LaserItemWrapper) and (not self.scene.selectedItems() or item.isSelected())
+        ]
+        if not target_wrappers:
+            target_wrappers = [item for item in self.scene.items() if isinstance(item, LaserItemWrapper)]
+
+        if not target_wrappers:
+            return
+
+        # Calculate bounding envelope of target items to find reference Top-Left (min_x, max_y)
+        all_min_x, all_max_y = float("inf"), float("-inf")
+        for w in target_wrappers:
+            w.sync_to_entity()
+            b = w.entity.get_bounds()
+            all_min_x = min(all_min_x, b[0])
+            all_max_y = max(all_max_y, b[3])
+
+        rad = math.radians(angle_deg)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+
+        target_ref_x = all_min_x + shift_x
+        target_ref_y = all_max_y + shift_y
+
+        for w in target_wrappers:
+            ent = w.entity
+            if isinstance(ent, LineEntity):
+                for attr_x, attr_y in [("x", "y"), ("x2", "y2")]:
+                    ox = getattr(ent, attr_x)
+                    oy = getattr(ent, attr_y)
+                    dx = ox - all_min_x
+                    dy = oy - all_max_y
+                    rx = dx * cos_a - dy * sin_a
+                    ry = dx * sin_a + dy * cos_a
+                    setattr(ent, attr_x, target_ref_x + rx)
+                    setattr(ent, attr_y, target_ref_y + ry)
+            elif isinstance(ent, PathEntity):
+                if angle_deg != 0:
+                    new_contours = []
+                    for contour in ent.contours:
+                        new_c = []
+                        for px, py in contour:
+                            new_c.append((px * cos_a - py * sin_a, px * sin_a + py * cos_a))
+                        new_contours.append(new_c)
+                    ent.contours = new_contours
+                    ent.invalidate_bounds()
+                dx = ent.x - all_min_x
+                dy = ent.y - all_max_y
+                rx = dx * cos_a - dy * sin_a
+                ry = dx * sin_a + dy * cos_a
+                ent.x = target_ref_x + rx
+                ent.y = target_ref_y + ry
+                w._cached_path = None
+            else:
+                b = ent.get_bounds()
+                cx = (b[0] + b[2]) / 2.0
+                cy = (b[1] + b[3]) / 2.0
+                dx = cx - all_min_x
+                dy = cy - all_max_y
+                rx = dx * cos_a - dy * sin_a
+                ry = dx * sin_a + dy * cos_a
+                new_cx = target_ref_x + rx
+                new_cy = target_ref_y + ry
+
+                if isinstance(ent, CircleEntity):
+                    ent.x = new_cx
+                    ent.y = new_cy
+                else:
+                    ent.x = new_cx - ent.width / 2.0
+                    ent.y = new_cy - ent.height / 2.0
+                ent.rotation = (ent.rotation + angle_deg) % 360.0
+
+            w.sync_from_entity()
+
+        self.scene.entity_modified.emit()
+        self.scene.update()
+        self.statusBar().showMessage(
+            f"Canvas aligned: rotated {angle_deg:+.2f}°, shifted by ({shift_x:+.1f}, {shift_y:+.1f}) mm", 4000
+        )
+
+    def _generate_l_jig(self, card_w: float = 85.6, card_h: float = 54.0):
+        """Places a physical 90° L-bracket corner stop wasteboard jig on the canvas (Layer T1)."""
+        arm_thick = 15.0
+        arm_len_x = card_w + 15.0
+        arm_len_y = card_h + 15.0
+        ox = 10.0
+        oy = 10.0
+
+        # L-bracket perimeter
+        l_contour = [
+            (ox, oy),
+            (ox + arm_thick + arm_len_x, oy),
+            (ox + arm_thick + arm_len_x, oy + arm_thick),
+            (ox + arm_thick, oy + arm_thick),
+            (ox + arm_thick, oy + arm_thick + arm_len_y),
+            (ox, oy + arm_thick + arm_len_y),
+            (ox, oy)
+        ]
+
+        jig_path = PathEntity(
+            layer_id=12,  # T1 Tool guide layer
+            name="90deg_Wasteboard_L_Jig",
+            x=0.0,
+            y=0.0,
+            contours=[l_contour],
+            closed=True
+        )
+
+        label = TextEntity(
+            layer_id=12,
+            name="Jig_Label",
+            x=ox + 2.0,
+            y=oy + 4.0,
+            text=f"90° CORNER STOP ({card_w:.1f}×{card_h:.1f})",
+            font_size=3.5,
+            width=55.0,
+            height=6.0
+        )
+
+        card_guide = RectEntity(
+            layer_id=12,
+            name="Card_Pocket_Guide",
+            x=ox + arm_thick,
+            y=oy + arm_thick,
+            width=card_w,
+            height=card_h,
+            corner_radius=3.0
+        )
+
+        self.scene.clearSelection()
+        for ent in (jig_path, label, card_guide):
+            w = self.scene.add_entity(ent)
+            w.setSelected(True)
+
+        self.canvas_widget.view.zoom_to_fit()
+        self.statusBar().showMessage("90° Wasteboard Corner Stop Jig placed on canvas (Layer T1).", 4000)
+
+    def generate_vector_qr_code(self):
+        """Prompts user for URL/text and generates a clean vector QR code on the active layer."""
+        data, ok = QInputDialog.getText(
+            self, "Generate Vector QR Code",
+            "Enter URL, contact info, or text to encode:",
+            text="https://laserforge.org"
+        )
+        if not ok or not data.strip():
+            return
+
+        size_mm, ok2 = QInputDialog.getDouble(
+            self, "QR Code Size",
+            "QR Code Width/Height (mm):",
+            value=25.0, min=10.0, max=200.0, decimals=1
+        )
+        if not ok2:
+            return
+
+        try:
+            contours = generate_qr_contours(data.strip(), size_mm=size_mm)
+            center_x = (self.settings.bed_width - size_mm) / 2.0
+            center_y = (self.settings.bed_height - size_mm) / 2.0
+
+            qr_ent = PathEntity(
+                layer_id=self.scene.active_layer_id,
+                name=f"QR_{data[:12].strip()}",
+                x=center_x,
+                y=center_y,
+                contours=contours,
+                closed=True
+            )
+            self.scene.clearSelection()
+            wrapper = self.scene.add_entity(qr_ent)
+            wrapper.setSelected(True)
+            self.statusBar().showMessage(
+                f"Generated vector QR code ({size_mm:.1f} × {size_mm:.1f} mm) with {len(contours)} polygon loops.", 4000
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "QR Code Error", f"Failed to generate vector QR code: {e}")
+
+    # --- Design Aids, Studios & Photo Conversion Handlers ---
+
+    def open_photo_studio(self, image_entity: Optional[ImageEntity] = None):
+        """Opens the interactive Photo Engrave Studio dialog for photographic diode laser preparation."""
+        if image_entity is None:
+            selected = self.scene.get_selected_entities()
+            img_ents = [e for e in selected if isinstance(e, ImageEntity)]
+            if img_ents:
+                image_entity = img_ents[0]
+
+        dlg = PhotoEngraveDialog(
+            self,
+            image_entity=image_entity,
+            bed_width=self.settings.bed_width,
+            bed_height=self.settings.bed_height
+        )
+
+        def _on_applied(params: dict):
+            if image_entity and image_entity in self.scene.get_all_entities():
+                # Update existing image entity
+                for k, v in params.items():
+                    setattr(image_entity, k, v)
+                for item in self.scene.items():
+                    if isinstance(item, LaserItemWrapper) and item.entity == image_entity:
+                        item.sync_from_entity()
+                self.scene.entity_modified.emit()
+                self.scene.update()
+                self.statusBar().showMessage(f"Updated photo engraving parameters for '{image_entity.name}'.", 3500)
+            else:
+                # Add new image entity centered on bed
+                w = params.get("width", 80.0)
+                h = params.get("height", 80.0)
+                cx = (self.settings.bed_width - w) / 2.0
+                cy = (self.settings.bed_height - h) / 2.0
+                raw_name = os.path.basename(params.get("raw_image_path", "") or params.get("image_path", "Photo"))
+                new_img = ImageEntity(
+                    layer_id=self.scene.active_layer_id,
+                    name=raw_name,
+                    x=cx, y=cy,
+                    **params
+                )
+                self.scene.clearSelection()
+                wrapper = self.scene.add_entity(new_img)
+                wrapper.setSelected(True)
+                self.scene.update()
+                self.statusBar().showMessage(f"Added photo workpiece ({w:.1f} × {h:.1f} mm) to canvas.", 3500)
+
+        dlg.photo_applied.connect(_on_applied)
+        dlg.exec()
+
+    def open_crop_tool_for_selected(self, image_entity: Optional[ImageEntity] = None):
+        """Opens the interactive Crop dialog for the selected ImageEntity on the canvas."""
+        if image_entity is None:
+            selected = self.scene.get_selected_entities()
+            img_ents = [e for e in selected if isinstance(e, ImageEntity)]
+            if not img_ents:
+                QMessageBox.information(self, "No Image Selected", "Please select an image on the canvas to crop.")
+                return
+            image_entity = img_ents[0]
+
+        src_path = getattr(image_entity, "raw_image_path", "") or image_entity.image_path
+        if not src_path or not os.path.exists(src_path):
+            src_path = image_entity.image_path
+        if not src_path or not os.path.exists(src_path):
+            QMessageBox.warning(self, "Image Not Found", f"Cannot find image file:\n{src_path}")
+            return
+
+        try:
+            from PIL import Image as PILImg
+            pil_img = PILImg.open(src_path)
+            dlg = CropImageDialog(pil_img, parent=self, title=f"Crop Image: {image_entity.name}")
+            if dlg.exec() and dlg.cropped_image:
+                cache_dir = os.path.expanduser("~/.laserforge/cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                ts = int(time.time() * 1000)
+                cropped_path = os.path.join(cache_dir, f"cropped_{ts}.png")
+                dlg.cropped_image.save(cropped_path)
+
+                old_w, old_h = pil_img.size
+                new_w, new_h = dlg.cropped_image.size
+                scale_factor_x = new_w / float(old_w)
+                scale_factor_y = new_h / float(old_h)
+
+                image_entity.raw_image_path = cropped_path
+                image_entity.image_path = cropped_path
+                image_entity.processed_image_path = cropped_path
+                image_entity.width = max(1.0, round(image_entity.width * scale_factor_x, 2))
+                image_entity.height = max(1.0, round(image_entity.height * scale_factor_y, 2))
+
+                for item in self.scene.items():
+                    if isinstance(item, LaserItemWrapper) and item.entity == image_entity:
+                        item.sync_from_entity()
+                self.scene.entity_modified.emit()
+                self.scene.update()
+                self.statusBar().showMessage(
+                    f"Cropped '{image_entity.name}' to {new_w} × {new_h} px ({image_entity.width:.1f} × {image_entity.height:.1f} mm).", 4000
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "Crop Error", f"Failed to crop image: {e}")
+
+    def open_barcode_designer(self):
+        """Opens the QR Code & 1D Barcode Designer Studio."""
+        dlg = BarcodeDesignerDialog(
+            self,
+            layer_manager=self.layer_manager,
+            bed_width=self.settings.bed_width,
+            bed_height=self.settings.bed_height,
+            default_layer_id=self.scene.active_layer_id
+        )
+
+        def _on_generated(entities: list):
+            self.scene.clearSelection()
+            for ent in entities:
+                w = self.scene.add_entity(ent)
+                w.setSelected(True)
+            self.scene.update()
+            self.statusBar().showMessage(f"Added {len(entities)} barcode/QR code workpiece(s) to canvas.", 4000)
+
+        dlg.entities_generated.connect(_on_generated)
+        dlg.exec()
+
+    def open_sdxl_turbo_studio(self):
+        """Launches the independent standalone LaserForge AI Studio process, or falls back to embedded window."""
+        from PyQt6.QtCore import QProcess
+        launcher_bin = "/home/k/LaserForge/bin/laserforge-ai"
+        if os.path.isfile(launcher_bin) and os.access(launcher_bin, os.X_OK):
+            success = QProcess.startDetached(launcher_bin)
+            if success:
+                self.statusBar().showMessage("Launched standalone LaserForge AI Studio (communicating via queue)", 5000)
+                return
+
+        # Fallback to embedded window
+        if self.sdxl_studio_window is None:
+            self.sdxl_studio_window = SDXLTurboStudioWindow(self, is_embedded=True)
+            self.sdxl_studio_window.image_imported.connect(
+                lambda p: self._import_image_to_canvas(p, open_studio=False)
+            )
+            self.sdxl_studio_window.photo_studio_requested.connect(
+                lambda p: self._import_image_to_canvas(p, open_studio=True)
+            )
+        self.sdxl_studio_window.show()
+        self.sdxl_studio_window.raise_()
+        self.sdxl_studio_window.activateWindow()
+
+    def _init_auto_import_watcher(self):
+        """Monitors ~/.laserforge/imported_queue for images dispatched from standalone SDXL Turbo."""
+        self.import_poll_timer = QTimer(self)
+        self.import_poll_timer.setInterval(1000)
+        self.import_poll_timer.timeout.connect(self._check_import_queue)
+        self.import_poll_timer.start()
+
+    def _check_import_queue(self):
+        if not os.path.exists(IMPORT_QUEUE_DIR):
+            return
+        try:
+            for fname in os.listdir(IMPORT_QUEUE_DIR):
+                if fname.endswith(".json"):
+                    fpath = os.path.join(IMPORT_QUEUE_DIR, fname)
+                    try:
+                        with open(fpath, "r") as f:
+                            data = json.load(f)
+                        img_path = data.get("image_path")
+                        open_studio = data.get("open_photo_studio", False)
+                        if img_path and os.path.exists(img_path):
+                            self._import_image_to_canvas(img_path, name=os.path.basename(img_path), open_studio=open_studio)
+                    except Exception as e:
+                        print(f"Error reading import queue item: {e}")
+                    finally:
+                        try:
+                            os.remove(fpath)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    def _import_image_to_canvas(self, img_path: str, name: str = "", open_studio: bool = False):
+        """Places a raster image directly onto the active workspace canvas and optionally launches Photo Studio."""
+        if not os.path.exists(img_path):
+            return
+
+        w, h = 80.0, 80.0
+        try:
+            from PIL import Image as PILImg
+            with PILImg.open(img_path) as p:
+                pw, ph = p.size
+                if pw > 0 and ph > 0:
+                    aspect = ph / float(pw)
+                    w = 80.0
+                    h = round(w * aspect, 1)
+        except Exception:
+            pass
+
+        cx = (self.settings.bed_width - w) / 2.0
+        cy = (self.settings.bed_height - h) / 2.0
+
+        ent_name = name or os.path.basename(img_path)
+        new_img = ImageEntity(
+            layer_id=self.scene.active_layer_id,
+            name=ent_name,
+            image_path=img_path,
+            raw_image_path=img_path,
+            processed_image_path=img_path,
+            x=cx,
+            y=cy,
+            width=w,
+            height=h
+        )
+        self.scene.clearSelection()
+        wrapper = self.scene.add_entity(new_img)
+        wrapper.setSelected(True)
+        self.scene.update()
+        self.statusBar().showMessage(f"Auto-imported '{ent_name}' ({w:.1f} × {h:.1f} mm) into workspace.", 4000)
+
+        if open_studio:
+            self.open_photo_studio(new_img)
+
+    def open_templates_studio(self):
+        """Opens the Project Templates & Calibration Studio."""
+        dlg = TemplatesStudioDialog(
+            self,
+            bed_width=self.settings.bed_width,
+            bed_height=self.settings.bed_height
+        )
+
+        def _on_generated(entities: list, replace: bool):
+            if replace:
+                self.scene.clear_entities()
+            self.scene.clearSelection()
+            for ent in entities:
+                w = self.scene.add_entity(ent)
+                w.setSelected(True)
+            self.canvas_widget.view.zoom_to_fit()
+            self.statusBar().showMessage(f"Template generated ({len(entities)} workpieces placed on canvas).", 4000)
+
+        dlg.templates_generated.connect(_on_generated)
+        dlg.exec()
+
+    def open_shapes_library(self, initial_tab: int = 0):
+        """Opens the Parametric Shapes Generator & Offset Border dialog."""
+        selected = self.scene.get_selected_entities()
+        dlg = ShapeGeneratorDialog(
+            self,
+            layer_manager=self.layer_manager,
+            selected_entities_count=len(selected),
+            bed_width=self.settings.bed_width,
+            bed_height=self.settings.bed_height,
+            initial_tab=initial_tab
+        )
+
+        def _on_shape_gen(entities: list):
+            self.scene.clearSelection()
+            for e in entities:
+                w = self.scene.add_entity(e)
+                w.setSelected(True)
+            self.statusBar().showMessage(f"Added {len(entities)} parametric vector shape(s) to canvas.", 3500)
+
+        dlg.shape_generated.connect(_on_shape_gen)
+        dlg.offset_requested.connect(self.apply_offset_to_selected)
+        dlg.exec()
+
+    def apply_offset_to_selected(self, dist_mm: float, corner_style: str, target_layer_id: int):
+        """Generates outward cut border or inward inset around selected entities."""
+        selected = self.scene.get_selected_entities()
+        if not selected:
+            QMessageBox.information(self, "Offset Tool", "Please select one or more objects on the canvas first.")
+            return
+
+        offset_count = 0
+        for ent in selected:
+            offset_ent = ShapeGenerator.offset_entity(ent, dist_mm, corner_style, target_layer_id)
+            if offset_ent:
+                w = self.scene.add_entity(offset_ent)
+                w.setSelected(True)
+                offset_count += 1
+
+        if offset_count > 0:
+            self.statusBar().showMessage(f"Generated {offset_count} offset border(s) ({dist_mm:+.1f} mm).", 3500)
+        else:
+            QMessageBox.warning(self, "Offset Tool", "Could not generate offset contours for selected items.")
+
+    def open_grid_array_dialog(self):
+        """Opens the Grid Array duplication tool."""
+        selected = self.scene.get_selected_entities()
+        if not selected:
+            QMessageBox.information(
+                self, "Grid Array",
+                "Please select one or more objects on the canvas to duplicate into a grid array."
+            )
+            return
+
+        dlg = GridArrayDialog(
+            self,
+            selected_entities=selected,
+            bed_width=self.settings.bed_width,
+            bed_height=self.settings.bed_height
+        )
+
+        def _on_grid_gen(new_entities: list):
+            for e in new_entities:
+                w = self.scene.add_entity(e)
+                w.setSelected(True)
+            self.statusBar().showMessage(f"Generated grid array: added {len(new_entities)} duplicates.", 4000)
+
+        dlg.grid_generated.connect(_on_grid_gen)
+        dlg.exec()
+
+    def open_curved_text_dialog(self):
+        """Opens the Curved Arc Text generation tool."""
+        dlg = CurvedTextDialog(
+            self,
+            bed_width=self.settings.bed_width,
+            bed_height=self.settings.bed_height
+        )
+
+        def _on_curved_created(entity: LaserEntity):
+            self.scene.clearSelection()
+            w = self.scene.add_entity(entity)
+            w.setSelected(True)
+            self.statusBar().showMessage(f"Curved arc text '{entity.name}' created on canvas.", 3500)
+
+        dlg.curved_text_created.connect(_on_curved_created)
+        dlg.exec()
+
+    def open_serial_generator_dialog(self):
+        """Opens the Sequential Serial Number Batch generation tool."""
+        dlg = SerialGeneratorDialog(
+            self,
+            bed_width=self.settings.bed_width,
+            bed_height=self.settings.bed_height
+        )
+
+        def _on_serials_gen(entities: list):
+            self.scene.clearSelection()
+            for e in entities:
+                w = self.scene.add_entity(e)
+                w.setSelected(True)
+            self.statusBar().showMessage(f"Generated batch of {len(entities)} sequential serial labels.", 4000)
+
+        dlg.serials_generated.connect(_on_serials_gen)
+        dlg.exec()
+
+    def closeEvent(self, event):
+        """Clean up background timers, watchers, and serial threads on exit."""
+        if hasattr(self, "import_watcher_timer") and self.import_watcher_timer.isActive():
+            self.import_watcher_timer.stop()
+        if hasattr(self, "serial"):
+            try:
+                self.serial.disconnect()
+            except Exception:
+                pass
+        super().closeEvent(event)
