@@ -16,12 +16,26 @@ fi
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
 
-# Auto-detect Python binary with PyTorch and CUDA support
-PYTHON_BIN="python3"
-if [ -x "/home/k/.pyenv/versions/3.10.13/bin/python" ]; then
-    PYTHON_BIN="/home/k/.pyenv/versions/3.10.13/bin/python"
-elif [ -x "$HOME/.pyenv/shims/python" ]; then
-    PYTHON_BIN="$HOME/.pyenv/shims/python"
+# Auto-detect compatible Python binary
+PYTHON_CANDIDATES=(
+    "/home/k/.pyenv/versions/3.10.13/bin/python"
+    "$HOME/.pyenv/shims/python"
+    "python3"
+)
+
+PYTHON_BIN=""
+for candidate in "${PYTHON_CANDIDATES[@]}"; do
+    if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
+        if "$candidate" -c "import PyQt6, ezdxf, shapely" >/dev/null 2>&1; then
+            PYTHON_BIN="$candidate"
+            break
+        fi
+    fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+    PYTHON_BIN="python3"
 fi
+
 
 exec "$PYTHON_BIN" -m laserforge.main "$@"

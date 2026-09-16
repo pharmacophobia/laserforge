@@ -27,6 +27,27 @@ TOOL_CIRCLE = "circle"
 TOOL_LINE = "line"
 TOOL_TEXT = "text"
 
+class GuideLineItem(QGraphicsLineItem):
+    """Visual alignment guide line across the laser workbed."""
+    def __init__(self, orientation: str, pos_mm: float, bed_w: float, bed_h: float):
+        super().__init__()
+        self.orientation = orientation  # "horizontal" or "vertical"
+        self.pos_mm = pos_mm
+        self.bed_w = bed_w
+        self.bed_h = bed_h
+        self.setZValue(-50)
+        pen = QPen(QColor("#00e5ff"), 1.0, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.update_geometry()
+
+    def update_geometry(self):
+        if self.orientation == "horizontal":
+            self.setLine(0, self.pos_mm, self.bed_w, self.pos_mm)
+        else:
+            self.setLine(self.pos_mm, 0, self.pos_mm, self.bed_h)
+
+
 class LaserItemWrapper(QGraphicsItem):
     """Wrapper item for CAD entities with selection bounding box and interactive handles."""
     def __init__(self, entity: LaserEntity, layer_manager: LayerManager):
@@ -332,6 +353,18 @@ class LaserItemWrapper(QGraphicsItem):
 
         super().mouseMoveEvent(event)
 
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
+            sc = self.scene()
+            if getattr(sc, "snap_to_grid", True):
+                grid = getattr(sc, "snap_grid_mm", 1.0)
+                if grid > 0.05:
+                    new_pos = value
+                    snapped_x = round(new_pos.x() / grid) * grid
+                    snapped_y = round(new_pos.y() / grid) * grid
+                    return QPointF(snapped_x, snapped_y)
+        return super().itemChange(change, value)
+
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
         if getattr(self, "_resizing_handle", None):
             self._resizing_handle = None
@@ -508,6 +541,11 @@ class LaserCanvasScene(QGraphicsScene):
         self.active_tool = TOOL_SELECT
         self.active_layer_id = 0
         self.snap_grid_mm = 1.0  # Snap grid in mm (0 for off)
+        self.snap_to_grid = True
+        self.guides: List[GuideLineItem] = []
+        self.show_guides = True
+        self.bed_width = 400.0
+        self.bed_height = 400.0
 
         # Drawing state
         self._drawing = False
@@ -555,6 +593,33 @@ class LaserCanvasScene(QGraphicsScene):
     def set_active_tool(self, tool: str):
         self.active_tool = tool
         self.clearSelection()
+
+    def add_guide(self, orientation: str, pos_mm: float):
+        """Adds horizontal or vertical alignment guide line at specified millimeter position."""
+        guide = GuideLineItem(orientation, pos_mm, self.bed_width, self.bed_height)
+        guide.setVisible(self.show_guides)
+        self.guides.append(guide)
+        self.addItem(guide)
+        self.update()
+
+    def clear_guides(self):
+        """Removes all alignment guide lines from the canvas."""
+        for g in self.guides:
+            self.removeItem(g)
+        self.guides.clear()
+        self.update()
+
+    def set_guides_visible(self, visible: bool):
+        """Toggles visibility of alignment guide lines."""
+        self.show_guides = visible
+        for g in self.guides:
+            g.setVisible(visible)
+        self.update()
+
+    def set_snap_to_grid(self, enabled: bool, grid_size: float = 1.0):
+        """Enables or disables automatic grid snapping."""
+        self.snap_to_grid = enabled
+        self.snap_grid_mm = grid_size if enabled else 0.0
 
     def set_active_layer(self, layer_id: int):
         self.active_layer_id = layer_id

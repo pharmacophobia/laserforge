@@ -23,6 +23,7 @@ from laserforge.config import DEFAULT_BED_WIDTH_MM, DEFAULT_BED_HEIGHT_MM
 
 class ShapePropertiesPanel(QWidget):
     trace_image_requested = pyqtSignal()
+    cutout_image_requested = pyqtSignal()
     photo_studio_requested = pyqtSignal()
     crop_image_requested = pyqtSignal()
     curved_text_requested = pyqtSignal()
@@ -229,6 +230,12 @@ class ShapePropertiesPanel(QWidget):
         self.btn_trace_img.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; padding: 6px;")
         self.btn_trace_img.clicked.connect(self.trace_image_requested.emit)
         img_layout.addWidget(self.btn_trace_img)
+
+        self.btn_cutout_img = QPushButton("✂️ Auto Cutout to SVG...")
+        self.btn_cutout_img.setToolTip("Automatically extract subject silhouette and generate laser cutout contour (+offset border)")
+        self.btn_cutout_img.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; padding: 6px;")
+        self.btn_cutout_img.clicked.connect(self.cutout_image_requested.emit)
+        img_layout.addWidget(self.btn_cutout_img)
 
         self.img_group.setVisible(False)
         layout.addWidget(self.img_group)

@@ -37,8 +37,8 @@ def main():
     ret = app.exec()
     try:
         window.serial_ctrl.disconnect()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[LaserForge] Serial port shutdown error: {e}", file=sys.stderr)
     sys.exit(ret)
 
 

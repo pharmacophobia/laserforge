@@ -11,7 +11,7 @@ LightBurn-inspired layout integrating:
 import os
 import json
 import time
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QToolBar,
     QDockWidget, QTabWidget, QFileDialog, QMessageBox, QLabel,
@@ -46,9 +46,11 @@ from laserforge.ui.machine_settings_dialog import MachineSettingsDialog
 from laserforge.core.gcode_validator import GCodeValidator, ValidationReport
 from laserforge.core.gpu_accelerator import GPUAccelerator
 from laserforge.ui.trace_image_dialog import TraceImageDialog
+from laserforge.ui.image_cutout_dialog import ImageCutoutDialog
 from laserforge.ui.business_card_dialog import BusinessCardStudioDialog
 from laserforge.ui.material_library_dialog import MaterialLibraryDialog, TestMatrixDialog
 from laserforge.ui.alignment_dialog import LaserAlignmentDialog
+from laserforge.ui.burn_perimeter_dialog import BurnPerimeterDialog
 from laserforge.ui.photo_engrave_dialog import PhotoEngraveDialog
 from laserforge.ui.templates_dialog import TemplatesStudioDialog
 from laserforge.ui.shape_generator_dialog import ShapeGeneratorDialog
@@ -57,7 +59,13 @@ from laserforge.ui.grid_array_dialog import GridArrayDialog
 from laserforge.ui.serial_generator_dialog import SerialGeneratorDialog
 from laserforge.ui.crop_image_dialog import CropImageDialog
 from laserforge.ui.barcode_designer_dialog import BarcodeDesignerDialog
-from laserforge.apps.sdxl_turbo_studio import SDXLTurboStudioWindow, IMPORT_QUEUE_DIR
+from laserforge.core.dxf_importer import DXFImporter
+from laserforge.core.dxf_exporter import DXFExporter
+from laserforge.core.svg_exporter import SVGExporter
+from laserforge.ui.job_estimator_dialog import JobEstimatorDialog
+from laserforge.ui.directional_hatch_dialog import DirectionalHatchDialog
+from PyQt6.QtCore import QSettings
+IMPORT_QUEUE_DIR = os.path.expanduser("~/.laserforge/imported_queue")
 from laserforge.core.shape_generator import ShapeGenerator
 from laserforge.core.font_tools import FontTools
 from laserforge.core.business_card_generator import BusinessCardGenerator, generate_qr_contours
@@ -124,7 +132,7 @@ class MainWindow(QMainWindow):
         self.canvas_widget.view.zoom_to_fit()
 
         # Automated auto-import queue listener (for standalone SDXL Turbo Studio)
-        self.sdxl_studio_window: Optional[SDXLTurboStudioWindow] = None
+        self.sdxl_studio_window: Optional[Any] = None
         self._init_auto_import_watcher()
 
         # Automated laser connection on startup if enabled
@@ -163,6 +171,53 @@ class MainWindow(QMainWindow):
         self.act_trace_image.setShortcut("Ctrl+T")
         self.act_trace_image.setToolTip("Convert bitmap image to vector paths / SVG")
         self.act_trace_image.triggered.connect(self.trace_image)
+
+        self.act_image_cutout = QAction("Auto Cutout to SVG...", self)
+        self.act_image_cutout.setShortcut("Ctrl+Shift+C")
+        self.act_image_cutout.setToolTip("Automatically convert image to vector laser cutout contour (+offset border)")
+        self.act_image_cutout.triggered.connect(lambda: self.auto_image_cutout())
+
+        self.act_import_dxf = QAction("Import DXF Vector...", self)
+        self.act_import_dxf.setShortcut("Ctrl+Alt+D")
+        self.act_import_dxf.setToolTip("Import AutoCAD DXF vector files from CAD / Fusion 360 (Ctrl+Alt+D)")
+        self.act_import_dxf.triggered.connect(lambda: self.import_dxf())
+
+        self.act_export_svg = QAction("Export SVG File...", self)
+        self.act_export_svg.setShortcut("Ctrl+Shift+E")
+        self.act_export_svg.setToolTip("Export canvas artwork to standard W3C SVG vector file (Ctrl+Shift+E)")
+        self.act_export_svg.triggered.connect(self.export_svg)
+
+        self.act_export_dxf = QAction("Export DXF File...", self)
+        self.act_export_dxf.setToolTip("Export canvas vector paths to standard AutoCAD DXF file")
+        self.act_export_dxf.triggered.connect(self.export_dxf)
+
+        self.act_job_estimator = QAction("Job Cost & Time Estimator...", self)
+        self.act_job_estimator.setShortcut("Ctrl+Shift+M")
+        self.act_job_estimator.setToolTip("Pre-job calculation of cutting run time, sheet area, and cost quote (Ctrl+Shift+M)")
+        self.act_job_estimator.triggered.connect(self.open_job_estimator)
+
+        self.act_directional_hatch = QAction("Directional Vector Hatching...", self)
+        self.act_directional_hatch.setShortcut("Ctrl+Shift+H")
+        self.act_directional_hatch.setToolTip("Fill unconnected vector shapes with directional lines (>= 15° neighbor contrast, center-to-edge convergence) (Ctrl+Shift+H)")
+        self.act_directional_hatch.triggered.connect(self.open_directional_hatching)
+
+        self.act_snap_grid = QAction("Snap to Grid", self)
+        self.act_snap_grid.setCheckable(True)
+        self.act_snap_grid.setChecked(True)
+        self.act_snap_grid.setShortcut("Ctrl+Shift+G")
+        self.act_snap_grid.setToolTip("Toggle automatic grid snapping for CAD objects (Ctrl+Shift+G)")
+        self.act_snap_grid.toggled.connect(self._on_snap_grid_toggled)
+
+        self.act_toggle_guides = QAction("Show Alignment Guides", self)
+        self.act_toggle_guides.setCheckable(True)
+        self.act_toggle_guides.setChecked(True)
+        self.act_toggle_guides.setShortcut("Ctrl+;")
+        self.act_toggle_guides.setToolTip("Toggle display of alignment guide lines (Ctrl+;)")
+        self.act_toggle_guides.toggled.connect(self._on_toggle_guides)
+
+        self.act_clear_guides = QAction("Clear All Alignment Guides", self)
+        self.act_clear_guides.setToolTip("Remove all horizontal and vertical guide lines")
+        self.act_clear_guides.triggered.connect(lambda: self.scene.clear_guides())
 
         self.act_export_gcode = QAction("Export G-Code...", self)
         self.act_export_gcode.setShortcut("Ctrl+E")
@@ -367,6 +422,11 @@ class MainWindow(QMainWindow):
         self.act_frame.setShortcut("Ctrl+F")
         self.act_frame.triggered.connect(self.frame_job)
 
+        self.act_burn_perimeter = QAction("🔥 Burn Alignment Perimeter...", self)
+        self.act_burn_perimeter.setShortcut("Ctrl+Shift+B")
+        self.act_burn_perimeter.setToolTip("Score or burn alignment perimeter on wasteboard or stock to position workpiece")
+        self.act_burn_perimeter.triggered.connect(lambda: self.open_burn_perimeter_tool())
+
         self.act_start_job = QAction("Start Laser Job", self)
         self.act_start_job.setShortcut("Ctrl+R")
         self.act_start_job.triggered.connect(self.start_job)
@@ -396,14 +456,20 @@ class MainWindow(QMainWindow):
         menu_file = menubar.addMenu("&File")
         menu_file.addAction(self.act_new)
         menu_file.addAction(self.act_open)
+        self.menu_recent = menu_file.addMenu("Open &Recent")
+        self._update_recent_menu()
         menu_file.addAction(self.act_save)
         menu_file.addAction(self.act_save_as)
         menu_file.addSeparator()
         menu_file.addAction(self.act_import_svg)
+        menu_file.addAction(self.act_import_dxf)
         menu_file.addAction(self.act_import_img)
         menu_file.addAction(self.act_trace_image)
+        menu_file.addAction(self.act_image_cutout)
         menu_file.addSeparator()
         menu_file.addAction(self.act_export_gcode)
+        menu_file.addAction(self.act_export_svg)
+        menu_file.addAction(self.act_export_dxf)
         menu_file.addSeparator()
         menu_file.addAction(self.act_exit)
 
@@ -434,8 +500,10 @@ class MainWindow(QMainWindow):
         menu_laser.addAction(self.act_auto_connect)
         menu_laser.addSeparator()
         menu_laser.addAction(self.act_preview)
+        menu_laser.addAction(self.act_job_estimator)
         menu_laser.addAction(self.act_validate_gcode)
         menu_laser.addAction(self.act_frame)
+        menu_laser.addAction(self.act_burn_perimeter)
         menu_laser.addAction(self.act_start_job)
         menu_laser.addAction(self.act_pause_job)
         menu_laser.addAction(self.act_stop_job)
@@ -458,6 +526,7 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_camera_wizard)
         menu_tools.addAction(self.act_camera_update)
         menu_tools.addSeparator()
+        menu_tools.addAction(self.act_job_estimator)
         menu_tools.addAction(self.act_photo_studio)
         menu_tools.addAction(self.act_templates_studio)
         menu_tools.addAction(self.act_shapes_lib)
@@ -473,13 +542,24 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_crop_image)
         menu_tools.addAction(self.act_gen_qr)
         menu_tools.addAction(self.act_trace_image)
+        menu_tools.addAction(self.act_image_cutout)
+        menu_tools.addAction(self.act_directional_hatch)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
         menu_tools.addAction(self.act_test_matrix)
         menu_tools.addAction(self.act_align_workpiece)
+        menu_tools.addAction(self.act_burn_perimeter)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_preview)
         menu_tools.addAction(self.act_zoom_fit)
+
+        # View & CAD Snapping Menu
+        menu_view = menubar.addMenu("&View")
+        menu_view.addAction(self.act_zoom_fit)
+        menu_view.addSeparator()
+        menu_view.addAction(self.act_snap_grid)
+        menu_view.addAction(self.act_toggle_guides)
+        menu_view.addAction(self.act_clear_guides)
 
         # Arrange & Design Aids Menu
         menu_arrange = menubar.addMenu("&Arrange")
@@ -827,10 +907,34 @@ class MainWindow(QMainWindow):
         act_svg.triggered.connect(self.import_svg)
         cad_tb.addAction(act_svg)
 
+        # DXF Import Action
+        act_dxf = QAction(create_tool_icon("DXF", fg_color="#00e676"), "Import AutoCAD DXF (Ctrl+Alt+D)", self)
+        act_dxf.setToolTip("Import AutoCAD DXF vector files from CAD / Fusion 360 (Ctrl+Alt+D)")
+        act_dxf.triggered.connect(lambda: self.import_dxf())
+        cad_tb.addAction(act_dxf)
+
         # Trace Image Action
         act_trace = QAction(create_tool_icon("⚡", fg_color="#ffd600"), "Trace Image to Vector (SVG)", self)
         act_trace.triggered.connect(self.trace_image)
         cad_tb.addAction(act_trace)
+
+        # Auto Cutout Action
+        act_cutout = QAction(create_tool_icon("✂️", fg_color="#ff5252"), "Auto Cutout to SVG (Ctrl+Shift+C)", self)
+        act_cutout.setToolTip("Auto Cutout to SVG: generate laser cut line around image (Ctrl+Shift+C)")
+        act_cutout.triggered.connect(lambda: self.auto_image_cutout())
+        cad_tb.addAction(act_cutout)
+
+        # Directional Vector Hatching Action
+        act_cad_hatch = QAction(create_tool_icon("📐", fg_color="#00e5ff"), "Directional Vector Hatching (Ctrl+Shift+H)", self)
+        act_cad_hatch.setToolTip("Directional Vector Hatching: multi-angle infill with >= 15° neighbor contrast (Ctrl+Shift+H)")
+        act_cad_hatch.triggered.connect(self.open_directional_hatching)
+        cad_tb.addAction(act_cad_hatch)
+
+        # Job Cost & Time Estimator Action
+        act_cad_est = QAction(create_tool_icon("⏱️", fg_color="#ffab00"), "Job Cost & Time Estimator (Ctrl+Shift+M)", self)
+        act_cad_est.setToolTip("Pre-job calculation of cutting run time, sheet area, and cost quote (Ctrl+Shift+M)")
+        act_cad_est.triggered.connect(self.open_job_estimator)
+        cad_tb.addAction(act_cad_est)
 
         # Business Card quick tool
         act_cad_cards = QAction(create_tool_icon("📇", fg_color="#00e5ff"), "Business Card Studio (Ctrl+B)", self)
@@ -1004,11 +1108,14 @@ class MainWindow(QMainWindow):
 
         # Laser control signals
         self.laser_panel.start_job_requested.connect(self.start_job)
+        self.laser_panel.simulate_job_requested.connect(self.preview_simulation)
         self.laser_panel.frame_job_requested.connect(self.frame_job)
+        self.laser_panel.burn_perimeter_requested.connect(lambda: self.open_burn_perimeter_tool())
         self.laser_panel.alignment_dialog_requested.connect(self.open_alignment_assistant)
 
         # Properties panel signals
         self.props_panel.trace_image_requested.connect(self.trace_image)
+        self.props_panel.cutout_image_requested.connect(lambda: self.auto_image_cutout())
         self.props_panel.photo_studio_requested.connect(lambda: self.open_photo_studio())
         self.props_panel.crop_image_requested.connect(lambda: self.open_crop_tool_for_selected())
         self.props_panel.curved_text_requested.connect(self.open_curved_text_dialog)
@@ -1264,6 +1371,7 @@ class MainWindow(QMainWindow):
             self.current_project_path = path
             self.setWindowTitle(f"LaserForge - {os.path.basename(path)}")
             self.canvas_widget.view.zoom_to_fit()
+            self._add_recent_file(path)
             self.statusBar().showMessage(f"Loaded project {path}", 3000)
         except Exception as e:
             QMessageBox.critical(self, "Error Loading Project", f"Failed to load project: {e}")
@@ -1291,6 +1399,7 @@ class MainWindow(QMainWindow):
                 "origin_corner": self.settings.origin_corner
             }
             ProjectIO.save_project(path, entities, self.layer_manager, machine_dict)
+            self._add_recent_file(path)
             self.setWindowTitle(f"LaserForge - {os.path.basename(path)}")
             self.statusBar().showMessage(f"Project saved to {path}", 3000)
         except Exception as e:
@@ -1309,6 +1418,7 @@ class MainWindow(QMainWindow):
             entities = ProjectIO.import_svg(path, self.scene.active_layer_id)
             for ent in entities:
                 self.scene.add_entity(ent)
+            self._add_recent_file(path)
             self.canvas_widget.view.zoom_to_fit()
             self.statusBar().showMessage(f"Imported {len(entities)} paths from SVG", 3000)
         except Exception as e:
@@ -1350,6 +1460,7 @@ class MainWindow(QMainWindow):
                 dpi=254.0
             )
             wrapper = self.scene.add_entity(img_ent)
+            self._add_recent_file(path)
             self.scene.clearSelection()
             wrapper.setSelected(True)
             self.statusBar().showMessage(f"Imported image '{os.path.basename(path)}' (80 × {target_h:.1f} mm)", 4000)
@@ -1434,6 +1545,338 @@ class MainWindow(QMainWindow):
             wrapper.setSelected(True)
             self.statusBar().showMessage(
                 f"Successfully traced '{image_name}' into {len(path_ent.contours)} vector contours!", 4000
+            )
+
+    def auto_image_cutout(self, target_image_ent: Optional[ImageEntity] = None):
+        """Automatically converts bitmap image into a laser-ready SVG cutout contour."""
+        from PIL import Image as PILImage
+
+        # Check if an ImageEntity is selected on the canvas if not provided
+        if target_image_ent is None:
+            selected_entities = self.scene.get_selected_entities()
+            for ent in selected_entities:
+                if isinstance(ent, ImageEntity):
+                    target_image_ent = ent
+                    break
+
+        pil_img = None
+        image_name = "Image"
+        initial_w = 80.0
+        initial_h = 80.0
+        target_x = 0.0
+        target_y = 0.0
+        image_file_path = ""
+
+        if target_image_ent and target_image_ent.image_path and os.path.exists(target_image_ent.image_path):
+            try:
+                pil_img = PILImage.open(target_image_ent.image_path)
+                image_name = target_image_ent.name
+                initial_w = target_image_ent.width
+                initial_h = target_image_ent.height
+                target_x = target_image_ent.x
+                target_y = target_image_ent.y
+                image_file_path = target_image_ent.image_path
+            except Exception as e:
+                QMessageBox.warning(self, "Image Error", f"Could not load selected image: {e}")
+                pil_img = None
+
+        if pil_img is None:
+            # Prompt user to select an image file to vectorize/cutout
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select Image for Auto Cutout (Generate Cut Line SVG)", "",
+                "Image Files (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)"
+            )
+            if not path:
+                return
+            try:
+                pil_img = PILImage.open(path)
+                image_name = os.path.splitext(os.path.basename(path))[0]
+                image_file_path = path
+                aspect = pil_img.height / max(1, pil_img.width)
+                initial_w = 80.0
+                initial_h = initial_w * aspect
+                target_x = (self.settings.bed_width - initial_w) / 2.0
+                target_y = (self.settings.bed_height - initial_h) / 2.0
+            except Exception as e:
+                QMessageBox.critical(self, "Load Error", f"Failed to open image file: {e}")
+                return
+
+        # Open the interactive ImageCutoutDialog
+        dlg = ImageCutoutDialog(
+            pil_img,
+            image_name=image_name,
+            initial_width_mm=initial_w,
+            initial_height_mm=initial_h,
+            active_cut_layer_id=2,  # Standard Layer 2 (C02 Red)
+            parent=self
+        )
+
+        if dlg.exec() == ImageCutoutDialog.DialogCode.Accepted and dlg.result_cutout:
+            if hasattr(self.scene, "push_undo_state"):
+                self.scene.push_undo_state()
+
+            path_ent = PathEntity(
+                layer_id=dlg.cut_layer_id,
+                name=f"Cutout_{image_name}",
+                x=target_x,
+                y=target_y,
+                contours=dlg.result_cutout.contours,
+                closed=True
+            )
+
+            # If user selected combo mode and image was imported fresh from file
+            if dlg.output_mode == "combo" and target_image_ent is None and image_file_path:
+                img_ent = ImageEntity(
+                    layer_id=0,
+                    name=image_name,
+                    x=target_x,
+                    y=target_y,
+                    width=initial_w,
+                    height=initial_h,
+                    image_path=image_file_path
+                )
+                self.scene.add_entity(img_ent)
+
+            cutout_wrapper = self.scene.add_entity(path_ent)
+            self.scene.clearSelection()
+            if cutout_wrapper:
+                cutout_wrapper.setSelected(True)
+
+            self.statusBar().showMessage(
+                f"Successfully generated cutout contour for '{image_name}' ({len(path_ent.contours)} contours)!", 4000
+            )
+
+    # ---------------- Phase 1 Professional Additions ----------------
+
+    def import_dxf(self, filepath: Optional[str] = None):
+        """Imports AutoCAD DXF vector paths onto canvas."""
+        if not filepath:
+            filepath, _ = QFileDialog.getOpenFileName(
+                self, "Import DXF Vector File", "",
+                "AutoCAD DXF Files (*.dxf);;All Files (*)"
+            )
+        if not filepath:
+            return
+
+        try:
+            entities = DXFImporter.import_dxf_file(filepath, default_layer_id=self.scene.active_layer_id)
+            if not entities:
+                QMessageBox.warning(self, "Import DXF", f"No vector entities found in '{os.path.basename(filepath)}'.")
+                return
+
+            if hasattr(self.scene, "push_undo_state"):
+                self.scene.push_undo_state()
+
+            # Center on bed if needed
+            all_min_x = min(e.get_bounds()[0] for e in entities)
+            all_min_y = min(e.get_bounds()[1] for e in entities)
+            all_max_x = max(e.get_bounds()[2] for e in entities)
+            all_max_y = max(e.get_bounds()[3] for e in entities)
+            dxf_w = all_max_x - all_min_x
+            dxf_h = all_max_y - all_min_y
+
+            target_cx = (self.settings.bed_width - dxf_w) / 2.0
+            target_cy = (self.settings.bed_height - dxf_h) / 2.0
+            dx = target_cx - all_min_x
+            dy = target_cy - all_min_y
+
+            for e in entities:
+                e.x += dx
+                e.y += dy
+                if isinstance(e, LineEntity):
+                    e.x2 += dx
+                    e.y2 += dy
+                self.scene.add_entity(e)
+
+            self._add_recent_file(filepath)
+            self.canvas_widget.view.zoom_to_fit()
+            self.statusBar().showMessage(
+                f"Imported {len(entities)} DXF entities from '{os.path.basename(filepath)}'!", 4000
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "DXF Import Error", f"Failed to import DXF file: {e}")
+
+    def export_dxf(self):
+        """Exports canvas vectors to standard AutoCAD DXF file."""
+        entities = self.scene.get_all_entities()
+        if not entities:
+            QMessageBox.warning(self, "Export DXF", "Canvas is empty. Draw or import shapes first.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Design to DXF", "LaserForge_Design.dxf",
+            "AutoCAD DXF (*.dxf);;All Files (*)"
+        )
+        if not path:
+            return
+
+        try:
+            success = DXFExporter.export_dxf_file(entities, path)
+            if success:
+                self.statusBar().showMessage(f"Successfully exported DXF to '{os.path.basename(path)}'!", 4000)
+                QMessageBox.information(self, "Export Complete", f"DXF file saved successfully to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "DXF Export Error", f"Failed to export DXF: {e}")
+
+    def export_svg(self):
+        """Exports all canvas entities to standard W3C SVG vector file."""
+        entities = self.scene.get_all_entities()
+        if not entities:
+            QMessageBox.warning(self, "Export SVG", "Canvas is empty. Draw or import shapes first.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Design to SVG", "LaserForge_Design.svg",
+            "Scalable Vector Graphics (*.svg);;All Files (*)"
+        )
+        if not path:
+            return
+
+        try:
+            success = SVGExporter.export_svg_file(
+                entities, path,
+                bed_width_mm=self.settings.bed_width,
+                bed_height_mm=self.settings.bed_height
+            )
+            if success:
+                self.statusBar().showMessage(f"Successfully exported SVG to '{os.path.basename(path)}'!", 4000)
+                QMessageBox.information(self, "Export Complete", f"SVG vector file saved successfully to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "SVG Export Error", f"Failed to export SVG: {e}")
+
+    def open_job_estimator(self):
+        """Opens the pre-job time, material, and cost estimator dialog."""
+        entities = self.scene.get_all_entities()
+        if not entities:
+            QMessageBox.warning(self, "Job Estimator", "Canvas is empty. Draw or import shapes first.")
+            return
+
+        from laserforge.core.gcode_generator import GCodeGenerator
+        generator = GCodeGenerator(self.settings, self.layer_manager)
+        job_result = generator.generate_job(entities)
+
+        dlg = JobEstimatorDialog(job_result, parent=self)
+        if dlg.exec() == JobEstimatorDialog.DialogCode.Accepted and dlg.run_job_requested:
+            self.start_job()
+
+    def _on_snap_grid_toggled(self, checked: bool):
+        self.scene.set_snap_to_grid(checked, 1.0)
+        self.statusBar().showMessage(f"Snap to Grid: {'ON (1mm)' if checked else 'OFF'}", 2500)
+
+    def _on_toggle_guides(self, checked: bool):
+        self.scene.set_guides_visible(checked)
+        self.statusBar().showMessage(f"Alignment Guides: {'Visible' if checked else 'Hidden'}", 2500)
+
+    def _add_recent_file(self, filepath: str):
+        if not filepath or not os.path.exists(filepath):
+            return
+        settings = QSettings("LaserForge", "LaserForge")
+        recents = settings.value("recent_files", []) or []
+        if isinstance(recents, str):
+            recents = [recents]
+        else:
+            recents = list(recents)
+        if filepath in recents:
+            recents.remove(filepath)
+        recents.insert(0, filepath)
+        recents = recents[:10]
+        settings.setValue("recent_files", recents)
+        self._update_recent_menu()
+
+    def _update_recent_menu(self):
+        if not hasattr(self, "menu_recent"):
+            return
+        self.menu_recent.clear()
+        settings = QSettings("LaserForge", "LaserForge")
+        recents = settings.value("recent_files", []) or []
+        if isinstance(recents, str):
+            recents = [recents]
+        else:
+            recents = list(recents)
+
+        valid_recents = [p for p in recents if os.path.exists(p)]
+        if not valid_recents:
+            act_empty = self.menu_recent.addAction("No Recent Files")
+            act_empty.setEnabled(False)
+            return
+
+        for p in valid_recents:
+            act = self.menu_recent.addAction(os.path.basename(p))
+            act.setToolTip(p)
+            act.triggered.connect(lambda checked=False, path=p: self._open_recent_path(path))
+
+        self.menu_recent.addSeparator()
+        act_clear = self.menu_recent.addAction("Clear Recent Files")
+        act_clear.triggered.connect(self._clear_recent_files)
+
+    def _clear_recent_files(self):
+        settings = QSettings("LaserForge", "LaserForge")
+        settings.setValue("recent_files", [])
+        self._update_recent_menu()
+
+    def _open_recent_path(self, filepath: str):
+        if not os.path.exists(filepath):
+            QMessageBox.warning(self, "File Not Found", f"File '{filepath}' no longer exists.")
+            self._update_recent_menu()
+            return
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in (".laserproj", ".json"):
+            self.load_project_file(filepath)
+        elif ext == ".dxf":
+            self.import_dxf(filepath)
+        elif ext == ".svg":
+            self.import_svg_file(filepath)
+        elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"):
+            self.import_image_file(filepath)
+
+    def open_directional_hatching(self):
+        """
+        Opens the Directional Vector Hatching Studio.
+        Generates multi-angle parallel infill lines across unconnected vector shapes,
+        guaranteeing >= 15° neighbor difference, maximum center divergence, and outer edge
+        convergence toward vertical lines.
+        """
+        selected_entities = self.scene.get_selected_entities()
+        # Filter for closed vector shapes (PathEntity, RectEntity, CircleEntity, TextEntity)
+        target_entities = [e for e in selected_entities if not isinstance(e, ImageEntity)]
+
+        if not target_entities:
+            # If nothing selected, use all vector entities on canvas
+            all_entities = self.scene.get_all_entities()
+            target_entities = [e for e in all_entities if not isinstance(e, ImageEntity)]
+
+        if not target_entities:
+            QMessageBox.information(
+                self, "Directional Vector Hatching",
+                "Please draw or select one or more closed vector shapes (rectangles, circles, or paths) to hatch."
+            )
+            return
+
+        dlg = DirectionalHatchDialog(
+            entities=target_entities,
+            active_layer_id=getattr(self.scene, "active_layer_id", 1),
+            parent=self
+        )
+
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result and dlg.result.hatched_entities:
+            if hasattr(self.scene, "push_undo_state"):
+                self.scene.push_undo_state()
+
+            if dlg.output_mode == "replace":
+                for ent in target_entities:
+                    self.scene.remove_entity(ent)
+
+            self.scene.clearSelection()
+            for ent in dlg.result.hatched_entities:
+                wrapper = self.scene.add_entity(ent)
+                if wrapper:
+                    wrapper.setSelected(True)
+
+            self.statusBar().showMessage(
+                f"Successfully generated directional hatching for {len(dlg.result.polygons)} shapes "
+                f"({dlg.result.total_line_count} cut lines, {dlg.result.total_hatch_length_mm:.1f} mm)! "
+                f"Min separation: {dlg.result.min_diff_achieved:.1f}°",
+                5000
             )
 
     def export_gcode(self):
@@ -1753,14 +2196,21 @@ class MainWindow(QMainWindow):
             bbox = (20.0, 20.0, 105.6, 74.0)
 
         dlg = LaserAlignmentDialog(serial_ctrl=self.serial_ctrl, bbox=bbox, parent=self)
-        dlg.align_canvas_requested.connect(self._align_canvas_artwork)
+        try:
+            dlg.align_canvas_requested[float, float, float, float, str].connect(self._align_canvas_artwork)
+        except Exception:
+            dlg.align_canvas_requested.connect(self._align_canvas_artwork)
         dlg.generate_jig_requested.connect(self._generate_l_jig)
+        dlg.burn_perimeter_requested.connect(self.open_burn_perimeter_tool)
         dlg.exec()
 
-    def _align_canvas_artwork(self, angle_deg: float, shift_x: float, shift_y: float):
+    def _align_canvas_artwork(self, angle_deg: float, shift_x: float, shift_y: float, scale: float = 1.0, ref_corner: str = "TL"):
         """Rotates and translates canvas artwork to align with the physically measured workpiece."""
         from laserforge.ui.canvas_scene import LaserItemWrapper
         import math
+
+        if hasattr(self.scene, "push_undo_state"):
+            self.scene.push_undo_state()
 
         target_wrappers = [
             item for item in self.scene.items()
@@ -1772,20 +2222,33 @@ class MainWindow(QMainWindow):
         if not target_wrappers:
             return
 
-        # Calculate bounding envelope of target items to find reference Top-Left (min_x, max_y)
-        all_min_x, all_max_y = float("inf"), float("-inf")
+        # Calculate bounding envelope of target items to find reference corner
+        all_min_x, all_min_y, all_max_x, all_max_y = float("inf"), float("inf"), float("-inf"), float("-inf")
         for w in target_wrappers:
             w.sync_to_entity()
             b = w.entity.get_bounds()
             all_min_x = min(all_min_x, b[0])
+            all_min_y = min(all_min_y, b[1])
+            all_max_x = max(all_max_x, b[2])
             all_max_y = max(all_max_y, b[3])
+
+        if ref_corner == "BL":
+            ref_x, ref_y = all_min_x, all_min_y
+        elif ref_corner == "CL":
+            ref_x, ref_y = all_min_x, (all_min_y + all_max_y) / 2.0
+        elif ref_corner == "TR":
+            ref_x, ref_y = all_max_x, all_max_y
+        elif ref_corner == "BR":
+            ref_x, ref_y = all_max_x, all_min_y
+        else:  # "TL"
+            ref_x, ref_y = all_min_x, all_max_y
 
         rad = math.radians(angle_deg)
         cos_a = math.cos(rad)
         sin_a = math.sin(rad)
 
-        target_ref_x = all_min_x + shift_x
-        target_ref_y = all_max_y + shift_y
+        target_ref_x = ref_x + shift_x
+        target_ref_y = ref_y + shift_y
 
         for w in target_wrappers:
             ent = w.entity
@@ -1793,35 +2256,36 @@ class MainWindow(QMainWindow):
                 for attr_x, attr_y in [("x", "y"), ("x2", "y2")]:
                     ox = getattr(ent, attr_x)
                     oy = getattr(ent, attr_y)
-                    dx = ox - all_min_x
-                    dy = oy - all_max_y
+                    dx = (ox - ref_x) * scale
+                    dy = (oy - ref_y) * scale
                     rx = dx * cos_a - dy * sin_a
                     ry = dx * sin_a + dy * cos_a
                     setattr(ent, attr_x, target_ref_x + rx)
                     setattr(ent, attr_y, target_ref_y + ry)
             elif isinstance(ent, PathEntity):
-                if angle_deg != 0:
-                    new_contours = []
-                    for contour in ent.contours:
-                        new_c = []
-                        for px, py in contour:
-                            new_c.append((px * cos_a - py * sin_a, px * sin_a + py * cos_a))
-                        new_contours.append(new_c)
-                    ent.contours = new_contours
-                    ent.invalidate_bounds()
-                dx = ent.x - all_min_x
-                dy = ent.y - all_max_y
-                rx = dx * cos_a - dy * sin_a
-                ry = dx * sin_a + dy * cos_a
-                ent.x = target_ref_x + rx
-                ent.y = target_ref_y + ry
+                new_contours = []
+                for contour in ent.contours:
+                    new_c = []
+                    for px, py in contour:
+                        abs_px = ent.x + px
+                        abs_py = ent.y + py
+                        dx = (abs_px - ref_x) * scale
+                        dy = (abs_py - ref_y) * scale
+                        rx = dx * cos_a - dy * sin_a
+                        ry = dx * sin_a + dy * cos_a
+                        new_c.append((target_ref_x + rx, target_ref_y + ry))
+                    new_contours.append(new_c)
+                ent.x = 0.0
+                ent.y = 0.0
+                ent.contours = new_contours
+                ent.invalidate_bounds()
                 w._cached_path = None
             else:
                 b = ent.get_bounds()
                 cx = (b[0] + b[2]) / 2.0
                 cy = (b[1] + b[3]) / 2.0
-                dx = cx - all_min_x
-                dy = cy - all_max_y
+                dx = (cx - ref_x) * scale
+                dy = (cy - ref_y) * scale
                 rx = dx * cos_a - dy * sin_a
                 ry = dx * sin_a + dy * cos_a
                 new_cx = target_ref_x + rx
@@ -1830,7 +2294,15 @@ class MainWindow(QMainWindow):
                 if isinstance(ent, CircleEntity):
                     ent.x = new_cx
                     ent.y = new_cy
+                    if scale != 1.0:
+                        ent.radius_x *= scale
+                        ent.radius_y *= scale
                 else:
+                    if scale != 1.0:
+                        ent.width *= scale
+                        ent.height *= scale
+                        if isinstance(ent, TextEntity):
+                            ent.font_size *= scale
                     ent.x = new_cx - ent.width / 2.0
                     ent.y = new_cy - ent.height / 2.0
                 ent.rotation = (ent.rotation + angle_deg) % 360.0
@@ -1839,8 +2311,9 @@ class MainWindow(QMainWindow):
 
         self.scene.entity_modified.emit()
         self.scene.update()
+        scale_msg = f", scale: {scale:.3f}x" if scale != 1.0 else ""
         self.statusBar().showMessage(
-            f"Canvas aligned: rotated {angle_deg:+.2f}°, shifted by ({shift_x:+.1f}, {shift_y:+.1f}) mm", 4000
+            f"Canvas aligned: rotated {angle_deg:+.2f}°, shifted by ({shift_x:+.1f}, {shift_y:+.1f}) mm{scale_msg}", 4000
         )
 
     def _generate_l_jig(self, card_w: float = 85.6, card_h: float = 54.0):
@@ -1899,6 +2372,37 @@ class MainWindow(QMainWindow):
 
         self.canvas_widget.view.zoom_to_fit()
         self.statusBar().showMessage("90° Wasteboard Corner Stop Jig placed on canvas (Layer T1).", 4000)
+
+    def open_burn_perimeter_tool(self, custom_bbox: Optional[Tuple[float, float, float, float]] = None):
+        """Opens the Burn Perimeter Tool for workpiece alignment and spoilboard marking."""
+        selected_entities = self.scene.get_selected_entities()
+        all_entities = self.scene.get_all_entities()
+
+        dlg = BurnPerimeterDialog(
+            serial_ctrl=self.serial_ctrl,
+            settings=self.settings,
+            gcode_gen=self.gcode_gen,
+            layer_manager=self.layer_manager,
+            selected_entities=selected_entities,
+            all_entities=all_entities,
+            custom_bbox=custom_bbox,
+            parent=self
+        )
+        dlg.add_to_canvas_requested.connect(self._add_entities_to_canvas)
+        dlg.exec()
+
+    def _add_entities_to_canvas(self, entities: List[LaserEntity]):
+        """Inserts generated vector entities onto canvas and triggers view update."""
+        if not entities:
+            return
+        if hasattr(self.scene, "push_undo_state"):
+            self.scene.push_undo_state()
+        self.scene.clearSelection()
+        for ent in entities:
+            w = self.scene.add_entity(ent)
+            w.setSelected(True)
+        self.canvas_widget.view.zoom_to_fit()
+        self.statusBar().showMessage(f"Added {len(entities)} alignment perimeter shape(s) to canvas.", 4000)
 
     def generate_vector_qr_code(self):
         """Prompts user for URL/text and generates a clean vector QR code on the active layer."""
@@ -2061,18 +2565,27 @@ class MainWindow(QMainWindow):
         dlg.entities_generated.connect(_on_generated)
         dlg.exec()
 
-    def open_sdxl_turbo_studio(self):
+    def open_sdxl_turbo_studio(self, initial_image_path: Optional[str] = None):
         """Launches the independent standalone LaserForge AI Studio process, or falls back to embedded window."""
         from PyQt6.QtCore import QProcess
         launcher_bin = "/home/k/LaserForge/bin/laserforge-ai"
+        args = []
+        if initial_image_path and os.path.isfile(initial_image_path):
+            args.extend(["--input-image", initial_image_path])
+
         if os.path.isfile(launcher_bin) and os.access(launcher_bin, os.X_OK):
-            success = QProcess.startDetached(launcher_bin)
+            if args:
+                success = QProcess.startDetached(launcher_bin, args)
+            else:
+                success = QProcess.startDetached(launcher_bin)
             if success:
-                self.statusBar().showMessage("Launched standalone LaserForge AI Studio (communicating via queue)", 5000)
+                msg = f"Launched LaserForge AI Studio with source photo '{os.path.basename(initial_image_path)}'" if initial_image_path else "Launched standalone LaserForge AI Studio"
+                self.statusBar().showMessage(msg, 5000)
                 return
 
         # Fallback to embedded window
         if self.sdxl_studio_window is None:
+            from laserforge.apps.sdxl_turbo_studio import SDXLTurboStudioWindow
             self.sdxl_studio_window = SDXLTurboStudioWindow(self, is_embedded=True)
             self.sdxl_studio_window.image_imported.connect(
                 lambda p: self._import_image_to_canvas(p, open_studio=False)
@@ -2080,9 +2593,25 @@ class MainWindow(QMainWindow):
             self.sdxl_studio_window.photo_studio_requested.connect(
                 lambda p: self._import_image_to_canvas(p, open_studio=True)
             )
+        if initial_image_path and os.path.isfile(initial_image_path):
+            self.sdxl_studio_window.load_input_photo(initial_image_path)
         self.sdxl_studio_window.show()
         self.sdxl_studio_window.raise_()
         self.sdxl_studio_window.activateWindow()
+
+    def open_sdxl_turbo_studio_for_image(self, image_entity: Optional[ImageEntity] = None):
+        """Opens AI Studio pre-loaded with an image from the canvas."""
+        if image_entity is None:
+            selected = self.scene.get_selected_entities()
+            img_ents = [e for e in selected if isinstance(e, ImageEntity)]
+            if img_ents:
+                image_entity = img_ents[0]
+        if image_entity:
+            path = getattr(image_entity, "raw_image_path", "") or getattr(image_entity, "image_path", "")
+            if path and os.path.isfile(path):
+                self.open_sdxl_turbo_studio(initial_image_path=path)
+                return
+        self.open_sdxl_turbo_studio()
 
     def _init_auto_import_watcher(self):
         """Monitors ~/.laserforge/imported_queue for images dispatched from standalone SDXL Turbo."""

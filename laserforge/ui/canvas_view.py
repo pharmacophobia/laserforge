@@ -346,8 +346,14 @@ class LaserCanvasView(QGraphicsView):
             act_photo = menu.addAction("📷 Open in Photo Engrave Studio...")
             act_photo.triggered.connect(lambda: getattr(main_win, "open_photo_studio", lambda e: None)(selected_image))
 
+            act_sdxl_mod = menu.addAction("🎨 Modify Photo with AI (SDXL Turbo)...")
+            act_sdxl_mod.triggered.connect(lambda: getattr(main_win, "open_sdxl_turbo_studio_for_image", lambda e: None)(selected_image))
+
             act_trace = menu.addAction("⚡ Trace Image to SVG...")
             act_trace.triggered.connect(lambda: getattr(main_win, "trace_image", lambda: None)())
+
+            act_cutout = menu.addAction("✂️ Auto Cutout to SVG (Cut Line)...")
+            act_cutout.triggered.connect(lambda: getattr(main_win, "auto_image_cutout", lambda e=None: None)(selected_image))
             menu.addSeparator()
 
         act_qr = menu.addAction("📱 QR Code & Barcode Studio...")
@@ -357,6 +363,10 @@ class LaserCanvasView(QGraphicsView):
         act_sdxl.triggered.connect(lambda: getattr(main_win, "open_sdxl_turbo_studio", lambda: None)())
 
         selected_ents = getattr(self.scene(), "get_selected_entities", lambda: [])()
+        if len(selected_ents) >= 1:
+            act_hatch = menu.addAction("📐 Directional Vector Hatching... (Ctrl+Shift+H)")
+            act_hatch.triggered.connect(lambda: getattr(main_win, "open_directional_hatching", lambda: None)())
+
         if len(selected_ents) >= 2:
             act_weld = menu.addAction("⚡ Weld / Union Shapes (Ctrl+Shift+U)")
             act_weld.triggered.connect(lambda: getattr(self.scene(), "boolean_operation", lambda m: None)("weld"))
@@ -369,6 +379,17 @@ class LaserCanvasView(QGraphicsView):
             menu.addSeparator()
 
         menu.addSeparator()
+        guide_menu = menu.addMenu("📏 Alignment Guides")
+        act_add_hg = guide_menu.addAction(f"Add Horizontal Guide @ Y={scene_pos.y():.1f}mm")
+        act_add_hg.triggered.connect(lambda: getattr(self.scene(), "add_guide", lambda o, p: None)("horizontal", scene_pos.y()))
+        act_add_vg = guide_menu.addAction(f"Add Vertical Guide @ X={scene_pos.x():.1f}mm")
+        act_add_vg.triggered.connect(lambda: getattr(self.scene(), "add_guide", lambda o, p: None)("vertical", scene_pos.x()))
+        guide_menu.addSeparator()
+        act_toggle_guides = guide_menu.addAction("Toggle Guides Visibility")
+        act_toggle_guides.triggered.connect(lambda: getattr(self.scene(), "set_guides_visible", lambda v: None)(not getattr(self.scene(), "show_guides", True)))
+        act_clear_guides = guide_menu.addAction("Clear All Guides")
+        act_clear_guides.triggered.connect(lambda: getattr(self.scene(), "clear_guides", lambda: None)())
+
         act_undo = menu.addAction("↩ Undo (Ctrl+Z)")
         act_undo.triggered.connect(lambda: getattr(self.scene(), "undo", lambda: None)())
 
