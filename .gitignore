@@ -7,3 +7,5 @@ dist/
 *.laserproj.bak
 /*.laserproj
 !examples/*.laserproj
+/*.png
+!assets/*.png
