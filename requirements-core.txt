@@ -1,0 +1,13 @@
+# LaserForge Core Requirements
+# Minimum dependencies to run LaserForge CAD/CAM without camera features.
+# Install: pip install -r requirements-core.txt
+
+PyQt6>=6.5.0
+pyserial>=3.5
+numpy>=1.24.0
+Pillow>=9.5.0
+qrcode>=7.4.2
+python-barcode>=0.15.1
+ezdxf>=1.1.0
+shapely>=2.0.0
+

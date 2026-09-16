@@ -481,8 +481,19 @@ class SVGImporter:
                         style_dict[p.strip().lower()] = val.strip().lower()
             return style_dict
 
+        # Index all element IDs for <use> referencing
+        defs_dict: Dict[str, ET.Element] = {}
+        for elem in root.iter():
+            elem_id = elem.get("id")
+            if elem_id:
+                defs_dict[elem_id] = elem
+
         def process_node(node: ET.Element, current_matrix: List[float], parent_style: Dict[str, str]):
             tag = node.tag.lower()
+            # Skip defs, clipPath, mask containers from rendering directly
+            if tag in ("defs", "clippath", "mask", "lineargradient", "radialgradient", "pattern"):
+                return
+
             node_style = dict(parent_style)
             node_style.update(extract_element_style(node))
 
@@ -499,6 +510,18 @@ class SVGImporter:
                 rgb = _hex_to_rgb(target_color)
                 if rgb:
                     layer_id = _match_palette_layer(rgb, default_layer_id)
+
+            if tag == "use":
+                href = node.get("href") or node.get("{http://www.w3.org/1999/xlink}href") or node.get("xlink:href") or ""
+                ref_id = href.lstrip("#")
+                if ref_id in defs_dict:
+                    ref_elem = defs_dict[ref_id]
+                    ux = float(node.get("x", 0.0))
+                    uy = float(node.get("y", 0.0))
+                    use_trans = [1.0, 0.0, 0.0, 1.0, ux, uy]
+                    use_m = SVGImporter.multiply_matrices(node_m, use_trans)
+                    process_node(ref_elem, use_m, node_style)
+                return
 
             if tag == "path":
                 d_attr = node.get("d", "")

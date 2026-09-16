@@ -1,7 +1,6 @@
-PyQt6>=6.5.0
-pyserial>=3.5
-numpy>=1.24.0
-Pillow>=9.5.0
-opencv-python>=4.8.0
-qrcode>=7.4.2
-python-barcode>=0.15.1
+# LaserForge Full Requirements (core + camera).
+# For a lighter install without camera support, use only requirements-core.txt.
+# Install all: pip install -r requirements.txt
+
+-r requirements-core.txt
+-r requirements-camera.txt
