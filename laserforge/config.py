@@ -64,7 +64,11 @@ class MachineSettings:
     overscan_mm: float = 2.0              # Fixed overscan in mm
     overscan_accel_multiplier: float = 1.2 # Safety margin above theoretical v^2 / (2*a)
     white_space_skip_enabled: bool = True  # Rapid G0 jump across wide empty gaps
-    white_space_skip_threshold_mm: float = 8.0 # Minimum gap (mm) to trigger G0 white-space skip
+    white_space_skip_threshold_mm: float = 5.0 # Minimum gap (mm) to trigger G0 white-space skip
+    flood_fill_enabled: bool = True       # Engrave disconnected shapes / islands individually
+    flood_fill_separation_mm: float = 12.0 # Minimum gap (mm) between islands to trigger flood fill
+    continuous_inline_streaming: bool = True # Zero-stutter G1 S... / G0 streaming without intermediate M5
+    raster_fast_whitespace_speed: float = 0.0 # Rapid speed for whitespace jumps (0 = use machine rapid_speed)
     kerf_width_mm: float = 0.08           # Diode laser beam spot width / kerf compensation
     test_pulse_power_pct: float = 1.0     # Laser test fire pulse power %
     test_pulse_duration_ms: int = 100     # Laser test fire pulse duration ms

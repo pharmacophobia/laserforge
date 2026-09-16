@@ -1,0 +1,5 @@
+# LaserForge Camera / Vision Requirements
+# Additional dependencies for the overhead USB camera calibration wizard and bed overlay.
+# Install: pip install -r requirements-core.txt -r requirements-camera.txt
+
+opencv-python>=4.8.0

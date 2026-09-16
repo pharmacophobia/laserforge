@@ -29,7 +29,9 @@ class JogButton(QPushButton):
 class LaserControlPanel(QWidget):
     # Signals to parent window
     start_job_requested = pyqtSignal()
+    simulate_job_requested = pyqtSignal()
     frame_job_requested = pyqtSignal()
+    burn_perimeter_requested = pyqtSignal()
     alignment_dialog_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     park_requested = pyqtSignal()
@@ -188,6 +190,21 @@ class LaserControlPanel(QWidget):
         self.btn_s.clicked.connect(lambda: self._jog(0, -1))
         self.btn_se.clicked.connect(lambda: self._jog(1, -1))
 
+        self.btn_z_up = JogButton("Z▲")
+        self.btn_z_up.setToolTip("Jog Z-Axis Up")
+        self.btn_z_up.setStyleSheet("background-color: #2e3b4e; font-size: 10px;")
+        self.btn_z_up.clicked.connect(lambda: self._jog(0, 0, 1))
+
+        self.btn_z_probe = JogButton("⇊")
+        self.btn_z_probe.setToolTip("Autofocus Touch Probe (G38.2)")
+        self.btn_z_probe.setStyleSheet("background-color: #00695c; color: white; font-weight: bold; font-size: 11px;")
+        self.btn_z_probe.clicked.connect(self._on_probe_z_clicked)
+
+        self.btn_z_down = JogButton("Z▼")
+        self.btn_z_down.setToolTip("Jog Z-Axis Down")
+        self.btn_z_down.setStyleSheet("background-color: #2e3b4e; font-size: 10px;")
+        self.btn_z_down.clicked.connect(lambda: self._jog(0, 0, -1))
+
         pad_grid.addWidget(self.btn_nw, 0, 0)
         pad_grid.addWidget(self.btn_n,  0, 1)
         pad_grid.addWidget(self.btn_ne, 0, 2)
@@ -197,6 +214,9 @@ class LaserControlPanel(QWidget):
         pad_grid.addWidget(self.btn_sw, 2, 0)
         pad_grid.addWidget(self.btn_s,  2, 1)
         pad_grid.addWidget(self.btn_se, 2, 2)
+        pad_grid.addWidget(self.btn_z_up, 0, 3)
+        pad_grid.addWidget(self.btn_z_probe, 1, 3)
+        pad_grid.addWidget(self.btn_z_down, 2, 3)
         jog_layout.addLayout(pad_grid)
 
         # Movement Actions (Home, Unlock, Set 0, Park, Align)
@@ -233,6 +253,12 @@ class LaserControlPanel(QWidget):
         self.btn_align.setStyleSheet("font-weight: bold; background-color: #00838f; color: white; padding: 3px; font-size: 10px;")
         self.btn_align.clicked.connect(self.alignment_dialog_requested.emit)
         actions_grid.addWidget(self.btn_align, 1, 0, 1, 4)
+
+        self.btn_burn_perimeter = QPushButton("🔥 Burn Perimeter Tool...")
+        self.btn_burn_perimeter.setToolTip("Score or burn alignment perimeter on wasteboard or stock to position workpiece")
+        self.btn_burn_perimeter.setStyleSheet("font-weight: bold; background-color: #d84315; color: white; padding: 3px; font-size: 10px;")
+        self.btn_burn_perimeter.clicked.connect(self.burn_perimeter_requested.emit)
+        actions_grid.addWidget(self.btn_burn_perimeter, 2, 0, 1, 4)
         jog_layout.addLayout(actions_grid)
 
         main_layout.addWidget(jog_group)
@@ -290,6 +316,13 @@ class LaserControlPanel(QWidget):
         self.btn_frame.setStyleSheet("font-weight: bold; padding: 5px; background-color: #00796b; color: white; font-size: 11px;")
         self.btn_frame.clicked.connect(self.frame_job_requested.emit)
 
+        self.btn_simulate = QPushButton("🎬 Simulate")
+        self.btn_simulate.setToolTip("Simulate project outcomes, material finish, burn trajectory, and time breakdown (Alt+P)")
+        self.btn_simulate.setStyleSheet(
+            "background-color: #5c6bc0; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
+        )
+        self.btn_simulate.clicked.connect(self.simulate_job_requested.emit)
+
         self.btn_start = QPushButton("▶ Start")
         self.btn_start.setStyleSheet(
             "background-color: #2e7d32; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
@@ -309,6 +342,7 @@ class LaserControlPanel(QWidget):
         self.btn_stop.clicked.connect(self.serial_ctrl.stop_streaming)
 
         run_row.addWidget(self.btn_frame, 1)
+        run_row.addWidget(self.btn_simulate, 1)
         run_row.addWidget(self.btn_start, 1)
         run_row.addWidget(self.btn_pause, 1)
         run_row.addWidget(self.btn_stop, 1)
@@ -458,7 +492,10 @@ class LaserControlPanel(QWidget):
             f"background-color: {bg}; color: {fg}; font-weight: bold; border-radius: 3px; padding: 3px 6px;"
         )
 
-        self.pos_label.setText(f"X: {wpos[0]:.2f}  Y: {wpos[1]:.2f}")
+        x_val = wpos[0] if (wpos and len(wpos) > 0) else 0.0
+        y_val = wpos[1] if (wpos and len(wpos) > 1) else 0.0
+        z_val = wpos[2] if (wpos and len(wpos) > 2) else 0.0
+        self.pos_label.setText(f"X:{x_val:.1f} Y:{y_val:.1f} Z:{z_val:.1f}")
 
         # Check for active hardware limit switches in Pn:
         limit_axes = [ax for ax in ("X", "Y", "Z") if ax in pins]
@@ -480,10 +517,24 @@ class LaserControlPanel(QWidget):
     def _on_speed_changed(self, val: int):
         self.jog_speed = float(val)
 
-    def _jog(self, x_dir: int, y_dir: int):
+    def _jog(self, x_dir: int, y_dir: int, z_dir: int = 0):
         dx = x_dir * self.step_distance
         dy = y_dir * self.step_distance
-        self.serial_ctrl.jog(dx, dy, 0.0, self.jog_speed)
+        dz = z_dir * self.step_distance
+        self.serial_ctrl.jog(dx, dy, dz, self.jog_speed)
+
+    def _on_probe_z_clicked(self):
+        from PyQt6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "Run Z-Probe Autofocus",
+            "Ensure the touch plate or focus probe is connected and positioned directly beneath the laser nozzle.\n\n"
+            "The laser head will probe downward until electrical contact.\n\n"
+            "Proceed with Z-probe?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.serial_ctrl.probe_z(max_travel_mm=40.0, feed=50.0, plate_thickness_mm=0.0)
 
     def _toggle_test_laser(self):
         self.is_firing_test = self.btn_fire_laser.isChecked()

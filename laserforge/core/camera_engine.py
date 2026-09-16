@@ -42,12 +42,84 @@ class CameraCalibrationData:
     calibrated_at: str = ""
     camera_fiducials: List[Tuple[float, float]] = field(default_factory=list)
     bed_fiducials_mm: List[Tuple[float, float]] = field(default_factory=list)
+    offset_x_mm: float = 0.0
+    offset_y_mm: float = 0.0
+    fine_scale_x: float = 1.0
+    fine_scale_y: float = 1.0
+    fine_rotation_deg: float = 0.0
+    overlay_opacity: float = 0.55
+    fiducial_inset_mm: float = 40.0
 
     def is_lens_calibrated(self) -> bool:
-        return self.camera_matrix is not None and self.distortion_coeffs is not None
+        if self.camera_matrix is None or self.distortion_coeffs is None:
+            return False
+        if not (0.0 <= self.reprojection_error <= 10.0):
+            return False
+        try:
+            fx = float(self.camera_matrix[0, 0])
+            fy = float(self.camera_matrix[1, 1])
+            if not (10.0 <= fx and 10.0 <= fy):
+                return False
+            if math.isnan(fx) or math.isnan(fy) or math.isinf(fx) or math.isinf(fy):
+                return False
+            return True
+        except Exception:
+            return False
 
     def is_bed_aligned(self) -> bool:
-        return self.homography_matrix is not None
+        if self.homography_matrix is None:
+            return False
+        try:
+            if self.homography_matrix.shape != (3, 3):
+                return False
+            det = float(np.linalg.det(self.homography_matrix))
+            if det <= 1e-9 or math.isnan(det) or math.isinf(det):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def sanitize(self):
+        """Discards corrupted or unphysical calibration matrices."""
+        if self.camera_matrix is not None:
+            if not self.is_lens_calibrated():
+                self.camera_matrix = None
+                self.distortion_coeffs = None
+                self.reprojection_error = 0.0
+
+        if self.homography_matrix is not None:
+            if not self.is_bed_aligned():
+                self.homography_matrix = None
+
+    def reset(self, bed_width_mm: float = 400.0, bed_height_mm: float = 400.0):
+        """Resets all calibration and fine-tune parameters to clean defaults."""
+        self.camera_matrix = None
+        self.distortion_coeffs = None
+        self.homography_matrix = None
+        self.reprojection_error = 0.0
+        self.calibrated_at = ""
+        self.camera_fiducials = []
+        self.bed_fiducials_mm = []
+        self.bed_width_mm = bed_width_mm
+        self.bed_height_mm = bed_height_mm
+        self.offset_x_mm = 0.0
+        self.offset_y_mm = 0.0
+        self.fine_scale_x = 1.0
+        self.fine_scale_y = 1.0
+        self.fine_rotation_deg = 0.0
+        self.overlay_opacity = 0.55
+        self.fiducial_inset_mm = 40.0
+
+    @staticmethod
+    def get_default_bed_fiducials(bed_w_mm: float, bed_h_mm: float, inset_mm: float = 40.0) -> List[Tuple[float, float]]:
+        """Returns standard clockwise (TL, TR, BR, BL) fiducial bed coordinates."""
+        ins = min(inset_mm, min(bed_w_mm, bed_h_mm) * 0.45)
+        return [
+            (ins, ins),
+            (bed_w_mm - ins, ins),
+            (bed_w_mm - ins, bed_h_mm - ins),
+            (ins, bed_h_mm - ins)
+        ]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -63,7 +135,14 @@ class CameraCalibrationData:
             "reprojection_error": self.reprojection_error,
             "calibrated_at": self.calibrated_at,
             "camera_fiducials": self.camera_fiducials,
-            "bed_fiducials_mm": self.bed_fiducials_mm
+            "bed_fiducials_mm": self.bed_fiducials_mm,
+            "offset_x_mm": self.offset_x_mm,
+            "offset_y_mm": self.offset_y_mm,
+            "fine_scale_x": self.fine_scale_x,
+            "fine_scale_y": self.fine_scale_y,
+            "fine_rotation_deg": self.fine_rotation_deg,
+            "overlay_opacity": self.overlay_opacity,
+            "fiducial_inset_mm": self.fiducial_inset_mm
         }
 
     @classmethod
@@ -72,7 +151,7 @@ class CameraCalibrationData:
         d_list = d.get("distortion_coeffs")
         h_list = d.get("homography_matrix")
 
-        return cls(
+        obj = cls(
             device_index=d.get("device_index", 0),
             device_name=d.get("device_name", "USB Laser Camera"),
             resolution=tuple(d.get("resolution", (1920, 1080))),
@@ -85,8 +164,17 @@ class CameraCalibrationData:
             reprojection_error=d.get("reprojection_error", 0.0),
             calibrated_at=d.get("calibrated_at", ""),
             camera_fiducials=[tuple(p) for p in d.get("camera_fiducials", [])],
-            bed_fiducials_mm=[tuple(p) for p in d.get("bed_fiducials_mm", [])]
+            bed_fiducials_mm=[tuple(p) for p in d.get("bed_fiducials_mm", [])],
+            offset_x_mm=d.get("offset_x_mm", 0.0),
+            offset_y_mm=d.get("offset_y_mm", 0.0),
+            fine_scale_x=d.get("fine_scale_x", 1.0),
+            fine_scale_y=d.get("fine_scale_y", 1.0),
+            fine_rotation_deg=d.get("fine_rotation_deg", 0.0),
+            overlay_opacity=d.get("overlay_opacity", 0.55),
+            fiducial_inset_mm=d.get("fiducial_inset_mm", 40.0)
         )
+        obj.sanitize()
+        return obj
 
     def save_to_file(self, filepath: str = DEFAULT_CALIBRATION_FILE):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -99,7 +187,9 @@ class CameraCalibrationData:
             try:
                 with open(filepath, "r") as f:
                     data = json.load(f)
-                return cls.from_dict(data)
+                obj = cls.from_dict(data)
+                obj.sanitize()
+                return obj
             except Exception as e:
                 print(f"Error loading camera calibration: {e}")
         return cls()
@@ -113,8 +203,10 @@ class CameraEngine:
     def __init__(self, calibration: Optional[CameraCalibrationData] = None):
         self.calibration = calibration or CameraCalibrationData.load_from_file()
         self.cap: Optional[Any] = None
-        self.is_mock: bool = False
+        self.is_mock: bool = (self.calibration.device_index == -1)
         self._mock_frame_counter: int = 0
+        if self.is_mock and not self.calibration.is_bed_aligned():
+            self.compute_simulated_homography(self.calibration.bed_width_mm, self.calibration.bed_height_mm)
 
     @staticmethod
     def list_available_cameras() -> List[Dict[str, Any]]:
@@ -394,6 +486,38 @@ class CameraEngine:
         except Exception as e:
             print(f"Homography error: {e}")
             return False
+
+    def compute_simulated_homography(
+        self,
+        bed_width_mm: float = 400.0,
+        bed_height_mm: float = 400.0
+    ) -> bool:
+        """
+        Calculates perspective homography for the synthetic simulated camera view
+        mapping simulated camera fiducials directly to standard bed coordinates.
+        """
+        w, h = self.calibration.resolution
+        cx, cy = w // 2, h // 2
+        bed_w = int(w * 0.70)
+        bed_h = int(h * 0.70)
+
+        # 4 Bed corners in camera view with slight perspective tilt (matching _generate_synthetic_camera_frame)
+        p1 = (cx - bed_w // 2, cy - bed_h // 2 + 30)
+        p2 = (cx + bed_w // 2, cy - bed_h // 2 + 20)
+        p3 = (cx + bed_w // 2 - 20, cy + bed_h // 2)
+        p4 = (cx - bed_w // 2 + 20, cy + bed_h // 2)
+
+        # 4 alignment crosshairs matching _generate_synthetic_camera_frame
+        fids = [
+            (float(p1[0] + 50), float(p1[1] + 50)),
+            (float(p2[0] - 50), float(p2[1] + 50)),
+            (float(p3[0] - 50), float(p3[1] - 50)),
+            (float(p4[0] + 50), float(p4[1] - 50))
+        ]
+        bed_fids = self.calibration.get_default_bed_fiducials(
+            bed_width_mm, bed_height_mm, self.calibration.fiducial_inset_mm
+        )
+        return self.compute_bed_homography(fids, bed_fids)
 
     # -------------------------------------------------------------------------
     # Synthetic Simulator Frame Generator (Demo Mode)

@@ -313,6 +313,8 @@ class MachineSettingsDialog(QDialog):
     # Tab 3: Overscan & Raster Performance
     # -------------------------------------------------------------
     def _create_overscan_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setSpacing(12)
@@ -359,9 +361,17 @@ class MachineSettingsDialog(QDialog):
 
         ov_layout.addLayout(grid)
 
-        # White-Space Skipping Group
-        ws_group = QGroupBox("High-Speed Blank-Space G0 Skipping")
+        # White-Space Skipping & Power Streaming Group
+        ws_group = QGroupBox("Raster High-Speed Optimization & Power Streaming")
         ws_layout = QVBoxLayout(ws_group)
+
+        self.chk_continuous_streaming = QCheckBox("Enable Continuous Inline Power Streaming (Zero-Stutter)")
+        self.chk_continuous_streaming.setToolTip(
+            "Emits power inline via G1 S... and uses G0 rapid moves for blanks, eliminating\n"
+            "M5/M4 planner buffer flushes and dead stops on GRBL 1.1+."
+        )
+        ws_layout.addWidget(self.chk_continuous_streaming)
+
         self.chk_white_space_skip = QCheckBox("Enable White-Space Rapid Skipping")
         self.chk_white_space_skip.setToolTip(
             "Emits high-speed G0 rapid moves across wide gaps of empty white pixels\n"
@@ -370,37 +380,72 @@ class MachineSettingsDialog(QDialog):
         ws_layout.addWidget(self.chk_white_space_skip)
 
         ws_grid = QGridLayout()
-        ws_grid.addWidget(QLabel("Minimum Gap Skip Threshold (mm):"), 0, 0)
+        ws_grid.addWidget(QLabel("Minimum Gap Skip Threshold:"), 0, 0)
         self.white_space_skip_threshold_spin = QDoubleSpinBox()
         self.white_space_skip_threshold_spin.setRange(1.0, 100.0)
         self.white_space_skip_threshold_spin.setSingleStep(1.0)
         self.white_space_skip_threshold_spin.setSuffix(" mm")
         self.white_space_skip_threshold_spin.setToolTip("Minimum continuous blank gap required to emit a G0 rapid jump")
         ws_grid.addWidget(self.white_space_skip_threshold_spin, 0, 1)
+
+        ws_grid.addWidget(QLabel("Whitespace Rapid Speed:"), 1, 0)
+        self.fast_ws_speed_spin = QDoubleSpinBox()
+        self.fast_ws_speed_spin.setRange(0.0, 30000.0)
+        self.fast_ws_speed_spin.setSingleStep(500.0)
+        self.fast_ws_speed_spin.setSuffix(" mm/min")
+        self.fast_ws_speed_spin.setSpecialValueText("Auto (Machine Rapid G0)")
+        self.fast_ws_speed_spin.setToolTip("Speed for whitespace rapid traversal. Set to 0 to use machine G0 rapid speed.")
+        ws_grid.addWidget(self.fast_ws_speed_spin, 1, 1)
+
         ws_layout.addLayout(ws_grid)
+
+        # Flood Fill Island Partitioning Group
+        ff_group = QGroupBox("⚡ Flood Fill Island Engraving (Multi-Object Turbo)")
+        ff_layout = QVBoxLayout(ff_group)
+
+        self.chk_flood_fill = QCheckBox("Enable Flood Fill Island Partitioning")
+        self.chk_flood_fill.setToolTip(
+            "Detects disconnected burning shapes or text clusters and engraves each island\n"
+            "locally before moving to the next. Eliminates sweeping across empty bed space!"
+        )
+        ff_layout.addWidget(self.chk_flood_fill)
+
+        ff_grid = QGridLayout()
+        ff_grid.addWidget(QLabel("Island Separation Threshold:"), 0, 0)
+        self.flood_fill_sep_spin = QDoubleSpinBox()
+        self.flood_fill_sep_spin.setRange(1.0, 100.0)
+        self.flood_fill_sep_spin.setSingleStep(1.0)
+        self.flood_fill_sep_spin.setSuffix(" mm")
+        self.flood_fill_sep_spin.setToolTip("Minimum distance in millimeters between distinct shapes before splitting into separate islands.")
+        ff_grid.addWidget(self.flood_fill_sep_spin, 0, 1)
+        ff_layout.addLayout(ff_grid)
 
         # Informational Note
         info_frame = QFrame()
         info_frame.setFrameShape(QFrame.Shape.StyledPanel)
         info_frame.setStyleSheet("background-color: #263238; border-radius: 4px; padding: 6px;")
         info_l = QVBoxLayout(info_frame)
-        info_title = QLabel("ℹ️ Why use Overscan and Blank-Space Skipping?")
+        info_title = QLabel("ℹ️ Why use Raster Turbo & Flood Fill?")
         info_title.setStyleSheet("font-weight: bold; color: #80d8ff;")
         info_desc = QLabel(
-            "• Overscan eliminates dark burned borders by ensuring the laser carriage reaches constant\n"
-            "  cutting speed before firing and decelerates with the beam off.\n"
-            "• Blank-Space skipping leaps across empty bed spaces at rapid G0 speeds (10,000-15,000 mm/min)\n"
-            "  rather than scanning at slow burn feed rates, dramatically speeding up multi-object jobs."
+            "• Continuous Inline Streaming keeps the controller planner buffer full, avoiding the stutter\n"
+            "  and burning pauses caused by legacy M5/M4 stop commands.\n"
+            "• Blank-Space skipping leaps across empty bed spaces at rapid G0 speeds rather than slow burn rates.\n"
+            "• Flood Fill island engraving groups disconnected shapes/logos and engraves each locally with minimal\n"
+            "  X stroke length, saving up to 80% engraving time on dispersed layouts."
         )
         info_desc.setStyleSheet("color: #b0bec5; font-size: 11px;")
         info_l.addWidget(info_title)
         info_l.addWidget(info_desc)
-        ov_layout.addWidget(info_frame)
+        ws_layout.addWidget(info_frame)
 
         layout.addWidget(ov_group)
         layout.addWidget(ws_group)
+        layout.addWidget(ff_group)
         layout.addStretch(1)
-        return widget
+
+        scroll.setWidget(widget)
+        return scroll
 
     # -------------------------------------------------------------
     # Tab 4: Motion & Kinematics Calibration
@@ -790,7 +835,7 @@ class MachineSettingsDialog(QDialog):
         self.pulse_dur_spin.setValue(getattr(self.settings, "test_pulse_duration_ms", 100))
         self.pulse_pow_spin.setValue(getattr(self.settings, "test_pulse_power_pct", 1.0))
 
-        # Overscan & White-Space Skipping
+        # Overscan & White-Space Skipping & Raster Turbo
         self.chk_overscan.setChecked(getattr(self.settings, "overscan_enabled", False))
         self.overscan_mode_combo.setCurrentText(getattr(self.settings, "overscan_mode", "Acceleration"))
         self.overscan_mult_spin.setValue(getattr(self.settings, "overscan_accel_multiplier", 1.2))
@@ -798,6 +843,10 @@ class MachineSettingsDialog(QDialog):
         self.overscan_mm_spin.setValue(getattr(self.settings, "overscan_mm", 2.0))
         self.chk_white_space_skip.setChecked(getattr(self.settings, "white_space_skip_enabled", True))
         self.white_space_skip_threshold_spin.setValue(getattr(self.settings, "white_space_skip_threshold_mm", 8.0))
+        self.chk_continuous_streaming.setChecked(getattr(self.settings, "continuous_inline_streaming", True))
+        self.fast_ws_speed_spin.setValue(getattr(self.settings, "raster_fast_whitespace_speed", 0.0))
+        self.chk_flood_fill.setChecked(getattr(self.settings, "flood_fill_enabled", True))
+        self.flood_fill_sep_spin.setValue(getattr(self.settings, "flood_fill_separation_mm", 12.0))
 
         # Kinematics
         self.rapid_spin.setValue(getattr(self.settings, "rapid_speed", 3000.0))
@@ -864,7 +913,7 @@ class MachineSettingsDialog(QDialog):
         self.settings.test_pulse_duration_ms = self.pulse_dur_spin.value()
         self.settings.test_pulse_power_pct = self.pulse_pow_spin.value()
 
-        # Overscan & White-Space Skipping
+        # Overscan & White-Space Skipping & Raster Turbo
         self.settings.overscan_enabled = self.chk_overscan.isChecked()
         self.settings.overscan_mode = self.overscan_mode_combo.currentText()
         self.settings.overscan_accel_multiplier = self.overscan_mult_spin.value()
@@ -872,6 +921,10 @@ class MachineSettingsDialog(QDialog):
         self.settings.overscan_mm = self.overscan_mm_spin.value()
         self.settings.white_space_skip_enabled = self.chk_white_space_skip.isChecked()
         self.settings.white_space_skip_threshold_mm = self.white_space_skip_threshold_spin.value()
+        self.settings.continuous_inline_streaming = self.chk_continuous_streaming.isChecked()
+        self.settings.raster_fast_whitespace_speed = self.fast_ws_speed_spin.value()
+        self.settings.flood_fill_enabled = self.chk_flood_fill.isChecked()
+        self.settings.flood_fill_separation_mm = self.flood_fill_sep_spin.value()
 
         # Kinematics
         self.settings.rapid_speed = self.rapid_spin.value()

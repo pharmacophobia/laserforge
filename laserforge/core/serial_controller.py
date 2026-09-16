@@ -371,8 +371,41 @@ class SerialController(QObject):
             self.send_command(f"G10 L20 P1 {' '.join(cmd_parts)}")
 
     def go_to_zero(self, rapid_speed: float = 3000.0):
-        """Moves laser head to work origin (0, 0)."""
+        """Moves laser head to work origin (0, 0). Protected against mid-job motor injection."""
+        if self.is_streaming:
+            self.log_received.emit("err", "Cannot go to zero while a job is currently streaming.")
+            return
         self.send_command(f"G0 X0 Y0 F{rapid_speed:.0f}")
+
+    def go_to_pos(self, x: float, y: float, rapid_speed: float = 3000.0):
+        """Moves laser head to specified work coordinates (G90 G0 X... Y...). Protected against mid-job motor injection."""
+        if self.is_streaming:
+            self.log_received.emit("err", "Cannot go to position while a job is currently streaming.")
+            return
+        self.send_command(f"G90 G0 X{x:.3f} Y{y:.3f} F{rapid_speed:.0f}")
+
+    def probe_z(self, max_travel_mm: float = 40.0, feed: float = 50.0, plate_thickness_mm: float = 0.0):
+        """
+        Executes a straight Z-probe autofocus cycle (GRBL G38.2).
+        Moves downward until touch-plate contact, zeroes Z, and retracts safely.
+        """
+        if self.is_streaming:
+            self.log_received.emit("err", "Cannot run Z-probe while a job is streaming.")
+            return
+        if not self.is_connected:
+            self.log_received.emit("err", "Cannot probe: Laser is not connected.")
+            return
+
+        self.log_received.emit("info", f"Starting Z-probe cycle (max {max_travel_mm}mm @ {feed}mm/min)...")
+        # 1. Switch to relative coordinates and probe downwards
+        self.send_command(f"G91 G38.2 Z-{abs(max_travel_mm):.2f} F{feed:.0f}")
+        # 2. Set Z coordinate accounting for touch plate thickness
+        self.send_command(f"G10 L20 P1 Z{plate_thickness_mm:.3f}")
+        # 3. Retract 3mm safely above contact point
+        self.send_command("G91 G0 Z3.0 F500")
+        # 4. Return to absolute positioning mode
+        self.send_command("G90")
+        self.log_received.emit("info", "Z-probe cycle completed. Focal surface calibrated.")
 
     def toggle_test_laser(self, on: bool, power_s: int = 5):
         """Toggles low-power framing laser beam for focusing / alignment."""
