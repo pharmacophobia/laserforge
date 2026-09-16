@@ -24,6 +24,12 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - **Physics-Based Overscan ($d = \frac{v^2}{2a}$)**: Dynamically calculates required acceleration lead-in and lead-out travel based on cut feedrate and machine $X$-axis acceleration, eliminating edge turnaround burns and deceleration scorch marks.
   - **Whitespace Rapid Skipping**: Automatically detects blank-space gaps ($\ge 8$ mm default) between shapes along scanlines and executes high-speed $G0$ non-burning rapids instead of slow $G1$ traversals, slashing sparse multi-part raster times.
   - Automatic clamping to machine bed boundaries $[0, \text{bed\_width}]$ to prevent soft/hard limit alarm trips.
+- **Two-Point Corner Alignment & Precision Motor Controller Studio**:
+  - **Left & Right Corner Alignment ("Print & Cut")**: Captures or sets physical Left Corner ($P_1$) and Right Corner ($P_2$) of crooked or angled stock. Computes exact rotation angle $\theta$, physical distance, delta, and optional proportional auto-scaling.
+  - **Precision Motor Controller**: Built-in 8-direction jog pad with multi-rate step increments (0.01 mm ultra-fine, 0.05, 0.1, 0.5, 1, 5, 10, 50 mm, or custom step distance), adjustable feedrate, and keyboard arrow key navigation (Shift = 5x coarse, Ctrl = 0.1x micro-step).
+  - **Automated Spot Dispatch**: Direct one-click motor positioning to drive the laser head directly to Left Corner, Right Corner, Midpoint, or design corners, plus direct numerical `(X, Y)` dispatch.
+  - **Interactive Real-Time Visual Diagram**: Live graphical canvas showing machine bed, design envelope, Left/Right target markers, measured dimension vector, aligned preview envelope, and live laser head crosshair reticle.
+  - **Physical Edge Tracing & Work Zero**: Traces along the physical workpiece edge with low-power visible guide beam (`M3 G1 S5`) and sets machine work coordinate zero ($G10 L20 P1$) at Left Corner with full multi-level Undo (`Ctrl+Z`).
 - **Overhead USB Camera Vision & Bed Alignment Overlay**:
   - **4-Step Calibration Wizard** (`Ctrl+Shift+K`): OpenCV checkerboard lens undistortion ($K, D$) and 4-point laser-burned fiducial homography ($H$).
   - **Live Rectified Bed Overlay** (`Ctrl+Shift+B`): Projects an orthophoto background image of the physical workbed directly onto the 2D CAD canvas at $1:1$ millimeter scale for rapid visual stock alignment.
@@ -41,6 +47,22 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - Atkinson dithering for high-contrast, clean-dot halftone aesthetics.
   - Grayscale 8-bit dynamic laser power modulation (GRBL `$32=1` `M4` spindle speed mode).
   - Contrast, brightness, invert, and threshold controls.
+- **CAD Exchange & Industry Vector Formats**:
+  - **AutoCAD DXF Import & Export (`.dxf`)**: High-fidelity bidirectional exchange using `ezdxf` (supporting AutoCAD R12 and R2000+ versions, Polylines, Lines, Circles, Arcs, LWPolylines, and Splines with layer and color preservation).
+  - **Full Canvas SVG Export (`.svg`)**: Exports the entire active project canvas to standard scalable vector graphics with millimeter precision, per-layer grouping, styling, and transform hierarchies.
+  - **Advanced SVG `<defs>` and `<use>` Support**: Full parsing and dereferencing of re-usable symbols, definitions, and linked shapes during vector import.
+- **Directional Vector Hatching Studio**:
+  - Converts any closed vector polygon, text outline, or compound shape into dense, laser-optimized vector hatch toolpaths.
+  - Configurable hatch angle ($0^\circ$ to $360^\circ$), line spacing/interval (down to $0.05$ mm), boundary offset margin, and optional cross-hatching ($90^\circ$ dual pass).
+  - Preserves underlying shape geometry while generating dedicated fill toolpaths on selectable laser layers.
+- **Contour Offset Image Cutout Generator**:
+  - Automated silhouette and alpha boundary extraction for imported bitmap artwork and laser engravings.
+  - Generates smooth outer cutting perimeters with dial-in millimeter offset margin (e.g. $+2.5$ mm badge boundary) and curve smoothing.
+  - Supports hole inclusion/suppression and continuous closed toolpath generation for sticker and wooden cutout manufacturing.
+- **Production Job Cost & Time Estimator**:
+  - Physics-based job duration estimation modeling cut lengths, rapid travels, and machine acceleration limits.
+  - Detailed financial breakdown calculating laser tube/diode wear ($\$/\text{hr}$), electricity power consumption ($\text{kW}\cdot\text{h}$ rates), and sheet stock material costs.
+  - Instant production quoting and profitability analysis before firing the laser.
 - **CAM Toolpath Optimization**:
   - **Inner-First Nesting Sort**: Automatically cuts interior holes, dropouts, and slots before exterior perimeters to prevent loose material shifting.
   - **Traveling Salesperson (TSP) Optimizer**: Minimizes non-cutting rapid travel movements using nearest-neighbor Euclidean distance.
@@ -120,7 +142,12 @@ python3 -m laserforge.main
 | **Open Project** | `Ctrl + O` |
 | **Save Project** | `Ctrl + S` |
 | **Import SVG Vector** | `Ctrl + I` |
+| **Import AutoCAD DXF** | `Ctrl + Alt + D` |
 | **Export G-Code** | `Ctrl + E` |
+| **Export Canvas to SVG** | `Ctrl + Shift + S` |
+| **Auto Cutout to SVG** | `Ctrl + Shift + C` |
+| **Directional Hatching** | `Ctrl + Shift + H` |
+| **Job Cost & Time Estimator** | `Ctrl + Shift + M` |
 | **Select Tool** | `S` |
 | **Rectangle Tool** | `R` |
 | **Circle Tool** | `C` |
@@ -151,16 +178,20 @@ python3 -m laserforge.main
 cd /home/k/LaserForge
 python3 -m unittest discover tests
 ```
-All automated test suites (87 unit tests) verify:
+All automated test suites (128 unit tests) verify:
 - Geometric entity definitions and boundary math
 - Multi-layer parameter configuration
 - Floyd-Steinberg and Atkinson dithering
 - G-code generation with Dynamic Laser Power (M4)
 - Framing bounding box generation
 - Project serialization (`.laserproj`) and SVG vector import
+- AutoCAD DXF import/export fidelity (`ezdxf` R12/R2000) and full-canvas SVG export
+- Directional vector hatching and boundary offset algorithms
+- Bitmap contour cutout generation with dilation margins
+- Job duration, machine acceleration limits, and financial costing calculations
 - Inner-first contour nesting and TSP rapid travel optimization
 - Constructive Solid Geometry (CSG) vector booleans (Weld, Subtract, Intersect) and Undo/Redo stacks
 - High-speed raster acceleration overscan calculations and whitespace rapid skipping
 - OpenCV camera lens calibration, perspective homography rectification, and canvas orthophoto overlays
 - GRBL G-code program pre-flight safety and limits validation
-- GPU / CPU accelerated raster calculations
+- GPU / CPU accelerated raster calculations and SDXL Turbo procedural fallbacks
