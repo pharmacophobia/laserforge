@@ -13,22 +13,24 @@ class LayerManager:
         self.init_default_layers()
 
     def init_default_layers(self):
-        """Initializes standard LightBurn color layers with default parameters."""
+        """Initializes standard LightBurn color layers with default parameters.
+
+        All layers start with conservative safe defaults (1000 mm/min / 30% power).
+        Use the Material Library to apply calibrated presets for specific materials.
+        """
         for p in LAYER_PALETTE:
             lid = p["id"]
             is_tool = p.get("is_tool", False)
             mode = "Line" if not is_tool else "Tool"
-            speed = 1000.0 if lid % 2 == 0 else 2500.0
-            power = 80.0 if lid % 2 == 0 else 40.0
 
             self.layers[lid] = LayerCutSettings(
                 layer_id=lid,
                 name=p["name"],
                 color=p["color"],
                 mode=mode,
-                speed=speed,
-                power_max=power,
-                power_min=max(10.0, power * 0.3),
+                speed=1000.0,
+                power_max=30.0,
+                power_min=10.0,
                 passes=1,
                 line_interval=0.1,
                 fill_angle=0.0,

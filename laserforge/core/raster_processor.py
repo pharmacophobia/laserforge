@@ -768,6 +768,102 @@ class RasterProcessor:
         return clusters
 
     @staticmethod
+    def extract_raster_islands(
+        raster_arr: np.ndarray,
+        origin_x_mm: float,
+        origin_y_mm: float,
+        line_interval_mm: float,
+        min_separation_mm: float = 12.0
+    ) -> List[Dict[str, Any]]:
+        """
+        Segments a raster image into discrete spatial burning islands for Flood Fill engraving.
+        If non-burning gaps between objects exceed min_separation_mm, the image is partitioned
+        into individual sub-images, avoiding wasted laser head sweeps across empty air.
+
+        Returns a list of dicts:
+          - 'sub_array': trimmed np.ndarray of burn values
+          - 'origin_x_mm': world X coordinate of top-left corner
+          - 'origin_y_mm': world Y coordinate of top-left corner
+          - 'width_mm': physical width in mm
+          - 'height_mm': physical height in mm
+        """
+        h, w = raster_arr.shape
+        burn_mask = (raster_arr > 0).astype(np.uint8)
+        if not np.any(burn_mask):
+            return []
+
+        # If OpenCV is unavailable or image is too small to partition, return single full image
+        sep_px = int(round(max(2.0, min_separation_mm) / max(0.01, line_interval_mm)))
+        if not HAS_CV2 or sep_px <= 2 or w < sep_px:
+            return [{
+                "sub_array": raster_arr,
+                "origin_x_mm": origin_x_mm,
+                "origin_y_mm": origin_y_mm,
+                "width_mm": w * line_interval_mm,
+                "height_mm": h * line_interval_mm,
+            }]
+
+        try:
+            # Dilate burn mask to merge nearby details into continuous islands
+            kw = max(3, sep_px)
+            kh = max(3, sep_px // 2)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh))
+            dilated = cv2.dilate(burn_mask, kernel)
+
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
+            islands = []
+            for lbl in range(1, num_labels):
+                lx, ly, lw, lh, area = stats[lbl]
+                if area < 4:
+                    continue
+
+                # Extract only pixels belonging to this component
+                comp_mask = (labels[ly:ly+lh, lx:lx+lw] == lbl)
+                sub = np.where(comp_mask, raster_arr[ly:ly+lh, lx:lx+lw], 0)
+
+                # Tight trim to exact non-zero boundaries
+                rows = np.any(sub > 0, axis=1)
+                cols = np.any(sub > 0, axis=0)
+                if not np.any(rows) or not np.any(cols):
+                    continue
+
+                r_min, r_max = np.where(rows)[0][[0, -1]]
+                c_min, c_max = np.where(cols)[0][[0, -1]]
+
+                trimmed = sub[r_min:r_max+1, c_min:c_max+1]
+                island_x = origin_x_mm + (lx + c_min) * line_interval_mm
+                island_y = origin_y_mm + (ly + r_min) * line_interval_mm
+
+                islands.append({
+                    "sub_array": trimmed,
+                    "origin_x_mm": island_x,
+                    "origin_y_mm": island_y,
+                    "width_mm": trimmed.shape[1] * line_interval_mm,
+                    "height_mm": trimmed.shape[0] * line_interval_mm,
+                })
+
+            if not islands:
+                return [{
+                    "sub_array": raster_arr,
+                    "origin_x_mm": origin_x_mm,
+                    "origin_y_mm": origin_y_mm,
+                    "width_mm": w * line_interval_mm,
+                    "height_mm": h * line_interval_mm,
+                }]
+
+            return islands
+
+        except Exception:
+            # Safe fallback to unpartitioned image
+            return [{
+                "sub_array": raster_arr,
+                "origin_x_mm": origin_x_mm,
+                "origin_y_mm": origin_y_mm,
+                "width_mm": w * line_interval_mm,
+                "height_mm": h * line_interval_mm,
+            }]
+
+    @staticmethod
     def dither_floyd_steinberg(img: Image.Image) -> Image.Image:
         """Converts PIL image to 1-bit Floyd-Steinberg dithered image."""
         gray = img.convert("L")

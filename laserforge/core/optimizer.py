@@ -77,17 +77,20 @@ class PathOptimizer:
                 "depth": 0
             })
 
+        # Sort by area ascending so each item is only ever checked against
+        # shapes with >= area (items that could enclose it). This halves the
+        # number of comparisons versus the naive O(n²) double-loop.
+        items.sort(key=lambda i: i["area"])
+
         # Calculate nesting depth (inner contours have higher depth)
-        for item_a in items:
+        for idx_a, item_a in enumerate(items):
             if not item_a["closed"]:
                 continue
             ax1, ay1, ax2, ay2 = item_a["bounds"]
             a_area = item_a["area"]
-            for item_b in items:
+            # Only check against items with >= area (they could be enclosing containers)
+            for item_b in items[idx_a + 1:]:
                 if item_a is item_b or not item_b["closed"]:
-                    continue
-                # Enclosing box must have greater or equal area
-                if item_b["area"] < a_area:
                     continue
                 bx1, by1, bx2, by2 = item_b["bounds"]
                 if ax1 >= bx1 - 0.001 and ay1 >= by1 - 0.001 and ax2 <= bx2 + 0.001 and ay2 <= by2 + 0.001:

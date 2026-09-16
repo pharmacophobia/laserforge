@@ -6,6 +6,7 @@ and calculates outward/inward outline contour offsets (LightBurn-style Offset To
 
 from typing import List, Tuple, Optional
 import math
+import os
 from PyQt6.QtGui import (
     QPainterPath, QPainterPathStroker, QFont, QFontMetricsF
 )
@@ -238,6 +239,30 @@ class ShapeGenerator:
             baseline_y = entity.y + (entity.height + fm.ascent() - fm.descent()) / 2.0
             base_path.addText(entity.x, baseline_y, font, entity.text)
         elif isinstance(entity, ImageEntity):
+            # If image file is accessible, generate contour cutout
+            if entity.image_path and os.path.exists(entity.image_path):
+                try:
+                    from PIL import Image as PILImage
+                    from laserforge.core.image_cutout import AutoCutoutGenerator
+                    with PILImage.open(entity.image_path) as pil_img:
+                        cutout_res = AutoCutoutGenerator.generate_cutout(
+                            pil_img,
+                            target_width_mm=entity.width,
+                            target_height_mm=entity.height,
+                            offset_mm=offset_dist_mm,
+                            keep_interior_holes=False
+                        )
+                        if cutout_res and cutout_res.contours:
+                            return PathEntity(
+                                layer_id=target_layer_id,
+                                name=f"Cutout_{entity.name}",
+                                x=entity.x,
+                                y=entity.y,
+                                contours=cutout_res.contours,
+                                closed=True
+                            )
+                except Exception:
+                    pass
             base_path.addRect(QRectF(entity.x, entity.y, entity.width, entity.height))
         else:
             return None

@@ -4,6 +4,7 @@ Defines vector shapes, layers, cut settings, and geometric primitives.
 """
 
 from dataclasses import dataclass, field
+import math
 import uuid
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -104,8 +105,6 @@ class LineEntity(LaserEntity):
         max_y = max(self.y, self.y2)
         return (min_x, min_y, max_x, max_y)
 
-
-import math
 
 @dataclass
 class PathEntity(LaserEntity):

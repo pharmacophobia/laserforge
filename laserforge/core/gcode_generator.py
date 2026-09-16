@@ -184,6 +184,24 @@ class GCodeGenerator:
                     intersections.append(inter_x)
 
             intersections.sort()
+
+            # Fix #2: Deduplicate intersections within epsilon to handle vertices
+            # exactly on the scanline (tangent points, horizontal edge endpoints)
+            # which can produce spurious duplicate intersection values.
+            if len(intersections) > 1:
+                deduped = [intersections[0]]
+                for ix in intersections[1:]:
+                    if abs(ix - deduped[-1]) > 1e-6:
+                        deduped.append(ix)
+                intersections = deduped
+
+            # Odd count after dedup means a degenerate polygon (e.g. scanline
+            # passes through a cusp). Skip this scanline to avoid mismatched pairs.
+            if len(intersections) % 2 != 0:
+                cur_y += interval_mm
+                row += 1
+                continue
+
             reverse = (row % 2 == 1)
             segments = []
             for j in range(0, len(intersections) - 1, 2):
@@ -216,6 +234,7 @@ class GCodeGenerator:
 
         cur_x, cur_y = 0.0, 0.0
         job_start_x, job_start_y = 0.0, 0.0
+        job_start_captured = False  # Fix #1: track whether we've recorded the real first cut position
 
         # Calculate bounding box
         all_x, all_y = [], []
@@ -314,14 +333,43 @@ class GCodeGenerator:
                             halftone_angle_deg=getattr(img_ent, "halftone_angle_deg", 45.0)
                         )
 
-                        scanlines = RasterProcessor.generate_raster_scanlines(
-                            raster_arr,
-                            origin_x_mm=eff_origin_x,
-                            origin_y_mm=eff_origin_y,
-                            line_interval_mm=layer.line_interval
-                        )
+                        flood_fill_en = getattr(self.settings, "flood_fill_enabled", True)
+                        flood_fill_sep = getattr(self.settings, "flood_fill_separation_mm", 12.0)
 
-                        rapid_speed = self.settings.rapid_speed
+                        if flood_fill_en:
+                            islands = RasterProcessor.extract_raster_islands(
+                                raster_arr,
+                                origin_x_mm=eff_origin_x,
+                                origin_y_mm=eff_origin_y,
+                                line_interval_mm=layer.line_interval,
+                                min_separation_mm=flood_fill_sep
+                            )
+                            # Greedy nearest-neighbor ordering of islands
+                            ordered_islands = []
+                            unvisited = list(islands)
+                            curr_pos = (cur_x, cur_y)
+                            while unvisited:
+                                best_idx = min(
+                                    range(len(unvisited)),
+                                    key=lambda i: math.hypot(
+                                        unvisited[i]["origin_x_mm"] - curr_pos[0],
+                                        unvisited[i]["origin_y_mm"] - curr_pos[1]
+                                    )
+                                )
+                                isl = unvisited.pop(best_idx)
+                                ordered_islands.append(isl)
+                                curr_pos = (isl["origin_x_mm"] + isl["width_mm"], isl["origin_y_mm"] + isl["height_mm"])
+                        else:
+                            ordered_islands = [{
+                                "sub_array": raster_arr,
+                                "origin_x_mm": eff_origin_x,
+                                "origin_y_mm": eff_origin_y,
+                                "width_mm": img_ent.width,
+                                "height_mm": img_ent.height
+                            }]
+
+                        custom_ws_speed = getattr(self.settings, "raster_fast_whitespace_speed", 0.0)
+                        rapid_speed = custom_ws_speed if custom_ws_speed > 100.0 else self.settings.rapid_speed
                         rapid_inv = 60.0 / rapid_speed
                         feed_inv = 60.0 / feed
                         p_scale = (layer.power_max / 100.0) * max_s
@@ -334,157 +382,179 @@ class GCodeGenerator:
                         bed_w = getattr(self.settings, "bed_width", 400.0)
 
                         ws_skip_en = getattr(self.settings, "white_space_skip_enabled", True)
-                        ws_threshold = getattr(self.settings, "white_space_skip_threshold_mm", 8.0)
+                        ws_threshold = getattr(self.settings, "white_space_skip_threshold_mm", 5.0)
 
                         fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
                         fire_cmd = f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell" if fire_dwell > 0.0 else ""
                         off_dwell = getattr(self.settings, "laser_off_delay_ms", 0.0)
                         off_cmd = f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell" if off_dwell > 0.0 else ""
 
-                        for line in scanlines:
-                            y_val = line["y_mm"]
-                            reverse = line["reverse"]
-                            raw_line_segs = line["segments"]
-                            if not raw_line_segs:
+                        is_m106 = (laser_cmd == "M106")
+                        inline_s = getattr(self.settings, "use_inline_power", True) and not is_m106
+                        continuous_streaming = getattr(self.settings, "continuous_inline_streaming", True) and inline_s
+
+                        for island_idx, island in enumerate(ordered_islands):
+                            scanlines = RasterProcessor.generate_raster_scanlines(
+                                island["sub_array"],
+                                origin_x_mm=island["origin_x_mm"],
+                                origin_y_mm=island["origin_y_mm"],
+                                line_interval_mm=layer.line_interval
+                            )
+                            if not scanlines:
                                 continue
 
-                            all_y.append(y_val)
+                            if inline_s:
+                                gcode_lines.append(f"{laser_cmd} ; Dynamic laser mode ON")
 
-                            # Cluster segments on this scanline for white-space G0 skipping
-                            if ws_skip_en:
-                                clusters = RasterProcessor.cluster_scanline_segments(raw_line_segs, skip_threshold_mm=ws_threshold)
-                            else:
-                                clusters = [raw_line_segs]
-
-                            for cluster in clusters:
-                                if not cluster:
+                            for line in scanlines:
+                                y_val = line["y_mm"]
+                                reverse = line["reverse"]
+                                raw_line_segs = line["segments"]
+                                if not raw_line_segs:
                                     continue
 
-                                c_start_x = cluster[0][0]
-                                c_end_x = cluster[-1][1]
-                                cluster_width = abs(c_end_x - c_start_x)
+                                all_y.append(y_val)
 
-                                # Calculate physics-based overscan distance
-                                ov_dist = 0.0
-                                if overscan_en and cluster_width > 0.05:
-                                    ov_dist = RasterProcessor.calculate_overscan_distance(
-                                        feed_mm_per_min=feed,
-                                        accel_mm_per_sec2=accel_x,
-                                        mode=overscan_mode,
-                                        pct=ov_pct,
-                                        fixed_mm=ov_fixed,
-                                        cluster_width_mm=cluster_width,
-                                        multiplier=ov_mult
-                                    )
+                                # Cluster segments on this scanline for white-space G0 skipping
+                                if ws_skip_en:
+                                    clusters = RasterProcessor.cluster_scanline_segments(raw_line_segs, skip_threshold_mm=ws_threshold)
+                                else:
+                                    clusters = [raw_line_segs]
 
-                                dir_sign = 1.0 if c_end_x >= c_start_x else -1.0
-                                lead_in_x = c_start_x - (dir_sign * ov_dist)
-                                lead_out_x = c_end_x + (dir_sign * ov_dist)
+                                for cluster in clusters:
+                                    if not cluster:
+                                        continue
 
-                                # Bed boundaries clamping
-                                lead_in_x = max(0.0, min(bed_w, lead_in_x))
-                                lead_out_x = max(0.0, min(bed_w, lead_out_x))
+                                    c_start_x = cluster[0][0]
+                                    c_end_x = cluster[-1][1]
+                                    cluster_width = abs(c_end_x - c_start_x)
 
-                                # 1. Rapid directly to lead-in point
-                                rap_dist = math.hypot(lead_in_x - cur_x, y_val - cur_y)
-                                total_rapid_dist += rap_dist
-                                total_time_sec += rap_dist * rapid_inv
-                                if rap_dist > 0.01:
-                                    gcode_lines.append(f"G0 X{lead_in_x:.3f} Y{y_val:.3f} F{rapid_speed:.0f}")
-                                    segments.append(ToolpathSegment("rapid", cur_x, cur_y, lead_in_x, y_val, rapid_speed, 0, lid, layer.color))
-                                    cur_x, cur_y = lead_in_x, y_val
+                                    # Calculate physics-based overscan distance
+                                    ov_dist = 0.0
+                                    if overscan_en and cluster_width > 0.05:
+                                        ov_dist = RasterProcessor.calculate_overscan_distance(
+                                            feed_mm_per_min=feed,
+                                            accel_mm_per_sec2=accel_x,
+                                            mode=overscan_mode,
+                                            pct=ov_pct,
+                                            fixed_mm=ov_fixed,
+                                            cluster_width_mm=cluster_width,
+                                            multiplier=ov_mult
+                                        )
 
-                                is_m106 = (laser_cmd == "M106")
-                                inline_s = getattr(self.settings, "use_inline_power", True) and not is_m106
+                                    dir_sign = 1.0 if c_end_x >= c_start_x else -1.0
+                                    lead_in_x = c_start_x - (dir_sign * ov_dist)
+                                    lead_out_x = c_end_x + (dir_sign * ov_dist)
 
-                                # If using GRBL/CNC dynamic inline power, activate laser mode before scan moves
-                                if inline_s:
-                                    gcode_lines.append(f"{laser_cmd} ; Dynamic laser mode ON")
+                                    # Bed boundaries clamping
+                                    lead_in_x = max(0.0, min(bed_w, lead_in_x))
+                                    lead_out_x = max(0.0, min(bed_w, lead_out_x))
 
-                                # 2. Lead-in acceleration with laser OFF
-                                if abs(c_start_x - lead_in_x) > 0.01:
-                                    lead_in_dist = abs(c_start_x - lead_in_x)
-                                    total_cut_dist += lead_in_dist
-                                    total_time_sec += lead_in_dist * feed_inv
-                                    if inline_s:
-                                        gcode_lines.append(f"G1 X{c_start_x:.3f} Y{y_val:.3f} S0 F{feed:.0f}")
-                                    elif is_m106:
-                                        gcode_lines.append("M106 S0")
-                                        gcode_lines.append(f"G1 X{c_start_x:.3f} Y{y_val:.3f} F{feed:.0f}")
-                                    else:
-                                        gcode_lines.append(f"G1 X{c_start_x:.3f} Y{y_val:.3f} F{feed:.0f}")
-                                    segments.append(ToolpathSegment("lead_in", lead_in_x, y_val, c_start_x, y_val, feed, 0, lid, layer.color))
-                                    cur_x = c_start_x
+                                    # 1. Rapid directly to lead-in point
+                                    rap_dist = math.hypot(lead_in_x - cur_x, y_val - cur_y)
+                                    total_rapid_dist += rap_dist
+                                    total_time_sec += rap_dist * rapid_inv
+                                    if rap_dist > 0.01:
+                                        gcode_lines.append(f"G0 X{lead_in_x:.3f} Y{y_val:.3f} F{rapid_speed:.0f}")
+                                        segments.append(ToolpathSegment("rapid", cur_x, cur_y, lead_in_x, y_val, rapid_speed, 0, lid, layer.color))
+                                        cur_x, cur_y = lead_in_x, y_val
+                                    # Fix #1: capture true job start on first cutting move
+                                    if not job_start_captured:
+                                        job_start_x, job_start_y = cur_x, cur_y
+                                        job_start_captured = True
 
-                                # 3. Burn segments within this cluster
-                                prev_x = c_start_x
-                                for seg_idx, (seg_x1, seg_x2, p_ratio, _) in enumerate(cluster):
-                                    all_x.append(seg_x1)
-                                    all_x.append(seg_x2)
+                                    # If not in continuous streaming, toggle laser mode per cluster
+                                    if inline_s and not continuous_streaming:
+                                        gcode_lines.append(f"{laser_cmd} ; Dynamic laser mode ON")
 
-                                    # Traverse short gap between segments at constant cutting speed with laser OFF (S0)
-                                    inter_gap = abs(seg_x1 - prev_x)
-                                    if inter_gap > 0.01:
-                                        total_cut_dist += inter_gap
-                                        total_time_sec += inter_gap * feed_inv
+                                    # 2. Lead-in acceleration with laser OFF
+                                    if abs(c_start_x - lead_in_x) > 0.01:
+                                        lead_in_dist = abs(c_start_x - lead_in_x)
+                                        total_cut_dist += lead_in_dist
+                                        total_time_sec += lead_in_dist * feed_inv
                                         if inline_s:
-                                            gcode_lines.append(f"G1 X{seg_x1:.3f} S0")
+                                            gcode_lines.append(f"G1 X{c_start_x:.3f} Y{y_val:.3f} S0 F{feed:.0f}")
                                         elif is_m106:
                                             gcode_lines.append("M106 S0")
-                                            gcode_lines.append(f"G1 X{seg_x1:.3f} Y{y_val:.3f} F{feed:.0f}")
+                                            gcode_lines.append(f"G1 X{c_start_x:.3f} Y{y_val:.3f} F{feed:.0f}")
                                         else:
-                                            gcode_lines.append(f"{laser_cmd} S0")
-                                            gcode_lines.append(f"G1 X{seg_x1:.3f} Y{y_val:.3f} F{feed:.0f}")
-                                        segments.append(ToolpathSegment("glide_gap", prev_x, y_val, seg_x1, y_val, feed, 0, lid, layer.color))
-                                        cur_x = seg_x1
+                                            gcode_lines.append(f"G1 X{c_start_x:.3f} Y{y_val:.3f} F{feed:.0f}")
+                                        segments.append(ToolpathSegment("lead_in", lead_in_x, y_val, c_start_x, y_val, feed, 0, lid, layer.color))
+                                        cur_x = c_start_x
 
-                                    # Fire laser and burn segment
-                                    seg_p = int(round(p_scale * p_ratio))
-                                    seg_len = abs(seg_x2 - seg_x1)
-                                    total_cut_dist += seg_len
-                                    total_time_sec += seg_len * feed_inv
+                                    # 3. Burn segments within this cluster
+                                    prev_x = c_start_x
+                                    for seg_idx, (seg_x1, seg_x2, p_ratio, _) in enumerate(cluster):
+                                        all_x.append(seg_x1)
+                                        all_x.append(seg_x2)
 
+                                        # Traverse short gap between segments at constant cutting speed with laser OFF (S0)
+                                        inter_gap = abs(seg_x1 - prev_x)
+                                        if inter_gap > 0.01:
+                                            total_cut_dist += inter_gap
+                                            total_time_sec += inter_gap * feed_inv
+                                            if inline_s:
+                                                gcode_lines.append(f"G1 X{seg_x1:.3f} S0")
+                                            elif is_m106:
+                                                gcode_lines.append("M106 S0")
+                                                gcode_lines.append(f"G1 X{seg_x1:.3f} Y{y_val:.3f} F{feed:.0f}")
+                                            else:
+                                                gcode_lines.append(f"{laser_cmd} S0")
+                                                gcode_lines.append(f"G1 X{seg_x1:.3f} Y{y_val:.3f} F{feed:.0f}")
+                                            segments.append(ToolpathSegment("glide_gap", prev_x, y_val, seg_x1, y_val, feed, 0, lid, layer.color))
+                                            cur_x = seg_x1
+
+                                        # Fire laser and burn segment
+                                        seg_p = int(round(p_scale * p_ratio))
+                                        seg_len = abs(seg_x2 - seg_x1)
+                                        total_cut_dist += seg_len
+                                        total_time_sec += seg_len * feed_inv
+
+                                        if inline_s:
+                                            gcode_lines.append(f"G1 X{seg_x2:.3f} S{seg_p}")
+                                        elif is_m106:
+                                            gcode_lines.append(f"M106 S{seg_p}")
+                                            if fire_cmd:
+                                                gcode_lines.append(fire_cmd)
+                                            gcode_lines.append(f"G1 X{seg_x2:.3f} Y{y_val:.3f} F{feed:.0f}")
+                                        else:
+                                            gcode_lines.append(f"{laser_cmd} S{seg_p}")
+                                            if fire_cmd:
+                                                gcode_lines.append(fire_cmd)
+                                            gcode_lines.append(f"G1 X{seg_x2:.3f} Y{y_val:.3f} F{feed:.0f}")
+
+                                        segments.append(ToolpathSegment("cut", seg_x1, y_val, seg_x2, y_val, feed, (seg_p / max_s) * 100.0, lid, layer.color))
+                                        cur_x = seg_x2
+                                        prev_x = seg_x2
+
+                                    # 4. Shut laser OFF
                                     if inline_s:
-                                        gcode_lines.append(f"G1 X{seg_x2:.3f} S{seg_p}")
+                                        gcode_lines.append("G1 S0")
                                     elif is_m106:
-                                        gcode_lines.append(f"M106 S{seg_p}")
-                                        if fire_cmd:
-                                            gcode_lines.append(fire_cmd)
-                                        gcode_lines.append(f"G1 X{seg_x2:.3f} Y{y_val:.3f} F{feed:.0f}")
+                                        gcode_lines.append("M107")
                                     else:
-                                        gcode_lines.append(f"{laser_cmd} S{seg_p}")
-                                        if fire_cmd:
-                                            gcode_lines.append(fire_cmd)
-                                        gcode_lines.append(f"G1 X{seg_x2:.3f} Y{y_val:.3f} F{feed:.0f}")
+                                        gcode_lines.append("M5")
+                                    if off_cmd:
+                                        gcode_lines.append(off_cmd)
 
-                                    segments.append(ToolpathSegment("cut", seg_x1, y_val, seg_x2, y_val, feed, (seg_p / max_s) * 100.0, lid, layer.color))
-                                    cur_x = seg_x2
-                                    prev_x = seg_x2
+                                    # 5. Lead-out deceleration with laser OFF
+                                    if abs(lead_out_x - c_end_x) > 0.01:
+                                        lead_out_dist = abs(lead_out_x - c_end_x)
+                                        total_cut_dist += lead_out_dist
+                                        total_time_sec += lead_out_dist * feed_inv
+                                        if inline_s:
+                                            gcode_lines.append(f"G1 X{lead_out_x:.3f} S0")
+                                        else:
+                                            gcode_lines.append(f"G1 X{lead_out_x:.3f} Y{y_val:.3f} F{feed:.0f}")
+                                        segments.append(ToolpathSegment("lead_out", c_end_x, y_val, lead_out_x, y_val, feed, 0, lid, layer.color))
+                                        cur_x = lead_out_x
 
-                                # 4. Shut laser OFF
-                                if inline_s:
-                                    gcode_lines.append("G1 S0")
-                                elif is_m106:
-                                    gcode_lines.append("M107")
-                                else:
-                                    gcode_lines.append("M5")
-                                if off_cmd:
-                                    gcode_lines.append(off_cmd)
+                                    if inline_s and not continuous_streaming:
+                                        gcode_lines.append("M5 S0")
 
-                                # 5. Lead-out deceleration with laser OFF
-                                if abs(lead_out_x - c_end_x) > 0.01:
-                                    lead_out_dist = abs(lead_out_x - c_end_x)
-                                    total_cut_dist += lead_out_dist
-                                    total_time_sec += lead_out_dist * feed_inv
-                                    if inline_s:
-                                        gcode_lines.append(f"G1 X{lead_out_x:.3f} S0")
-                                    else:
-                                        gcode_lines.append(f"G1 X{lead_out_x:.3f} Y{y_val:.3f} F{feed:.0f}")
-                                    segments.append(ToolpathSegment("lead_out", c_end_x, y_val, lead_out_x, y_val, feed, 0, lid, layer.color))
-                                    cur_x = lead_out_x
-
-                                if inline_s:
-                                    gcode_lines.append("M5 S0")
+                            if continuous_streaming:
+                                gcode_lines.append("G1 S0")
+                                gcode_lines.append("M5 S0 ; Continuous Raster Turbo Mode OFF")
 
                     except Exception as e:
                         gcode_lines.append(f"; Error processing image {img_ent.id}: {e}")
@@ -531,6 +601,17 @@ class GCodeGenerator:
                 if raw_fill_paths:
                     optimized_fill_paths = PathOptimizer.optimize_paths(raw_fill_paths, start_pos=(cur_x, cur_y))
                     interval = max(0.02, layer.line_interval)
+                    # Fix #6: F feedrate is modal in GRBL — track and emit only on change
+                    current_rapid_feed: float = -1.0
+                    current_cut_feed: float = -1.0
+
+                    is_m106 = (laser_cmd == "M106")
+                    inline_s = getattr(self.settings, "use_inline_power", True) and not is_m106
+                    continuous_streaming = getattr(self.settings, "continuous_inline_streaming", True) and inline_s
+
+                    if continuous_streaming:
+                        gcode_lines.append(f"{laser_cmd} S0 ; Fill Turbo Mode ON")
+
                     for poly in optimized_fill_paths:
                         fill_segs = self.generate_fill_scanlines(poly, interval)
                         for seg_x1, seg_x2, seg_y in fill_segs:
@@ -542,27 +623,49 @@ class GCodeGenerator:
                             total_rapid_dist += rap_dist
                             total_time_sec += (rap_dist / self.settings.rapid_speed) * 60.0
 
-                            gcode_lines.append(f"G0 X{seg_x1:.3f} Y{seg_y:.3f} F{self.settings.rapid_speed:.0f}")
+                            if self.settings.rapid_speed != current_rapid_feed:
+                                gcode_lines.append(f"G0 X{seg_x1:.3f} Y{seg_y:.3f} F{self.settings.rapid_speed:.0f}")
+                                current_rapid_feed = self.settings.rapid_speed
+                            else:
+                                gcode_lines.append(f"G0 X{seg_x1:.3f} Y{seg_y:.3f}")
                             segments.append(ToolpathSegment("rapid", cur_x, cur_y, seg_x1, seg_y, self.settings.rapid_speed, 0, lid, layer.color))
                             cur_x, cur_y = seg_x1, seg_y
+                            # Fix #1: capture true job start on first cutting move
+                            if not job_start_captured:
+                                job_start_x, job_start_y = cur_x, cur_y
+                                job_start_captured = True
 
                             # Cut fill stroke
                             cut_dist = abs(seg_x2 - seg_x1)
                             total_cut_dist += cut_dist
                             total_time_sec += (cut_dist / feed) * 60.0
 
-                            gcode_lines.append(self._laser_on_cmd(s_power))
-                            fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
-                            if fire_dwell > 0.0:
-                                gcode_lines.append(f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell")
-                            gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} F{feed:.0f}")
-                            gcode_lines.append(self._laser_off_cmd())
-                            off_dwell = getattr(self.settings, "laser_off_delay_ms", 0.0)
-                            if off_dwell > 0.0:
-                                gcode_lines.append(f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell")
+                            if continuous_streaming:
+                                if feed != current_cut_feed:
+                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} S{s_power} F{feed:.0f}")
+                                    current_cut_feed = feed
+                                else:
+                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} S{s_power}")
+                            else:
+                                gcode_lines.append(self._laser_on_cmd(s_power))
+                                fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
+                                if fire_dwell > 0.0:
+                                    gcode_lines.append(f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell")
+                                if feed != current_cut_feed:
+                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} F{feed:.0f}")
+                                    current_cut_feed = feed
+                                else:
+                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f}")
+                                gcode_lines.append(self._laser_off_cmd())
+                                off_dwell = getattr(self.settings, "laser_off_delay_ms", 0.0)
+                                if off_dwell > 0.0:
+                                    gcode_lines.append(f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell")
 
                             segments.append(ToolpathSegment("cut", seg_x1, seg_y, seg_x2, seg_y, feed, layer.power_max, lid, layer.color))
                             cur_x, cur_y = seg_x2, seg_y
+
+                    if continuous_streaming:
+                        gcode_lines.append("M5 S0 ; Fill Turbo Mode OFF")
 
                 # LINE (VECTOR CUT) MODE
                 if raw_line_paths:
@@ -584,6 +687,10 @@ class GCodeGenerator:
                             gcode_lines.append(f"G0 X{start_p[0]:.3f} Y{start_p[1]:.3f} F{self.settings.rapid_speed:.0f}")
                             segments.append(ToolpathSegment("rapid", cur_x, cur_y, start_p[0], start_p[1], self.settings.rapid_speed, 0, lid, layer.color))
                             cur_x, cur_y = start_p[0], start_p[1]
+                        # Fix #1: capture true job start on first cutting move
+                        if not job_start_captured:
+                            job_start_x, job_start_y = cur_x, cur_y
+                            job_start_captured = True
 
                         # Laser ON
                         gcode_lines.append(self._laser_on_cmd(s_power))
@@ -715,3 +822,396 @@ class GCodeGenerator:
             f"{'M106 S' + str(s_val) if getattr(self.settings, 'laser_mode', 'M4') == 'M106' else 'M3 S' + str(s_val)} ; Targeting Beam ON",
         ]
         return "\n".join(lines)
+
+    @staticmethod
+    def _compute_convex_hull(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        """Computes the 2D convex hull of a set of 2D points using Monotone Chain algorithm."""
+        pts = sorted(set(points))
+        if len(pts) <= 2:
+            return pts
+
+        def cross(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+        lower = []
+        for p in pts:
+            while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+                lower.pop()
+            lower.append(p)
+
+        upper = []
+        for p in reversed(pts):
+            while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+                upper.pop()
+            upper.append(p)
+
+        return lower[:-1] + upper[:-1]
+
+    def _resolve_target_bounds(self, target: Any) -> Optional[Tuple[float, float, float, float]]:
+        """Extracts (min_x, min_y, max_x, max_y) from a 4-tuple or list of LaserEntities."""
+        if isinstance(target, (tuple, list)) and len(target) == 4 and all(isinstance(v, (int, float)) for v in target):
+            return float(target[0]), float(target[1]), float(target[2]), float(target[3])
+        elif isinstance(target, list) and target:
+            boxes = [e.get_bounds() for e in target if hasattr(e, "get_bounds")]
+            if not boxes:
+                return None
+            return (
+                min(b[0] for b in boxes),
+                min(b[1] for b in boxes),
+                max(b[2] for b in boxes),
+                max(b[3] for b in boxes),
+            )
+        return None
+
+    def generate_burn_perimeter_gcode(
+        self,
+        target: Any,
+        mode: str = "box",
+        margin_mm: float = 0.0,
+        power_pct: float = 15.0,
+        speed: float = 1500.0,
+        passes: int = 1,
+        corner_tick_len_mm: float = 8.0,
+        air_assist: bool = False,
+    ) -> str:
+        """
+        Generates G-code to burn/score an alignment perimeter or alignment marks for workpiece positioning.
+
+        Modes:
+        - "box": Full rectangular bounding boundary.
+        - "box_crosshair": Bounding box rectangle plus center alignment crosshairs.
+        - "corners": 4 L-shaped corner tick marks (alignment corner stops).
+        - "crosshair_only": Center crosshair lines spanning the workpiece envelope.
+        - "hull": Tight convex hull perimeter around actual vector entities.
+        """
+        bbox = self._resolve_target_bounds(target)
+        if not bbox:
+            return ""
+
+        raw_min_x, raw_min_y, raw_max_x, raw_max_y = bbox
+        min_x = max(0.0, raw_min_x - margin_mm)
+        min_y = max(0.0, raw_min_y - margin_mm)
+        max_x = min(self.settings.bed_width, raw_max_x + margin_mm)
+        max_y = min(self.settings.bed_height, raw_max_y + margin_mm)
+
+        if min_x >= max_x or min_y >= max_y:
+            return ""
+
+        named_polylines: List[Tuple[str, List[Tuple[float, float]]]] = []
+
+        if mode == "hull" and isinstance(target, list) and target:
+            all_pts: List[Tuple[float, float]] = []
+            for ent in target:
+                for path in self.entity_to_paths(ent):
+                    all_pts.extend(path)
+            hull = self._compute_convex_hull(all_pts) if len(all_pts) >= 3 else []
+            if len(hull) >= 3:
+                if margin_mm != 0.0:
+                    cx = sum(p[0] for p in hull) / len(hull)
+                    cy = sum(p[1] for p in hull) / len(hull)
+                    expanded: List[Tuple[float, float]] = []
+                    for px, py in hull:
+                        dx, dy = px - cx, py - cy
+                        d = math.hypot(dx, dy)
+                        if d > 1e-6:
+                            sc = (d + margin_mm) / d
+                            expanded.append((
+                                max(0.0, min(self.settings.bed_width, cx + dx * sc)),
+                                max(0.0, min(self.settings.bed_height, cy + dy * sc))
+                            ))
+                        else:
+                            expanded.append((px, py))
+                    hull = expanded
+                hull_loop = list(hull) + [hull[0]]
+                named_polylines.append(("Convex Hull Perimeter", hull_loop))
+            else:
+                mode = "box"
+
+        if mode == "box":
+            box_poly = [
+                (min_x, min_y),
+                (max_x, min_y),
+                (max_x, max_y),
+                (min_x, max_y),
+                (min_x, min_y)
+            ]
+            named_polylines.append(("Perimeter Box", box_poly))
+
+        elif mode == "box_crosshair":
+            box_poly = [
+                (min_x, min_y),
+                (max_x, min_y),
+                (max_x, max_y),
+                (min_x, max_y),
+                (min_x, min_y)
+            ]
+            named_polylines.append(("Perimeter Box", box_poly))
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            named_polylines.append(("Horizontal Crosshair", [(min_x, cy), (max_x, cy)]))
+            named_polylines.append(("Vertical Crosshair", [(cx, min_y), (cx, max_y)]))
+
+        elif mode == "corners":
+            w = max_x - min_x
+            h = max_y - min_y
+            t = max(1.0, min(corner_tick_len_mm, w / 2.0, h / 2.0))
+            # Bottom-Left
+            named_polylines.append(("Corner Tick BL", [(min_x + t, min_y), (min_x, min_y), (min_x, min_y + t)]))
+            # Bottom-Right
+            named_polylines.append(("Corner Tick BR", [(max_x - t, min_y), (max_x, min_y), (max_x, min_y + t)]))
+            # Top-Right
+            named_polylines.append(("Corner Tick TR", [(max_x - t, max_y), (max_x, max_y), (max_x, max_y - t)]))
+            # Top-Left
+            named_polylines.append(("Corner Tick TL", [(min_x + t, max_y), (min_x, max_y), (min_x, max_y - t)]))
+
+        elif mode == "crosshair_only":
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            named_polylines.append(("Horizontal Crosshair", [(min_x, cy), (max_x, cy)]))
+            named_polylines.append(("Vertical Crosshair", [(cx, min_y), (cx, max_y)]))
+
+        if not named_polylines:
+            return ""
+
+        # Map to machine space if software mirroring is enabled
+        def _map_pt(px: float, py: float) -> Tuple[float, float]:
+            tx = self.settings.bed_width - px if getattr(self.settings, "software_mirror_x", False) else px
+            ty = self.settings.bed_height - py if getattr(self.settings, "software_mirror_y", False) else py
+            return round(tx, 3), round(ty, 3)
+
+        s_val = max(1, int(round((power_pct / 100.0) * self.settings.max_s_value)))
+        laser_on = self._laser_on_cmd(s_val)
+        laser_off = self._laser_off_cmd()
+        rapid_spd = self.settings.rapid_speed
+        fire_delay = getattr(self.settings, "laser_fire_delay_ms", 0.0)
+        off_delay = getattr(self.settings, "laser_off_delay_ms", 0.0)
+        pass_delay = getattr(self.settings, "pass_delay_sec", 0.0)
+
+        lines: List[str] = [
+            "; --- LaserForge Burn Perimeter Alignment ---",
+            f"; Mode: {mode} | Margin: {margin_mm:.1f}mm | Power: {power_pct:.1f}% (S{s_val}) | Speed: {speed:.0f} mm/min | Passes: {passes}",
+            f"; Workpiece Box: ({min_x:.2f}, {min_y:.2f}) -> ({max_x:.2f}, {max_y:.2f})",
+            "G21",
+            "G90",
+            laser_off,
+        ]
+
+        if air_assist:
+            lines.append("M8 ; Air Assist ON")
+
+        for p_idx in range(max(1, passes)):
+            if p_idx > 0 and pass_delay > 0:
+                lines.append(f"G4 P{pass_delay:.2f} ; Cooldown pass delay")
+            lines.append(f"; --- Pass {p_idx + 1} of {passes} ---")
+
+            for name, poly in named_polylines:
+                if len(poly) < 2:
+                    continue
+                lines.append(f"; {name}")
+                start_x, start_y = _map_pt(poly[0][0], poly[0][1])
+                lines.append(f"G0 X{start_x:.3f} Y{start_y:.3f} F{rapid_spd:.0f}")
+                lines.append(f"{laser_on} ; Perimeter Burn Beam ON")
+                if fire_delay > 0:
+                    lines.append(f"G4 P{fire_delay / 1000.0:.3f}")
+
+                for pt in poly[1:]:
+                    nx, ny = _map_pt(pt[0], pt[1])
+                    lines.append(f"G1 X{nx:.3f} Y{ny:.3f} F{speed:.0f}")
+
+                lines.append(f"{laser_off} ; Perimeter Burn Beam OFF")
+                if off_delay > 0:
+                    lines.append(f"G4 P{off_delay / 1000.0:.3f}")
+
+
+        if air_assist:
+            lines.append("M9 ; Air Assist OFF")
+
+        lines.append("; --- End Burn Perimeter Alignment ---")
+        return "\n".join(lines)
+
+    def generate_burn_perimeter_entities(
+        self,
+        target: Any,
+        mode: str = "box",
+        margin_mm: float = 0.0,
+        layer_id: int = 12,
+        corner_tick_len_mm: float = 8.0,
+    ) -> List[LaserEntity]:
+        """
+        Creates vector CAD LaserEntities representing the alignment perimeter
+        so they can be placed on a guide or tool layer in the canvas.
+        """
+        bbox = self._resolve_target_bounds(target)
+        if not bbox:
+            return []
+
+        raw_min_x, raw_min_y, raw_max_x, raw_max_y = bbox
+        min_x = max(0.0, raw_min_x - margin_mm)
+        min_y = max(0.0, raw_min_y - margin_mm)
+        max_x = min(self.settings.bed_width, raw_max_x + margin_mm)
+        max_y = min(self.settings.bed_height, raw_max_y + margin_mm)
+
+        if min_x >= max_x or min_y >= max_y:
+            return []
+
+        w = max_x - min_x
+        h = max_y - min_y
+        entities: List[LaserEntity] = []
+
+        if mode == "hull" and isinstance(target, list) and target:
+            all_pts: List[Tuple[float, float]] = []
+            for ent in target:
+                for path in self.entity_to_paths(ent):
+                    all_pts.extend(path)
+            hull = self._compute_convex_hull(all_pts) if len(all_pts) >= 3 else []
+            if len(hull) >= 3:
+                if margin_mm != 0.0:
+                    cx = sum(p[0] for p in hull) / len(hull)
+                    cy = sum(p[1] for p in hull) / len(hull)
+                    expanded: List[Tuple[float, float]] = []
+                    for px, py in hull:
+                        dx, dy = px - cx, py - cy
+                        d = math.hypot(dx, dy)
+                        if d > 1e-6:
+                            sc = (d + margin_mm) / d
+                            expanded.append((
+                                max(0.0, min(self.settings.bed_width, cx + dx * sc)),
+                                max(0.0, min(self.settings.bed_height, cy + dy * sc))
+                            ))
+                        else:
+                            expanded.append((px, py))
+                    hull = expanded
+                hull_contour = [(p[0] - min_x, p[1] - min_y) for p in hull]
+                entities.append(
+                    PathEntity(
+                        layer_id=layer_id,
+                        name=f"Perimeter_Hull_{w:.1f}x{h:.1f}",
+                        x=min_x,
+                        y=min_y,
+                        contours=[hull_contour],
+                        closed=True,
+                    )
+                )
+                return entities
+            else:
+                mode = "box"
+
+        if mode == "box":
+            entities.append(
+                RectEntity(
+                    layer_id=layer_id,
+                    name=f"Perimeter_Box_{w:.1f}x{h:.1f}",
+                    x=min_x,
+                    y=min_y,
+                    width=w,
+                    height=h,
+                )
+            )
+
+        elif mode == "box_crosshair":
+            entities.append(
+                RectEntity(
+                    layer_id=layer_id,
+                    name=f"Perimeter_Box_{w:.1f}x{h:.1f}",
+                    x=min_x,
+                    y=min_y,
+                    width=w,
+                    height=h,
+                )
+            )
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            entities.append(
+                LineEntity(
+                    layer_id=layer_id,
+                    name="Perimeter_Crosshair_H",
+                    x=min_x,
+                    y=cy,
+                    x2=max_x,
+                    y2=cy,
+                )
+            )
+            entities.append(
+                LineEntity(
+                    layer_id=layer_id,
+                    name="Perimeter_Crosshair_V",
+                    x=cx,
+                    y=min_y,
+                    x2=cx,
+                    y2=max_y,
+                )
+            )
+
+        elif mode == "corners":
+            t = max(1.0, min(corner_tick_len_mm, w / 2.0, h / 2.0))
+            # Bottom-Left
+            entities.append(
+                PathEntity(
+                    layer_id=layer_id,
+                    name="Corner_Tick_BL",
+                    x=min_x,
+                    y=min_y,
+                    contours=[[(t, 0.0), (0.0, 0.0), (0.0, t)]],
+                    closed=False,
+                )
+            )
+            # Bottom-Right
+            entities.append(
+                PathEntity(
+                    layer_id=layer_id,
+                    name="Corner_Tick_BR",
+                    x=max_x,
+                    y=min_y,
+                    contours=[[(-t, 0.0), (0.0, 0.0), (0.0, t)]],
+                    closed=False,
+                )
+            )
+            # Top-Right
+            entities.append(
+                PathEntity(
+                    layer_id=layer_id,
+                    name="Corner_Tick_TR",
+                    x=max_x,
+                    y=max_y,
+                    contours=[[(-t, 0.0), (0.0, 0.0), (0.0, -t)]],
+                    closed=False,
+                )
+            )
+            # Top-Left
+            entities.append(
+                PathEntity(
+                    layer_id=layer_id,
+                    name="Corner_Tick_TL",
+                    x=min_x,
+                    y=max_y,
+                    contours=[[(t, 0.0), (0.0, 0.0), (0.0, -t)]],
+                    closed=False,
+                )
+            )
+
+        elif mode == "crosshair_only":
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            entities.append(
+                LineEntity(
+                    layer_id=layer_id,
+                    name="Perimeter_Crosshair_H",
+                    x=min_x,
+                    y=cy,
+                    x2=max_x,
+                    y2=cy,
+                )
+            )
+            entities.append(
+                LineEntity(
+                    layer_id=layer_id,
+                    name="Perimeter_Crosshair_V",
+                    x=cx,
+                    y=min_y,
+                    x2=cx,
+                    y2=max_y,
+                )
+            )
+
+        return entities
+

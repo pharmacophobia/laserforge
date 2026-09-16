@@ -50,20 +50,10 @@ def entity_to_painter_path(entity: LaserEntity) -> Optional[QPainterPath]:
             path = t.map(path)
 
     elif isinstance(entity, LineEntity):
-        # Lines have zero 2D area. For boolean operations, give it a hairline stroke width
-        # or treat as a thin contour
-        dx = entity.x2 - entity.x
-        dy = entity.y2 - entity.y
-        length = math.hypot(dx, dy)
-        if length > 0.001:
-            half_w = 0.05  # 0.1mm nominal stroke
-            nx = -dy / length * half_w
-            ny = dx / length * half_w
-            path.moveTo(entity.x + nx, entity.y + ny)
-            path.lineTo(entity.x2 + nx, entity.y2 + ny)
-            path.lineTo(entity.x2 - nx, entity.y2 - ny)
-            path.lineTo(entity.x - nx, entity.y - ny)
-            path.closeSubpath()
+        # Lines have zero 2D area and cannot participate meaningfully in area CSG
+        # operations (union/subtract/intersect). Return None so the caller can warn
+        # the user rather than silently producing a 0.1 mm-wide artefact strip.
+        return None
 
     elif isinstance(entity, PathEntity):
         for contour in entity.contours:
