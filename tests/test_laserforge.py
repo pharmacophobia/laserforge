@@ -460,6 +460,159 @@ class TestLaserForgeCore(unittest.TestCase):
         self.assertIsNotNone(align_dlg)
         align_dlg._on_close()
 
+    def test_two_point_corner_alignment_and_motor_controller(self):
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QKeyEvent
+        from laserforge.core.serial_controller import SerialController
+        from laserforge.ui.alignment_dialog import LaserAlignmentDialog, AlignmentVisualWidget
+
+        # Prevent blocking dialogs in headless/offscreen test mode
+        QMessageBox.information = lambda *args, **kwargs: QMessageBox.StandardButton.Ok
+        QMessageBox.warning = lambda *args, **kwargs: QMessageBox.StandardButton.Ok
+        QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+
+        app = QApplication.instance() or QApplication(["test", "-platform", "offscreen"])
+        serial_ctrl = SerialController()
+
+        bbox = (10.0, 10.0, 90.0, 50.0)  # w = 80mm, h = 40mm
+        dlg = LaserAlignmentDialog(serial_ctrl=serial_ctrl, bbox=bbox)
+        self.assertIsNotNone(dlg)
+
+        # 1. Test telemetry & DRO
+        dlg._on_status_updated({"wpos": [25.5, 12.3, 0.0], "state": "Idle"})
+        self.assertAlmostEqual(dlg.current_pos[0], 25.5)
+        self.assertAlmostEqual(dlg.current_pos[1], 12.3)
+        self.assertIn("25.50", dlg.lbl_pos.text())
+
+        # 2. Test capture Left Corner (Pt 1)
+        dlg._capture_pt1()
+        self.assertIsNotNone(dlg.pt1)
+        self.assertAlmostEqual(dlg.pt1[0], 25.5)
+        self.assertAlmostEqual(dlg.pt1[1], 12.3)
+
+        # 3. Test capture Right Corner (Pt 2)
+        dlg._on_status_updated({"wpos": [105.5, 12.3, 0.0], "state": "Idle"})  # 80mm horizontally to the right
+        dlg._capture_pt2()
+        self.assertIsNotNone(dlg.pt2)
+        self.assertAlmostEqual(dlg.pt2[0], 105.5)
+        self.assertAlmostEqual(dlg.pt2[1], 12.3)
+
+        # 4. Test calculations (dx=80, dy=0 -> dist=80, angle=0)
+        calc = dlg._get_alignment_calculation()
+        self.assertAlmostEqual(calc["dist_measured"], 80.0, places=2)
+        self.assertAlmostEqual(calc["angle_deg"], 0.0, places=2)
+        self.assertAlmostEqual(calc["scale_factor"], 1.0, places=2)
+
+        # 5. Test angled workpiece (dy=10 -> angled)
+        dlg.spin_p2_y.setValue(22.3)
+        calc2 = dlg._get_alignment_calculation()
+        self.assertGreater(calc2["angle_deg"], 0.0)
+        self.assertGreater(calc2["dist_measured"], 80.0)
+
+        # 6. Test Motor Controller step selection & custom step
+        dlg.spin_custom_step.setValue(0.05)
+        self.assertAlmostEqual(dlg.step_distance, 0.05)
+
+        # Mock send_command to verify motor commands
+        sent_commands = []
+        serial_ctrl.send_command = lambda cmd: sent_commands.append(cmd)
+        serial_ctrl.is_connected = True
+
+        # Test Jogging
+        dlg._jog_step(1, 0)
+        self.assertTrue(any("$J=G91" in c and "X0.050" in c for c in sent_commands))
+
+        # Test Motor Dispatch to Left Corner
+        sent_commands.clear()
+        dlg._drive_to_pt1()
+        self.assertTrue(any("G90" in c and "X25.500" in c for c in sent_commands))
+
+        # Test Motor Dispatch to Right Corner
+        sent_commands.clear()
+        dlg._drive_to_pt2()
+        self.assertTrue(any("G90" in c and "X105.500" in c for c in sent_commands))
+
+        # Test Motor Dispatch to Midpoint
+        sent_commands.clear()
+        dlg._drive_to_midpoint()
+        self.assertTrue(any("G90" in c and "X65.500" in c for c in sent_commands))
+
+        # Test Trace Aligned Edge
+        sent_commands.clear()
+        dlg._trace_aligned_edge()
+        self.assertTrue(len(sent_commands) > 0)
+        self.assertIn("G1", sent_commands[0])
+
+        # Test keyboard jog event
+        sent_commands.clear()
+        evt = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
+        dlg.keyPressEvent(evt)
+        self.assertTrue(any("$J=G91" in c for c in sent_commands))
+
+        # Test Alignment signal emission
+        emitted_signals = []
+        dlg.align_canvas_requested[float, float, float, float, str].connect(
+            lambda ang, sx, sy, sc, ref: emitted_signals.append((ang, sx, sy, sc, ref))
+        )
+        dlg._apply_2point_alignment()
+        self.assertEqual(len(emitted_signals), 1)
+        self.assertAlmostEqual(emitted_signals[0][0], calc2["angle_deg"], places=2)
+
+        # 7. Test Visual Widget paint
+        dlg.visual_widget.update()
+        dlg.visual_widget.repaint()
+
+        dlg._on_close()
+
+    def test_canvas_artwork_alignment_transformation(self):
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        from PyQt6.QtWidgets import QApplication
+        from laserforge.ui.main_window import MainWindow
+        from laserforge.core.models import RectEntity, CircleEntity, LineEntity
+
+        app = QApplication.instance() or QApplication(["test", "-platform", "offscreen"])
+        win = MainWindow()
+        self.assertIsNotNone(win)
+
+        # Clear existing entities and add test entities
+        win.scene.clear_entities()
+        r = RectEntity(x=20.0, y=30.0, width=80.0, height=40.0)  # BL=(20, 30), TR=(100, 70)
+        c = CircleEntity(x=60.0, y=50.0, radius_x=10.0, radius_y=10.0)
+        line = LineEntity(x=20.0, y=30.0, x2=100.0, y2=30.0)  # along bottom edge
+        win.scene.add_entity(r)
+        win.scene.add_entity(c)
+        win.scene.add_entity(line)
+
+        # 1. Test translation with 0 deg rotation (shift_x=15, shift_y=25, ref_corner="BL")
+        win._align_canvas_artwork(angle_deg=0.0, shift_x=15.0, shift_y=25.0, scale=1.0, ref_corner="BL")
+        # Bottom-left of rect was at 20, 30. Shift by 15, 25 -> should be at 35, 55
+        self.assertAlmostEqual(r.x, 35.0, places=1)
+        self.assertAlmostEqual(r.y, 55.0, places=1)
+        self.assertAlmostEqual(line.x, 35.0, places=1)
+        self.assertAlmostEqual(line.y, 55.0, places=1)
+        self.assertAlmostEqual(line.x2, 115.0, places=1)
+        self.assertAlmostEqual(line.y2, 55.0, places=1)
+
+        # 2. Test Undo
+        win.scene.undo()
+        restored = win.scene.get_all_entities()
+        rect_restored = [e for e in restored if isinstance(e, RectEntity)][0]
+        self.assertAlmostEqual(rect_restored.x, 20.0, places=1)
+        self.assertAlmostEqual(rect_restored.y, 30.0, places=1)
+
+        # 3. Test scaling
+        win._align_canvas_artwork(angle_deg=0.0, shift_x=0.0, shift_y=0.0, scale=1.5, ref_corner="BL")
+        scaled = win.scene.get_all_entities()
+        r_scaled = [e for e in scaled if isinstance(e, RectEntity)][0]
+        c_scaled = [e for e in scaled if isinstance(e, CircleEntity)][0]
+        self.assertAlmostEqual(r_scaled.width, 120.0, places=1)   # 80 * 1.5
+        self.assertAlmostEqual(r_scaled.height, 60.0, places=1)   # 40 * 1.5
+        self.assertAlmostEqual(c_scaled.radius_x, 15.0, places=1)  # 10 * 1.5
+
+        win.close()
+
     def test_auto_connect_and_port_detector(self):
         from laserforge.core.auto_connect import PortDetector, AutoConnectWorker, USBHotplugWatcher
         from laserforge.core.serial_controller import SerialController
