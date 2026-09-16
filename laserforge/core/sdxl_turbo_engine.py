@@ -42,7 +42,7 @@ except ImportError:
 
 try:
     import diffusers
-    from diffusers import AutoPipelineForText2Image
+    from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image
     HAS_DIFFUSERS = True
 except ImportError:
     pass
@@ -112,6 +112,7 @@ class SDXLTurboEngine:
         self.model_id = model_id
         self.low_vram_mode = low_vram_mode
         self.pipeline = None
+        self.img2img_pipeline = None
         self.is_loaded = False
         self.is_loading = False
 
@@ -207,9 +208,31 @@ class SDXLTurboEngine:
             self.is_loading = False
             self.is_loaded = False
             self.pipeline = None
+            self.img2img_pipeline = None
             if progress_callback:
                 progress_callback(f"Failed to load pipeline: {e}")
             return False
+
+    def get_img2img_pipeline(self):
+        """Lazily creates an Image-to-Image pipeline sharing loaded weights via from_pipe."""
+        if self.img2img_pipeline is not None:
+            return self.img2img_pipeline
+        if self.pipeline is not None:
+            try:
+                from diffusers import AutoPipelineForImage2Image
+                self.img2img_pipeline = AutoPipelineForImage2Image.from_pipe(self.pipeline)
+                if hasattr(self.img2img_pipeline, "enable_attention_slicing"):
+                    try:
+                        self.img2img_pipeline.enable_attention_slicing(slice_size="auto")
+                    except Exception:
+                        pass
+                if hasattr(self.img2img_pipeline, "enable_vae_tiling"):
+                    self.img2img_pipeline.enable_vae_tiling()
+                if hasattr(self.img2img_pipeline, "enable_vae_slicing"):
+                    self.img2img_pipeline.enable_vae_slicing()
+            except Exception as e:
+                print(f"Failed to create img2img pipeline: {e}")
+        return self.img2img_pipeline
 
     def clean_vram(self):
         """Reclaims cached memory from PyTorch runtime."""
@@ -231,11 +254,14 @@ class SDXLTurboEngine:
         width: int = 512,
         height: int = 512,
         seed: int = -1,
+        init_image: Optional[Image.Image] = None,
+        strength: float = 0.65,
         progress_callback: Optional[Callable[[int, str], None]] = None
     ) -> Image.Image:
         """
         Executes generation using genuine SDXL Turbo pipeline if loaded,
         or high-fidelity procedural generator fallback if offline/no GPU loaded.
+        Supports both Text-to-Image and Image-to-Image (photo modification).
         """
         suffix = self.STYLE_PRESETS.get(style_preset, "")
         full_prompt = f"{prompt}{suffix}".strip()
@@ -246,31 +272,72 @@ class SDXLTurboEngine:
         # 1. Attempt genuine SDXL Turbo in-process generation
         if self.is_loaded and self.pipeline is not None:
             try:
-                if progress_callback:
-                    progress_callback(15, f"Generating ({steps} step(s), seed {seed})...")
-
                 generator = torch.Generator("cuda").manual_seed(seed)
+                if init_image is not None:
+                    i2i_pipe = self.get_img2img_pipeline()
+                    if i2i_pipe is not None:
+                        if progress_callback:
+                            progress_callback(15, f"Modifying photo ({steps} step(s), strength {strength:.2f}, seed {seed})...")
 
-                result = self.pipeline(
-                    prompt=full_prompt,
-                    negative_prompt=negative_prompt if guidance_scale > 0.0 else None,
-                    num_inference_steps=max(1, min(4, steps)),
-                    guidance_scale=guidance_scale,
-                    width=width,
-                    height=height,
-                    generator=generator
-                ).images[0]
+                        init_img_resized = init_image.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+                        eff_steps = max(steps, int(math.ceil(1.0 / max(0.05, strength))))
 
-                self.clean_vram()
-                if progress_callback:
-                    progress_callback(100, "Generation complete!")
-                return result
+                        result = i2i_pipe(
+                            prompt=full_prompt,
+                            negative_prompt=negative_prompt if guidance_scale > 0.0 else None,
+                            image=init_img_resized,
+                            strength=strength,
+                            num_inference_steps=eff_steps,
+                            guidance_scale=guidance_scale,
+                            generator=generator
+                        ).images[0]
+
+                        self.clean_vram()
+                        if progress_callback:
+                            progress_callback(100, "Photo modification complete!")
+                        return result
+                else:
+                    if progress_callback:
+                        progress_callback(15, f"Generating ({steps} step(s), seed {seed})...")
+
+                    result = self.pipeline(
+                        prompt=full_prompt,
+                        negative_prompt=negative_prompt if guidance_scale > 0.0 else None,
+                        num_inference_steps=max(1, min(4, steps)),
+                        guidance_scale=guidance_scale,
+                        width=width,
+                        height=height,
+                        generator=generator
+                    ).images[0]
+
+                    self.clean_vram()
+                    if progress_callback:
+                        progress_callback(100, "Generation complete!")
+                    return result
 
             except Exception as e:
                 print(f"SDXL Turbo in-process inference error: {e}")
                 self.clean_vram()
 
         # 2. High-quality Procedural Laser Art Fallback
+        if init_image is not None:
+            if progress_callback:
+                progress_callback(30, "Applying laser styling to input photo...")
+            time.sleep(0.02)
+            init_img_resized = init_image.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+            img = self.modify_image_procedurally(
+                init_image=init_img_resized,
+                prompt=prompt,
+                style_preset=style_preset,
+                strength=strength,
+                width=width,
+                height=height,
+                seed=seed
+            )
+            if progress_callback:
+                progress_callback(100, "Photo stylized!")
+            return img
+
         if progress_callback:
             progress_callback(30, "Synthesizing laser engraving artwork...")
         time.sleep(0.02)
@@ -296,15 +363,19 @@ class SDXLTurboEngine:
         width: int = 512,
         height: int = 512,
         seed: int = -1,
+        init_image: Optional[Image.Image] = None,
+        strength: float = 0.65,
         progress_callback: Optional[Callable[[int, str], None]] = None
     ) -> Optional[Image.Image]:
         """Runs SDXL Turbo via external Python binary (e.g. pyenv with PyTorch/CUDA)."""
         if progress_callback:
-            progress_callback(10, "Invoking SDXL Turbo engine via PyTorch environment...")
+            action_desc = "photo modification" if init_image else "generation"
+            progress_callback(10, f"Invoking SDXL Turbo {action_desc} via PyTorch environment...")
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_f:
             tmp_out = tmp_f.name
 
+        tmp_init = None
         cmd = [
             py_bin, "-m", "laserforge.core.sdxl_turbo_engine",
             "--prompt", prompt,
@@ -317,6 +388,13 @@ class SDXLTurboEngine:
             "--seed", str(seed),
             "--out", tmp_out
         ]
+
+        if init_image is not None:
+            with tempfile.NamedTemporaryFile(suffix="_init.png", delete=False) as tmp_i:
+                tmp_init = tmp_i.name
+            init_image.convert("RGB").resize((width, height), Image.Resampling.LANCZOS).save(tmp_init)
+            cmd.extend(["--init-image", tmp_init, "--strength", str(strength)])
+
         try:
             with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as proc:
                 if proc.stdout:
@@ -352,7 +430,66 @@ class SDXLTurboEngine:
                     os.remove(tmp_out)
                 except Exception:
                     pass
+        finally:
+            if tmp_init and os.path.exists(tmp_init):
+                try:
+                    os.remove(tmp_init)
+                except Exception:
+                    pass
         return None
+
+    @staticmethod
+    def modify_image_procedurally(
+        init_image: Image.Image,
+        prompt: str,
+        style_preset: str,
+        strength: float = 0.65,
+        width: int = 512,
+        height: int = 512,
+        seed: int = 42
+    ) -> Image.Image:
+        """
+        Procedurally stylizes / modifies an input photo matching laser style presets
+        and prompt requests when running in fallback/offline mode.
+        """
+        base = init_image.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+        gray = base.convert("L")
+
+        # Edge and feature extraction
+        edges = gray.filter(ImageFilter.FIND_EDGES)
+        arr_gray = np.array(gray, dtype=np.float32)
+        arr_edges = np.array(edges, dtype=np.float32)
+
+        is_slate = "Slate" in style_preset or "Negative" in style_preset
+        is_wood = "Wood" in style_preset or "Pyrography" in style_preset
+        is_cameo = "Cameo" in style_preset or "High-Contrast" in style_preset
+
+        if is_slate:
+            # Luminous white edges on dark slate background
+            slate_base = (255 - arr_gray) * 0.3 + arr_edges * 0.7
+            slate_base = np.clip(slate_base, 15, 245).astype(np.uint8)
+            res_img = Image.fromarray(slate_base).convert("RGB")
+        elif is_wood:
+            # Woodcut engraving: sepia tone + high-contrast etching
+            etch = np.clip(255 - (arr_edges * 1.3), 0, 255).astype(np.uint8)
+            r = (etch * 0.95).astype(np.uint8)
+            g = (etch * 0.85).astype(np.uint8)
+            b = (etch * 0.70).astype(np.uint8)
+            res_img = Image.merge("RGB", [Image.fromarray(r), Image.fromarray(g), Image.fromarray(b)])
+        elif is_cameo:
+            # High-contrast black and white cameo threshold
+            thresh = float(np.mean(arr_gray))
+            bw = np.where(arr_gray > thresh, 255, 0).astype(np.uint8)
+            res_img = Image.fromarray(bw).convert("RGB")
+        else:
+            # Laser Line Art (Crisp Outlines): clean black line art on pure white
+            lines = np.clip(255 - (arr_edges * 1.6), 0, 255).astype(np.uint8)
+            res_img = Image.fromarray(lines).convert("RGB")
+
+        # Blend with original based on strength (1.0 = fully stylized, 0.0 = original)
+        strength = max(0.0, min(1.0, strength))
+        blended = Image.blend(base, res_img, strength)
+        return blended
 
     @staticmethod
     def generate_procedural_fallback(
@@ -548,6 +685,10 @@ class SDXLTurboEngine:
         return img
 
 
+# Module-level alias for procedural modification
+modify_image_procedurally = SDXLTurboEngine.modify_image_procedurally
+
+
 class SDXLTurboWorker(QThread):
     """Background worker thread for responsive UI during generation."""
     progress_updated = pyqtSignal(int, str)
@@ -565,7 +706,9 @@ class SDXLTurboWorker(QThread):
         width: int,
         height: int,
         seed: int,
-        output_dir: str
+        init_image_path: Optional[str] = None,
+        strength: float = 0.65,
+        output_dir: str = "/tmp"
     ):
         super().__init__()
         self.engine = engine
@@ -577,6 +720,8 @@ class SDXLTurboWorker(QThread):
         self.width = width
         self.height = height
         self.seed = seed
+        self.init_image_path = init_image_path
+        self.strength = strength
         self.output_dir = output_dir
 
     def run(self):
@@ -588,6 +733,13 @@ class SDXLTurboWorker(QThread):
             if not self.engine.is_loaded and HAS_TORCH and HAS_DIFFUSERS and HAS_CUDA:
                 self.progress_updated.emit(10, "Loading SDXL Turbo into 8GB VRAM (CPU offload)...")
                 self.engine.load_pipeline(lambda msg: self.progress_updated.emit(25, msg))
+
+            init_img = None
+            if self.init_image_path and os.path.isfile(self.init_image_path):
+                try:
+                    init_img = Image.open(self.init_image_path).convert("RGB")
+                except Exception as img_err:
+                    print(f"Could not load input photo: {img_err}")
 
             pil_img = None
             # If not loaded in-process, attempt via external PyTorch environment
@@ -602,6 +754,8 @@ class SDXLTurboWorker(QThread):
                     width=self.width,
                     height=self.height,
                     seed=self.seed,
+                    init_image=init_img,
+                    strength=self.strength,
                     progress_callback=lambda pct, msg: self.progress_updated.emit(pct, msg)
                 )
 
@@ -615,6 +769,8 @@ class SDXLTurboWorker(QThread):
                     width=self.width,
                     height=self.height,
                     seed=self.seed,
+                    init_image=init_img,
+                    strength=self.strength,
                     progress_callback=lambda pct, msg: self.progress_updated.emit(pct, msg)
                 )
 
@@ -644,6 +800,8 @@ def main_cli():
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--init-image", type=str, default="", help="Path to input photo for image-to-image modification")
+    parser.add_argument("--strength", type=float, default=0.65, help="Modification strength (0.1 to 0.95)")
     parser.add_argument("--out", type=str, required=True)
     args = parser.parse_args()
 
@@ -651,6 +809,13 @@ def main_cli():
     print("PROGRESS: 10 Initializing SDXL Turbo engine...", flush=True)
     if HAS_TORCH and HAS_DIFFUSERS and HAS_CUDA:
         engine.load_pipeline(lambda msg: print(f"PROGRESS: 30 {msg}", flush=True))
+
+    init_img = None
+    if args.init_image and os.path.isfile(args.init_image):
+        try:
+            init_img = Image.open(args.init_image).convert("RGB")
+        except Exception as e:
+            print(f"Warning: could not open init image {args.init_image}: {e}", flush=True)
 
     img = engine.generate(
         prompt=args.prompt,
@@ -661,6 +826,8 @@ def main_cli():
         width=args.width,
         height=args.height,
         seed=args.seed,
+        init_image=init_img,
+        strength=args.strength,
         progress_callback=lambda pct, msg: print(f"PROGRESS: {pct} {msg}", flush=True)
     )
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
