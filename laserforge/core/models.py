@@ -28,6 +28,13 @@ class LayerCutSettings:
     overscan_pct: float = 3.0  # % overscan acceleration margin for raster
     is_tool: bool = False  # If true, framing/tool guide layer (not cut)
     pass_delay_sec: float = 0.0  # Seconds to pause between multi-pass cuts for diode cooldown
+    kerf_offset: float = 0.0  # Total laser beam kerf width in mm (applied as offset/2)
+    kerf_direction: str = "Auto"  # "Auto" (outer +kerf/2, inner -kerf/2), "Outward", "Inward", "Off"
+    lead_in_type: str = "None"  # "None", "Line", "Arc", "Perpendicular"
+    lead_in_length: float = 2.0  # mm
+    lead_out_type: str = "None"  # "None", "Line", "Arc", "Perpendicular"
+    lead_out_length: float = 2.0  # mm
+    overcut_length: float = 0.0  # mm to travel past closing point before M5
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -48,7 +55,14 @@ class LayerCutSettings:
             "show_on_canvas": self.show_on_canvas,
             "overscan_pct": self.overscan_pct,
             "is_tool": self.is_tool,
-            "pass_delay_sec": self.pass_delay_sec
+            "pass_delay_sec": self.pass_delay_sec,
+            "kerf_offset": self.kerf_offset,
+            "kerf_direction": self.kerf_direction,
+            "lead_in_type": self.lead_in_type,
+            "lead_in_length": self.lead_in_length,
+            "lead_out_type": self.lead_out_type,
+            "lead_out_length": self.lead_out_length,
+            "overcut_length": self.overcut_length
         }
 
     @classmethod
@@ -67,6 +81,8 @@ class LaserEntity:
     rotation: float = 0.0  # Degrees
     selected: bool = False
     locked: bool = False
+    override_speed: Optional[float] = None  # mm/min (overrides layer speed if set)
+    override_power: Optional[float] = None  # % 0-100 (overrides layer power_max if set)
 
     def get_bounds(self) -> Tuple[float, float, float, float]:
         """Returns (min_x, min_y, max_x, max_y) in mm."""

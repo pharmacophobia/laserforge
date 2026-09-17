@@ -96,6 +96,72 @@ class CutSettingsDialog(QDialog):
 
         layout.addWidget(group)
 
+        # Kerf & Pierce Lead-In / Lead-Out Group
+        kerf_group = QGroupBox("Kerf Compensation & Pierce Control")
+        kerf_form = QFormLayout(kerf_group)
+
+        # Kerf Offset
+        self.spin_kerf = QDoubleSpinBox()
+        self.spin_kerf.setRange(0.0, 5.0)
+        self.spin_kerf.setDecimals(3)
+        self.spin_kerf.setSingleStep(0.01)
+        self.spin_kerf.setValue(getattr(self.layer, "kerf_offset", 0.0))
+        self.spin_kerf.setSuffix(" mm")
+        self.spin_kerf.setToolTip("Total laser beam kerf width (e.g. 0.15mm). Offset applied is kerf / 2.")
+        kerf_form.addRow("Kerf Beam Width:", self.spin_kerf)
+
+        # Kerf Direction
+        self.combo_kerf_dir = QComboBox()
+        self.combo_kerf_dir.addItems(["Auto", "Outward", "Inward", "Off"])
+        current_kdir = getattr(self.layer, "kerf_direction", "Auto")
+        idx_kdir = self.combo_kerf_dir.findText(current_kdir)
+        if idx_kdir >= 0:
+            self.combo_kerf_dir.setCurrentIndex(idx_kdir)
+        self.combo_kerf_dir.setToolTip("Auto expands outer perimeters and shrinks internal cutout holes")
+        kerf_form.addRow("Kerf Direction:", self.combo_kerf_dir)
+
+        # Lead-In
+        self.combo_lead_in = QComboBox()
+        self.combo_lead_in.addItems(["None", "Line", "Arc", "Perpendicular"])
+        cur_li = getattr(self.layer, "lead_in_type", "None")
+        idx_li = self.combo_lead_in.findText(cur_li)
+        if idx_li >= 0:
+            self.combo_lead_in.setCurrentIndex(idx_li)
+        kerf_form.addRow("Lead-In Pierce Style:", self.combo_lead_in)
+
+        self.spin_lead_in_len = QDoubleSpinBox()
+        self.spin_lead_in_len.setRange(0.1, 25.0)
+        self.spin_lead_in_len.setValue(getattr(self.layer, "lead_in_length", 2.0))
+        self.spin_lead_in_len.setSuffix(" mm")
+        kerf_form.addRow("Lead-In Distance:", self.spin_lead_in_len)
+
+        # Lead-Out
+        self.combo_lead_out = QComboBox()
+        self.combo_lead_out.addItems(["None", "Line", "Arc", "Perpendicular"])
+        cur_lo = getattr(self.layer, "lead_out_type", "None")
+        idx_lo = self.combo_lead_out.findText(cur_lo)
+        if idx_lo >= 0:
+            self.combo_lead_out.setCurrentIndex(idx_lo)
+        kerf_form.addRow("Lead-Out Exit Style:", self.combo_lead_out)
+
+        self.spin_lead_out_len = QDoubleSpinBox()
+        self.spin_lead_out_len.setRange(0.1, 25.0)
+        self.spin_lead_out_len.setValue(getattr(self.layer, "lead_out_length", 2.0))
+        self.spin_lead_out_len.setSuffix(" mm")
+        kerf_form.addRow("Lead-Out Distance:", self.spin_lead_out_len)
+
+        # Overcut
+        self.spin_overcut = QDoubleSpinBox()
+        self.spin_overcut.setRange(0.0, 10.0)
+        self.spin_overcut.setDecimals(2)
+        self.spin_overcut.setSingleStep(0.1)
+        self.spin_overcut.setValue(getattr(self.layer, "overcut_length", 0.0))
+        self.spin_overcut.setSuffix(" mm")
+        self.spin_overcut.setToolTip("Travel distance past closing junction to ensure complete material drop")
+        kerf_form.addRow("Overcut Margin:", self.spin_overcut)
+
+        layout.addWidget(kerf_group)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._apply_and_accept)
         buttons.rejected.connect(self.reject)
@@ -111,6 +177,13 @@ class CutSettingsDialog(QDialog):
         self.layer.line_interval = self.spin_interval.value()
         self.layer.pass_delay_sec = self.spin_pass_delay.value()
         self.layer.air_assist = self.chk_air.isChecked()
+        self.layer.kerf_offset = self.spin_kerf.value()
+        self.layer.kerf_direction = self.combo_kerf_dir.currentText()
+        self.layer.lead_in_type = self.combo_lead_in.currentText()
+        self.layer.lead_in_length = self.spin_lead_in_len.value()
+        self.layer.lead_out_type = self.combo_lead_out.currentText()
+        self.layer.lead_out_length = self.spin_lead_out_len.value()
+        self.layer.overcut_length = self.spin_overcut.value()
         self.accept()
 
 
