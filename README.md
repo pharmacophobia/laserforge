@@ -113,6 +113,11 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - Parametric 2D grid generator varying Speed (rows) vs Power (columns) across configurable steps.
   - Dual modes (perimeter cutting, internal vector hatching, or both) with per-entity speed and power overrides.
   - Burns single-line Hershey stroke numeric labels for each row/column and includes an optional perimeter drop-out cutout frame.
+- **Calibrated Preset Exchange & Project Bundle (`.lfpak`) Packager (`Ctrl+Shift+P`)**:
+  - Full portable bundle archiving (`.lfpak`) bundling vector artwork (`project.lfg`), calibrated materials library (`materials.json`), machine hardware configurations (`machine_settings.json`), and parametric templates.
+  - **Cryptographic Tamper Protection**: Generates and verifies SHA256 checksums across all bundled assets to ensure integrity and prevent corrupted imports.
+  - **Selective Restoration & Conflict Strategy**: Previews bundle contents without full extraction, allowing selective import of project artwork, calibrated materials (with merge or overwrite conflict resolution), and machine profiles.
+  - Accessible via File menu, Tools menu, and dedicated top toolbar **"📦 Package"** action.
 - **Commercial Licensing & 30-Day Free Trial Engine**:
   - Cryptographic HMAC-SHA256 offline license key verification (`LF-XXXX-XXXX-XXXX-XXXX`) supporting perpetual licenses, machine-bound customer keys, and universal site licenses.
   - Hardware machine fingerprinting (CPU architecture and network node hashing) with zero cloud phone-home requirement for fully air-gapped workshop privacy.

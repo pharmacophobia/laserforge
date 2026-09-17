@@ -173,6 +173,11 @@ class MainWindow(QMainWindow):
         self.act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.act_save_as.triggered.connect(self.save_project_as)
 
+        self.act_bundle_packager = QAction("Project & Profile Packager Studio (.lfpak)...", self)
+        self.act_bundle_packager.setShortcut("Ctrl+Shift+P")
+        self.act_bundle_packager.setToolTip("Export or restore project artwork, material calibrations, and machine profiles (.lfpak) (Ctrl+Shift+P)")
+        self.act_bundle_packager.triggered.connect(self.open_bundle_packager_studio)
+
         self.act_import_svg = QAction("Import SVG / Vector...", self)
         self.act_import_svg.setShortcut("Ctrl+I")
         self.act_import_svg.triggered.connect(self.import_svg)
@@ -568,6 +573,7 @@ class MainWindow(QMainWindow):
         self._update_recent_menu()
         menu_file.addAction(self.act_save)
         menu_file.addAction(self.act_save_as)
+        menu_file.addAction(self.act_bundle_packager)
         menu_file.addSeparator()
         menu_file.addAction(self.act_import_svg)
         menu_file.addAction(self.act_import_dxf)
@@ -670,6 +676,7 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_galvo_studio)
         menu_tools.addAction(self.act_ruida_studio)
         menu_tools.addAction(self.act_web_pendant)
+        menu_tools.addAction(self.act_bundle_packager)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
         menu_tools.addAction(self.act_test_matrix)
@@ -740,6 +747,7 @@ class MainWindow(QMainWindow):
         add_file_btn(self.act_new, "📄 New", "New Project (Ctrl+N)")
         add_file_btn(self.act_open, "📂 Open", "Open Project (Ctrl+O)")
         add_file_btn(self.act_save, "💾 Save", "Save Project (Ctrl+S)")
+        add_file_btn(self.act_bundle_packager, "📦 Package", "Project & Profile Packager (.lfpak) (Ctrl+Shift+P)")
         tb_file.addSeparator()
         add_file_btn(self.act_undo, "↩ Undo", "Undo Last Action (Ctrl+Z)")
         add_file_btn(self.act_redo, "↪ Redo", "Redo (Ctrl+Y / Ctrl+Shift+Z)")
@@ -1607,6 +1615,116 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Project saved to {path}", 3000)
         except Exception as e:
             QMessageBox.critical(self, "Error Saving Project", f"Failed to save project: {e}")
+
+    def open_bundle_packager_studio(self):
+        """Opens the Project & Profile Packager Studio (.lfpak) dialog."""
+        from laserforge.ui.bundle_packager_dialog import BundlePackagerDialog
+        dlg = BundlePackagerDialog(
+            current_entities=self.scene.get_all_entities(),
+            layer_manager=self.layer_manager,
+            machine_settings=self.settings,
+            parent=self
+        )
+        dlg.project_restored.connect(self._on_bundle_project_restored)
+        dlg.materials_restored.connect(self._on_bundle_materials_restored)
+        dlg.settings_restored.connect(self._on_bundle_settings_restored)
+        dlg.exec()
+
+    def _on_bundle_project_restored(self, proj_data: dict):
+        try:
+            self.scene.push_undo_state()
+            self.scene.clear()
+            # Reconstruct layers if present
+            layers_dict = proj_data.get("layers", {})
+            for lid_str, ldata in layers_dict.items():
+                lid = int(lid_str)
+                layer = self.layer_manager.get_layer(lid)
+                if layer:
+                    layer.name = ldata.get("name", layer.name)
+                    layer.speed = float(ldata.get("speed", layer.speed))
+                    layer.power = float(ldata.get("power", layer.power))
+                    layer.passes = int(ldata.get("passes", layer.passes))
+                    layer.mode = ldata.get("mode", layer.mode)
+
+            # Reconstruct entities
+            raw_entities = proj_data.get("entities", [])
+            for ed in raw_entities:
+                etype = ed.get("type", "")
+                ent = None
+                from laserforge.core.models import RectEntity, CircleEntity, LineEntity, PathEntity, TextEntity
+                if etype == "RectEntity":
+                    ent = RectEntity(
+                        layer_id=ed.get("layer_id", 0),
+                        name=ed.get("name", "Rect"),
+                        x=ed.get("x", 0.0),
+                        y=ed.get("y", 0.0),
+                        width=ed.get("width", 10.0),
+                        height=ed.get("height", 10.0),
+                        corner_radius=ed.get("corner_radius", 0.0)
+                    )
+                elif etype == "CircleEntity":
+                    ent = CircleEntity(
+                        layer_id=ed.get("layer_id", 0),
+                        name=ed.get("name", "Circle"),
+                        x=ed.get("x", 0.0),
+                        y=ed.get("y", 0.0),
+                        radius_x=ed.get("radius_x", 5.0),
+                        radius_y=ed.get("radius_y", 5.0)
+                    )
+                elif etype == "LineEntity":
+                    ent = LineEntity(
+                        layer_id=ed.get("layer_id", 0),
+                        name=ed.get("name", "Line"),
+                        x=ed.get("x", 0.0),
+                        y=ed.get("y", 0.0),
+                        x2=ed.get("x2", 10.0),
+                        y2=ed.get("y2", 10.0)
+                    )
+                elif etype == "PathEntity":
+                    ent = PathEntity(
+                        layer_id=ed.get("layer_id", 0),
+                        name=ed.get("name", "Path"),
+                        x=ed.get("x", 0.0),
+                        y=ed.get("y", 0.0),
+                        contours=ed.get("contours", []),
+                        closed=ed.get("closed", False)
+                    )
+                elif etype == "TextEntity":
+                    ent = TextEntity(
+                        layer_id=ed.get("layer_id", 0),
+                        name=ed.get("name", "Text"),
+                        x=ed.get("x", 0.0),
+                        y=ed.get("y", 0.0),
+                        text=ed.get("text", ""),
+                        font_family=ed.get("font_family", "sans-serif"),
+                        font_size=ed.get("font_size", 12.0)
+                    )
+
+                if ent:
+                    if "speed_override" in ed:
+                        ent.speed_override = float(ed["speed_override"])
+                    if "power_override" in ed:
+                        ent.power_override = float(ed["power_override"])
+                    self.scene.add_entity(ent)
+
+            self.cuts_panel.update_table()
+            self.canvas_widget.view.zoom_to_fit()
+            self.statusBar().showMessage(f"Restored project: {len(raw_entities)} entities loaded to canvas.", 4000)
+        except Exception as e:
+            QMessageBox.critical(self, "Project Restoration Error", f"Failed to unpack project artwork: {e}")
+
+    def _on_bundle_materials_restored(self, count: int):
+        self.statusBar().showMessage(f"Imported {count} material profiles to library.", 4000)
+        self.cuts_panel.update_table()
+
+    def _on_bundle_settings_restored(self, ms_dict: dict):
+        if "bed_width" in ms_dict:
+            self.settings.bed_width = float(ms_dict["bed_width"])
+        if "bed_height" in ms_dict:
+            self.settings.bed_height = float(ms_dict["bed_height"])
+        self.canvas_widget.view.set_bed_size(self.settings.bed_width, self.settings.bed_height)
+        self.canvas_widget.view.zoom_to_fit()
+        self.statusBar().showMessage("Applied bundled machine settings and bed size.", 4000)
 
     def import_svg(self):
         path, _ = QFileDialog.getOpenFileName(
