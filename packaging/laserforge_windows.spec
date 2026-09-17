@@ -31,9 +31,18 @@ hidden_imports = [
     'PIL.ImageDraw',
     'PIL.ImageFilter',
     'numpy',
+    'cv2',
+    'scipy',
+    'scipy.spatial',
+    'skimage',
+    'skimage.morphology',
+    'networkx',
     'qrcode',
     'barcode',
     'barcode.writer',
+    'xml.etree.ElementTree',
+    'hmac',
+    'hashlib',
 ]
 
 a = Analysis(

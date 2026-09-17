@@ -88,10 +88,22 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
 - **2D Vector Boolean CSG Operations**:
   - Native **Weld / Union** (`Ctrl+Shift+U`), **Subtract / Difference** (`Ctrl+Shift+D`), **Intersect** (`Ctrl+Shift+X`), and **Exclusive OR (XOR)** directly on the canvas powered by Shapely.
   - Seamlessly handles multi-polygon islands and interior cavities with full undo/redo integration.
-- **Cross-Platform Standalone Packaging & Distribution**:
-  - **Debian Package (`.deb`)**: Native installable package (`dist/laserforge_1.2.0_amd64.deb`) with start menu icons, dialout permissions, and `.laserproj` MIME types.
-  - **Universal Linux AppImage**: Self-contained portable executable running seamlessly across Ubuntu, Debian, Fedora, Arch, and Mint.
-  - **Windows Portable Executable**: Standalone build automation (`packaging/build_windows.bat` & `packaging/laserforge_windows.spec`) producing `LaserForge.exe`.
+- **Parametric Living Hinges & Curved Box Lattice Flex Studio (`Ctrl+Alt+H`)**:
+  - Parametric flexible lattice hinge generator allowing rigid sheet plywood, MDF, and acrylic to bend into smooth curves.
+  - **Arc Length Bend Calculator**: Automatically computes exact flat flex zone width from desired bend radius and angle ($L = R \cdot \theta$).
+  - **Multiple Flex Geometries**: Alternating straight slits, sinuous wavy curves (torsional twist flex), and diamond honeycomb lattices.
+  - Dial-in slit lengths, uncut bridge gaps, column pitch spacing, and optional solid mounting border tabs.
+  - Real-time interactive 2D preview with live geometric diagnostics and one-click export to workspace bed.
+- **Commercial Licensing & 30-Day Free Trial Engine**:
+  - Cryptographic HMAC-SHA256 offline license key verification (`LF-XXXX-XXXX-XXXX-XXXX`) supporting perpetual licenses, machine-bound customer keys, and universal site licenses.
+  - Hardware machine fingerprinting (CPU architecture and network node hashing) with zero cloud phone-home requirement for fully air-gapped workshop privacy.
+  - Unrestricted 30-day free evaluation trial manager with anti-tamper clock rollback detection and persistence in `~/.laserforge/license.json`.
+  - Modern Qt activation dialog with live status badges, one-click device ID copying, and license deactivation / transfer workflow.
+- **Cross-Platform Standalone Packaging & Distribution Pipeline**:
+  - **Debian Package (`.deb`)**: Native installable package (`dist/laserforge_2.5.0_amd64.deb`) with start menu icons, dialout permissions, and `.lfg` MIME types.
+  - **Universal Linux AppImage & Portable Tarball**: Self-contained portable executables running seamlessly across Ubuntu, Debian, Fedora, Arch, and Mint.
+  - **Microsoft Windows Inno Setup Installer (`.exe`)**: Production installer script (`packaging/laserforge_setup.iss`) generating `LaserForge-v2.5.0-Setup-x64.exe` with desktop shortcuts, Start Menu entry, and `.lfg` project file associations.
+  - **Automated Multi-Platform Release Script**: One-command release builder (`packaging/build_release_packages.py`).
   - **Local System Installer**: Simple one-click desktop installer (`install.sh` and `uninstall.sh`).
 - **Production Job Cost & Time Estimator**:
   - Physics-based job duration estimation modeling cut lengths, rapid travels, and machine acceleration limits.

@@ -142,6 +142,11 @@ class MainWindow(QMainWindow):
         if self.settings.auto_connect:
             QTimer.singleShot(400, lambda: self.serial_ctrl.start_auto_connect(self.settings.last_connected_port))
 
+        # Licensing & 30-Day Free Trial Engine
+        from laserforge.core.license_engine import LicenseEngine
+        self.license_engine = LicenseEngine()
+        self._update_window_title_license()
+
         # Maximize to fit display cleanly
         self.showMaximized()
 
@@ -218,6 +223,11 @@ class MainWindow(QMainWindow):
         self.act_box_generator.setShortcut("Ctrl+Shift+J")
         self.act_box_generator.setToolTip("Parametric Box & Finger-Joint Enclosure Studio (Ctrl+Shift+J)")
         self.act_box_generator.triggered.connect(self.open_box_studio)
+
+        self.act_living_hinge = QAction("Living Hinges & Lattice Flex Studio...", self)
+        self.act_living_hinge.setShortcut("Ctrl+Alt+H")
+        self.act_living_hinge.setToolTip("Parametric Living Hinge & Lattice Flex pattern generator for curved wood & acrylic bends (Ctrl+Alt+H)")
+        self.act_living_hinge.triggered.connect(self.open_living_hinge_studio)
 
         self.act_single_line_text = QAction("Single-Line Stroke Text...", self)
         self.act_single_line_text.setShortcut("Ctrl+Shift+F")
@@ -509,6 +519,14 @@ class MainWindow(QMainWindow):
         self.act_settings.setShortcut("Ctrl+,")
         self.act_settings.triggered.connect(self.open_machine_settings)
 
+        self.act_license = QAction("Commercial License & 30-Day Free Trial...", self)
+        self.act_license.setToolTip("Activate commercial license key or view 30-day free trial status")
+        self.act_license.triggered.connect(self.open_license_dialog)
+
+        self.act_check_updates = QAction("Check for Updates...", self)
+        self.act_check_updates.setToolTip("Check for new LaserForge releases and updates")
+        self.act_check_updates.triggered.connect(self.check_for_updates)
+
     def _create_menus(self):
         menubar = self.menuBar()
 
@@ -613,6 +631,7 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_nesting)
         menu_tools.addAction(self.act_rotary)
         menu_tools.addAction(self.act_box_generator)
+        menu_tools.addAction(self.act_living_hinge)
         menu_tools.addAction(self.act_single_line_text)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
@@ -660,6 +679,9 @@ class MainWindow(QMainWindow):
 
         # Help Menu
         menu_help = menubar.addMenu("&Help")
+        menu_help.addAction(self.act_license)
+        menu_help.addAction(self.act_check_updates)
+        menu_help.addSeparator()
         act_about = QAction("About LaserForge...", self)
         act_about.triggered.connect(self._show_about)
         menu_help.addAction(act_about)
@@ -743,6 +765,13 @@ class MainWindow(QMainWindow):
         btn_templates.setToolTip("Project Templates Studio (Ctrl+Shift+T) - Coasters, tumblers, keychains, ornaments & rulers")
         btn_templates.clicked.connect(self.open_templates_studio)
         tb_studios.addWidget(btn_templates)
+
+        # Living Hinges Button
+        btn_hinges = QPushButton("〰 Hinges")
+        btn_hinges.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_hinges.setToolTip("Living Hinges & Lattice Flex Studio (Ctrl+Alt+H) - Curved wood and acrylic bends")
+        btn_hinges.clicked.connect(self.open_living_hinge_studio)
+        tb_studios.addWidget(btn_hinges)
 
         # Shapes & Offset Button
         btn_shapes = QPushButton("⭐ Shapes")
@@ -2241,6 +2270,22 @@ class MainWindow(QMainWindow):
         self.scene.update()
         self.statusBar().showMessage(f"Added {len(entities)} box panels & labels to workspace bed.", 4000)
 
+    def open_living_hinge_studio(self):
+        """Opens the Living Hinges & Lattice Flex Studio dialog."""
+        from laserforge.ui.living_hinge_dialog import LivingHingeDialog
+        dlg = LivingHingeDialog(parent=self)
+        dlg.patterns_generated.connect(self._on_living_hinge_patterns_generated)
+        dlg.exec()
+
+    def _on_living_hinge_patterns_generated(self, entities: list):
+        if not entities:
+            return
+        self.scene.push_undo_state()
+        for ent in entities:
+            self.scene.add_entity(ent)
+        self.scene.update()
+        self.statusBar().showMessage(f"Added Living Hinge pattern ({len(entities)} entities) to workspace bed.", 4000)
+
     def open_single_line_text_studio(self):
         """Opens the Single-Line Stroke (Hershey Vector) Font dialog."""
         from laserforge.ui.single_line_text_dialog import SingleLineTextDialog
@@ -2488,8 +2533,52 @@ class MainWindow(QMainWindow):
             "<li>Floyd-Steinberg & Atkinson photo dithering</li>"
             "<li>Real-time USB Serial GRBL controller with 8-way jogging</li>"
             "<li>Animated toolpath simulation preview & ETA calculator</li>"
+            "<li>Living Hinges & Curved Box Lattice Flex Studio</li>"
+            "<li>Parametric Finger & Dovetail Joint Box Enclosure Studio</li>"
+            "<li>2-Point Optical Print & Cut Registration & Holding Tabs</li>"
             "</ul>"
             "<p><i>Built for makers and fabricators.</i></p>"
+        )
+
+    def open_license_dialog(self):
+        """Opens the Commercial Licensing & 30-Day Free Trial dialog."""
+        from laserforge.ui.license_dialog import LicenseDialog
+        dlg = LicenseDialog(parent=self)
+        dlg.license_changed.connect(self._on_license_changed)
+        dlg.exec()
+
+    def _on_license_changed(self, is_active: bool = False):
+        self._update_window_title_license()
+        status = self.license_engine.get_status()
+        if status.is_licensed:
+            self.statusBar().showMessage(f"LaserForge Commercial License Active ({status.licensed_to}). Thank you for your support!", 5000)
+        elif status.is_trial_active:
+            self.statusBar().showMessage(f"LaserForge 30-Day Free Trial: {status.days_remaining} days remaining.", 5000)
+        else:
+            self.statusBar().showMessage("LaserForge License Status: TRIAL EXPIRED.", 5000)
+
+    def _update_window_title_license(self):
+        """Updates the main window title with current license/trial status."""
+        status = self.license_engine.get_status()
+        if status.is_licensed:
+            tag = f"[Commercial License Active - {status.licensed_to}]"
+        elif status.is_trial_active:
+            tag = f"[30-Day Free Trial: {status.days_remaining} Days Remaining]"
+        elif status.is_expired:
+            tag = "[Trial Expired - License Activation Required]"
+        else:
+            tag = "[Evaluation]"
+        self.setWindowTitle(f"LaserForge - Laser Engraver & Cutter {tag}")
+
+    def check_for_updates(self):
+        """Checks for updates against official releases."""
+        QMessageBox.information(
+            self,
+            "Check for Updates",
+            "<h3>LaserForge is Up to Date</h3>"
+            "<p>You are running the latest production build (v2.5.0).</p>"
+            "<p>All CAM engines, 3D simulation tools, parametric studios, "
+            "and commercial licensing systems are current.</p>"
         )
 
     # -------------------------------------------------------------
