@@ -59,6 +59,25 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - Automated silhouette and alpha boundary extraction for imported bitmap artwork and laser engravings.
   - Generates smooth outer cutting perimeters with dial-in millimeter offset margin (e.g. $+2.5$ mm badge boundary) and curve smoothing.
   - Supports hole inclusion/suppression and continuous closed toolpath generation for sticker and wooden cutout manufacturing.
+- **Kerf Compensation & Pierce Lead-In / Lead-Out Controls**:
+  - **Auto-Directional Kerf Offsetting**: Automatically differentiates outer perimeters from internal cutouts and holes, applying positive $+k/2$ or negative $-k/2$ toolpath dilation to achieve exact press-fit tolerances on mortise and tenon joints.
+  - **Pierce Lead-Ins & Lead-Outs**: Eliminates start-point burn marks and pierce craters with configurable lead-in vectors (Linear, Arc, and Perpendicular) originating safely in scrap waste.
+  - **Continuous Overcut Margin**: Extends cutting toolpaths past the 360° closing vertex before laser extinction (`M5`), guaranteeing parts drop out cleanly without manual trimming.
+- **2D Nesting Optimizer Studio (`Ctrl+Shift+N`)**:
+  - Automated 2D bin packing engine maximizing sheet material utilization and slashing scrap waste.
+  - Evaluates discrete rotational orientations ($0^\circ$, $90^\circ$, or $45^\circ$ increments).
+  - **Cavity & Hole Nesting**: Automatically identifies internal cutout cavities in larger parts and nests smaller components inside them.
+  - Live interactive preview showing placed geometries, unplaced parts, compute times, and total packing density ($\%$).
+- **Rotary Axis Studio for Rollers & Chucks (`Ctrl+Shift+R`)**:
+  - Dedicated cylindrical engraving studio with support for both drive roller wheels and direct-drive 3-jaw chucks.
+  - **Dual-Mode Calibration**: Non-destructive software G-code coordinate scaling (safe, leaves machine untouched) or direct GRBL `$101` steps/mm EEPROM override.
+  - Automatic diameter and circumference calculator ($C = \pi D$) with live 3D cylinder visualizer.
+  - **360° Calibration Test Jog**: Dispatches an exact 1-turn rotation move and returns to verify zero motor slip.
+- **Cross-Platform Standalone Packaging & Distribution**:
+  - **Debian Package (`.deb`)**: Native installable package (`dist/laserforge_1.2.0_amd64.deb`) with start menu icons, dialout permissions, and `.laserproj` MIME types.
+  - **Universal Linux AppImage**: Self-contained portable executable running seamlessly across Ubuntu, Debian, Fedora, Arch, and Mint.
+  - **Windows Portable Executable**: Standalone build automation (`packaging/build_windows.bat` & `packaging/laserforge_windows.spec`) producing `LaserForge.exe`.
+  - **Local System Installer**: Simple one-click desktop installer (`install.sh` and `uninstall.sh`).
 - **Production Job Cost & Time Estimator**:
   - Physics-based job duration estimation modeling cut lengths, rapid travels, and machine acceleration limits.
   - Detailed financial breakdown calculating laser tube/diode wear ($\$/\text{hr}$), electricity power consumption ($\text{kW}\cdot\text{h}$ rates), and sheet stock material costs.
@@ -144,9 +163,11 @@ python3 -m laserforge.main
 | **Import SVG Vector** | `Ctrl + I` |
 | **Import AutoCAD DXF** | `Ctrl + Alt + D` |
 | **Export G-Code** | `Ctrl + E` |
-| **Export Canvas to SVG** | `Ctrl + Shift + S` |
+| **Export Canvas to SVG** | `Ctrl + Shift + E` |
 | **Auto Cutout to SVG** | `Ctrl + Shift + C` |
 | **Directional Hatching** | `Ctrl + Shift + H` |
+| **2D Nesting Optimizer** | `Ctrl + Shift + N` |
+| **Rotary Axis Studio** | `Ctrl + Shift + R` |
 | **Job Cost & Time Estimator** | `Ctrl + Shift + M` |
 | **Select Tool** | `S` |
 | **Rectangle Tool** | `R` |
@@ -160,6 +181,10 @@ python3 -m laserforge.main
 | **Intersect** | `Ctrl + Shift + X` |
 | **Camera Calibration Wizard** | `Ctrl + Shift + K` |
 | **Update Camera Bed Overlay** | `Ctrl + Shift + B` |
+| **Center on Laser Bed** | `Ctrl + Alt + C` |
+| **Burn Alignment Perimeter** | `Ctrl + Alt + B` |
+| **QR & Barcode Studio** | `Ctrl + Alt + Q` |
+| **Parametric Shapes Generator** | `Ctrl + Alt + G` |
 | **Select All** | `Ctrl + A` |
 | **Duplicate Selected** | `Ctrl + D` |
 | **Delete Selected** | `Delete` |
@@ -178,7 +203,7 @@ python3 -m laserforge.main
 cd /home/k/LaserForge
 python3 -m unittest discover tests
 ```
-All automated test suites (128 unit tests) verify:
+All automated test suites (154 unit tests) verify:
 - Geometric entity definitions and boundary math
 - Multi-layer parameter configuration
 - Floyd-Steinberg and Atkinson dithering
