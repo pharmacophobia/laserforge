@@ -73,6 +73,20 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - **Dual-Mode Calibration**: Non-destructive software G-code coordinate scaling (safe, leaves machine untouched) or direct GRBL `$101` steps/mm EEPROM override.
   - Automatic diameter and circumference calculator ($C = \pi D$) with live 3D cylinder visualizer.
   - **360° Calibration Test Jog**: Dispatches an exact 1-turn rotation move and returns to verify zero motor slip.
+- **Holding Tabs & Bridges (Micro-Tabs)**:
+  - Automatically leaves small structural uncut bridges ($0.5$–$2.0$ mm) along closed cutting contours to prevent small cut parts from dropping through honeycomb slats or tipping into the laser nozzle.
+  - Slices contours into precision sub-paths with either complete laser cutouts (`G0` rapid across bridge) or configurable skin bridge laser power (`> 0%` micro-tabs for easy clean breakout).
+- **Parametric Box & Finger-Joint Enclosure Studio (`Ctrl+Shift+J`)**:
+  - Interactive CAD studio generating 2D flat interlocking panels for 6-sided enclosed boxes, 5-sided open-top bins, and sliding-lid cases with finger joints.
+  - Fully adjustable material thickness ($1.0$–$25.0$ mm), finger joint pitch, and laser kerf compensation for snug friction press-fits without glue.
+  - Real-time 2D canvas preview with sheet footprint telemetry and automated panel layout with text labels.
+- **Single-Line Stroke (Hershey Vector) Fonts (`Ctrl+Shift+F`)**:
+  - True centerline single-pass vector stroke fonts for rapid laser engraving of serial numbers, scales, dials, and small text.
+  - Eliminates dual-pass outline perimeter cutting and melts, cutting marking runtimes by up to 60%.
+  - Full ASCII glyph coverage with adjustable cap height, character spacing, and line spacing.
+- **2D Vector Boolean CSG Operations**:
+  - Native **Weld / Union** (`Ctrl+Shift+U`), **Subtract / Difference** (`Ctrl+Shift+D`), **Intersect** (`Ctrl+Shift+X`), and **Exclusive OR (XOR)** directly on the canvas powered by Shapely.
+  - Seamlessly handles multi-polygon islands and interior cavities with full undo/redo integration.
 - **Cross-Platform Standalone Packaging & Distribution**:
   - **Debian Package (`.deb`)**: Native installable package (`dist/laserforge_1.2.0_amd64.deb`) with start menu icons, dialout permissions, and `.laserproj` MIME types.
   - **Universal Linux AppImage**: Self-contained portable executable running seamlessly across Ubuntu, Debian, Fedora, Arch, and Mint.
@@ -168,6 +182,8 @@ python3 -m laserforge.main
 | **Directional Hatching** | `Ctrl + Shift + H` |
 | **2D Nesting Optimizer** | `Ctrl + Shift + N` |
 | **Rotary Axis Studio** | `Ctrl + Shift + R` |
+| **Box & Enclosure Studio** | `Ctrl + Shift + J` |
+| **Single-Line Stroke Text** | `Ctrl + Shift + F` |
 | **Job Cost & Time Estimator** | `Ctrl + Shift + M` |
 | **Select Tool** | `S` |
 | **Rectangle Tool** | `R` |
@@ -203,7 +219,7 @@ python3 -m laserforge.main
 cd /home/k/LaserForge
 python3 -m unittest discover tests
 ```
-All automated test suites (154 unit tests) verify:
+All automated test suites (186+ unit tests) verify:
 - Geometric entity definitions and boundary math
 - Multi-layer parameter configuration
 - Floyd-Steinberg and Atkinson dithering
