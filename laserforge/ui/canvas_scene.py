@@ -715,7 +715,7 @@ class LaserCanvasScene(QGraphicsScene):
         Executes a vector boolean operation on currently selected shapes.
         mode: 'weld' (union), 'subtract' (difference), 'intersect' (intersection)
         """
-        from laserforge.core.geometry_boolean import VectorBooleanEngine
+        from laserforge.core.boolean_engine import BooleanEngine
 
         selected_items = [i for i in self.selectedItems() if isinstance(i, LaserItemWrapper)]
         if len(selected_items) < 2:
@@ -730,15 +730,17 @@ class LaserCanvasScene(QGraphicsScene):
         # Push undo before executing boolean operation
         self.push_undo_state()
 
-        result_entity = None
-        if mode == "weld":
-            result_entity = VectorBooleanEngine.weld(entities)
-        elif mode == "subtract":
-            result_entity = VectorBooleanEngine.subtract(entities)
+        result_entities = []
+        if mode in ("weld", "union"):
+            result_entities = BooleanEngine.union(entities)
+        elif mode in ("subtract", "difference"):
+            result_entities = BooleanEngine.difference(entities[0], entities[1:])
         elif mode == "intersect":
-            result_entity = VectorBooleanEngine.intersect(entities)
+            result_entities = BooleanEngine.intersection(entities)
+        elif mode in ("xor", "symdiff"):
+            result_entities = BooleanEngine.xor(entities)
 
-        if not result_entity or not result_entity.contours:
+        if not result_entities:
             self.status_message.emit(f"Boolean {mode} resulted in no overlapping or valid geometry")
             return False
 
@@ -746,13 +748,15 @@ class LaserCanvasScene(QGraphicsScene):
         for item in selected_items:
             self.removeItem(item)
 
-        # Add new unified path item
-        new_wrapper = self.add_entity(result_entity)
+        # Add new unified path item(s)
         self.clearSelection()
-        new_wrapper.setSelected(True)
+        for rent in result_entities:
+            new_wrapper = self.add_entity(rent)
+            new_wrapper.setSelected(True)
+
         self.update()
         self.entity_modified.emit()
-        self.status_message.emit(f"Vector {mode.capitalize()} complete: created {result_entity.name}")
+        self.status_message.emit(f"Vector {mode.capitalize()} complete: created {len(result_entities)} shape(s)")
         return True
 
     def delete_selected(self):
