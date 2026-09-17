@@ -327,7 +327,9 @@ class MaterialDatabase:
                     y=sy,
                     width=swatch_size,
                     height=swatch_size,
-                    corner_radius=0.5
+                    corner_radius=0.5,
+                    override_speed=float(spd),
+                    override_power=float(pwr)
                 )
                 entities.append(swatch)
 
@@ -340,7 +342,9 @@ class MaterialDatabase:
                         y=sy + 2.0,
                         width=swatch_size - 4.0,
                         height=swatch_size - 4.0,
-                        corner_radius=0.0
+                        corner_radius=0.0,
+                        override_speed=float(spd),
+                        override_power=float(pwr)
                     )
                     entities.append(inner_swatch)
 

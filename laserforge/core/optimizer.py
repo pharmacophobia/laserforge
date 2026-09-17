@@ -6,7 +6,7 @@ Sorts toolpaths to:
 3. Optimize cutting direction.
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Any, Union
 import math
 import numpy as np
 
@@ -35,6 +35,25 @@ def polygon_bounds(pts: List[Tuple[float, float]]) -> Tuple[float, float, float,
         elif y > max_y: max_y = y
     return (min_x, min_y, max_x, max_y)
 
+def point_in_polygon(x: float, y: float, poly: List[Tuple[float, float]]) -> bool:
+    """Standard ray-casting point-in-polygon test."""
+    n = len(poly)
+    if n < 3:
+        return False
+    inside = False
+    p1x, p1y = poly[0]
+    for i in range(1, n + 1):
+        p2x, p2y = poly[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
 def is_box_inside(inner: Tuple[float, float, float, float], outer: Tuple[float, float, float, float]) -> bool:
     """Checks if bounding box 'inner' is strictly inside bounding box 'outer'."""
     return (inner[0] >= outer[0] - 0.001 and
@@ -48,15 +67,17 @@ class PathOptimizer:
     def optimize_paths(
         paths: List[List[Tuple[float, float]]],
         closed_flags: List[bool] = None,
-        start_pos: Tuple[float, float] = (0.0, 0.0)
-    ) -> List[List[Tuple[float, float]]]:
+        start_pos: Tuple[float, float] = (0.0, 0.0),
+        metadata: Optional[List[Any]] = None
+    ) -> Any:
         """
         Optimizes cutting order:
-        1. Hierarchical inner-first grouping based on bounding box containment.
+        1. Hierarchical inner-first grouping based on true geometric containment.
         2. Nearest-neighbor sorting between disjoint paths.
+        If metadata is provided, returns (ordered_paths, ordered_metadata).
         """
         if not paths:
-            return []
+            return ([], []) if metadata is not None else []
 
         if closed_flags is None:
             closed_flags = [True] * len(paths)
@@ -74,7 +95,8 @@ class PathOptimizer:
                 "closed": closed_flags[i] if i < len(closed_flags) else True,
                 "bounds": (bx1, by1, bx2, by2),
                 "area": area,
-                "depth": 0
+                "depth": 0,
+                "meta": metadata[i] if (metadata is not None and i < len(metadata)) else None
             })
 
         # Sort by area ascending so each item is only ever checked against
@@ -93,8 +115,15 @@ class PathOptimizer:
                 if item_a is item_b or not item_b["closed"]:
                     continue
                 bx1, by1, bx2, by2 = item_b["bounds"]
+                # 1. Quick reject via bounding box
                 if ax1 >= bx1 - 0.001 and ay1 >= by1 - 0.001 and ax2 <= bx2 + 0.001 and ay2 <= by2 + 0.001:
-                    item_a["depth"] += 1
+                    # 2. Geometric point-in-polygon verification to eliminate false nesting
+                    poly_b = item_b["path"]
+                    poly_a = item_a["path"]
+                    test_cx = (ax1 + ax2) / 2.0
+                    test_cy = (ay1 + ay2) / 2.0
+                    if point_in_polygon(test_cx, test_cy, poly_b) or point_in_polygon(poly_a[0][0], poly_a[0][1], poly_b):
+                        item_a["depth"] += 1
 
         # Sort by depth descending (cut deepest inner items first)
         depth_groups = {}
@@ -103,6 +132,7 @@ class PathOptimizer:
             depth_groups.setdefault(d, []).append(item)
 
         ordered_paths = []
+        ordered_meta = []
         current_pos = start_pos
 
         # Process from highest depth (most nested inside) down to 0 (outermost)
@@ -147,8 +177,11 @@ class PathOptimizer:
                     final_path.reverse()
 
                 ordered_paths.append(final_path)
+                ordered_meta.append(chosen["meta"])
                 current_pos = final_path[-1]
 
+        if metadata is not None:
+            return ordered_paths, ordered_meta
         return ordered_paths
 
     @staticmethod

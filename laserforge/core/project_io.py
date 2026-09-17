@@ -37,6 +37,10 @@ class ProjectIO:
                 "rotation": e.rotation,
                 "locked": e.locked
             }
+            if getattr(e, "override_speed", None) is not None:
+                e_dict["override_speed"] = float(e.override_speed)
+            if getattr(e, "override_power", None) is not None:
+                e_dict["override_power"] = float(e.override_power)
             if isinstance(e, RectEntity):
                 e_dict.update({"width": e.width, "height": e.height, "corner_radius": e.corner_radius})
             elif isinstance(e, CircleEntity):
@@ -158,7 +162,9 @@ class ProjectIO:
                 "x": float(d.get("x", 0)),
                 "y": float(d.get("y", 0)),
                 "rotation": float(d.get("rotation", 0)),
-                "locked": bool(d.get("locked", False))
+                "locked": bool(d.get("locked", False)),
+                "override_speed": float(d["override_speed"]) if d.get("override_speed") is not None else None,
+                "override_power": float(d["override_power"]) if d.get("override_power") is not None else None
             }
 
             if etype == "RectEntity":
