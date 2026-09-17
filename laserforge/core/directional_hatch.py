@@ -26,9 +26,12 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Set, Optional, Any
 import math
 import random
+import os
+import concurrent.futures
 import numpy as np
 from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString, GeometryCollection
 from shapely.ops import polygonize, unary_union
+import shapely.affinity
 
 from laserforge.core.models import LaserEntity, PathEntity
 from laserforge.core.geometry_boolean import entity_to_painter_path
@@ -365,59 +368,49 @@ class DirectionalHatchGenerator:
                 ang = base_angle + ((col % 2) * 2 - 1) * dev_scale * (0.3 + 0.7 * rng.random())
             angles[u] = ang % 180.0
 
-        def compute_energy(current_angles: List[float]) -> float:
-            total_energy = 0.0
-            # 1. Neighbor constraint & target penalty
-            for (u, v), target in target_diffs.items():
-                if u < v:
-                    diff = angular_difference(current_angles[u], current_angles[v])
-                    if diff < min_diff:
-                        # Heavy quadratic barrier penalty for violating min difference
-                        total_energy += 100000.0 * ((min_diff - diff) ** 2)
-                    else:
-                        total_energy += (diff - target) ** 2
+        def node_energy(u: int, val: float) -> float:
+            e = 0.0
+            for v in neighbors[u]:
+                pair = (min(u, v), max(u, v))
+                target = target_diffs.get(pair, min_diff)
+                diff = angular_difference(val, angles[v])
+                if diff < min_diff:
+                    e += 100000.0 * ((min_diff - diff) ** 2)
+                else:
+                    e += (diff - target) ** 2
+            r = polygons[u].radial_distance
+            base_diff = angular_difference(val, base_angle)
+            e += 4.0 * (r ** 2) * (base_diff ** 2)
+            return e
 
-            # 2. Attraction to baseline (vertical) proportional to radial distance
-            # As r -> 1.0 (approaching edge), strong pull toward baseline vertical lines!
-            for u in range(n):
-                r = polygons[u].radial_distance
-                base_diff = angular_difference(current_angles[u], base_angle)
-                # Outer vectors are penalized heavily for deviating from vertical
-                total_energy += 4.0 * (r ** 2) * (base_diff ** 2)
-
-            return total_energy
-
-        # 3. Simulated Annealing / Coordinate Optimization
-        current_energy = compute_energy(angles)
-        best_angles = list(angles)
-        best_energy = current_energy
-
+        # 3. Fast Simulated Annealing with Local Energy Delta Updates
         temp = 45.0
-        cooling_rate = 0.96
-        iterations_per_temp = min(150, max(30, n * 5))
+        cooling_rate = 0.95
+        iterations_per_temp = min(100, max(25, n * 3))
+        best_angles = list(angles)
+        best_penalty = sum(
+            1.0 for u in range(n) for v in neighbors[u]
+            if u < v and angular_difference(angles[u], angles[v]) < min_diff
+        )
 
-        for step in range(120):
+        for step in range(80):
             for _ in range(iterations_per_temp):
                 u = rng.randrange(n)
                 old_val = angles[u]
-                # Perturbation size scales with temperature
                 delta = rng.gauss(0.0, temp)
                 candidate = (old_val + delta) % 180.0
-                angles[u] = candidate
-                new_energy = compute_energy(angles)
 
-                dE = new_energy - current_energy
+                old_e = node_energy(u, old_val)
+                angles[u] = candidate
+                new_e = node_energy(u, candidate)
+                dE = new_e - old_e
+
                 if dE < 0 or (temp > 0.01 and rng.random() < math.exp(-dE / max(temp, 0.1))):
-                    current_energy = new_energy
-                    if current_energy < best_energy:
-                        best_energy = current_energy
-                        best_angles = list(angles)
+                    pass
                 else:
                     angles[u] = old_val
 
             temp *= cooling_rate
-
-        angles = list(best_angles)
 
         # 4. Strict Deterministic Projection / Constraint Enforcement
         # Ensure 100% compliance with min_neighbor_angle_diff
@@ -470,7 +463,191 @@ class DirectionalHatchGenerator:
         return {i: float(angles[i]) for i in range(n)}
 
     @staticmethod
+    def _generate_hatch_lines_vectorized(
+        geom: Any,
+        angle_deg: float,
+        line_spacing_mm: float = 1.0,
+        serpentine: bool = True
+    ) -> List[List[Tuple[float, float]]]:
+        """
+        Ultra-fast vectorized scanline hatch generation using Jordan curve ray casting.
+        Rotates polygon by -angle_deg so scanlines are horizontal, computes all edge
+        intercepts simultaneously via NumPy SIMD broadcasting, and rotates back.
+        """
+        cx, cy = geom.centroid.x, geom.centroid.y
+        rad = math.radians(angle_deg)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+
+        rot_geom = shapely.affinity.rotate(geom, -angle_deg, origin=(cx, cy))
+        if rot_geom.is_empty:
+            return []
+
+        min_x, min_y, max_x, max_y = rot_geom.bounds
+        spacing = max(0.05, line_spacing_mm)
+        height = max_y - min_y
+        steps = int(math.ceil(height / spacing))
+        if steps <= 0:
+            return []
+
+        start_y = min_y + (height - (steps - 1) * spacing) / 2.0
+        y_levels = start_y + np.arange(steps, dtype=np.float64) * spacing
+
+        sub_geoms = rot_geom.geoms if hasattr(rot_geom, 'geoms') else [rot_geom]
+        edges_list = []
+        for poly in sub_geoms:
+            if not hasattr(poly, 'exterior') or poly.exterior is None:
+                continue
+            rings = [poly.exterior] + list(poly.interiors)
+            for ring in rings:
+                coords = np.asarray(ring.coords, dtype=np.float64)
+                if len(coords) < 2:
+                    continue
+                p1 = coords[:-1]
+                p2 = coords[1:]
+                dy = p2[:, 1] - p1[:, 1]
+                non_horiz = np.abs(dy) > 1e-12
+                if not np.any(non_horiz):
+                    continue
+                p1_v = p1[non_horiz]
+                p2_v = p2[non_horiz]
+                dy_v = dy[non_horiz]
+                dx_v = p2_v[:, 0] - p1_v[:, 0]
+
+                y_low = np.minimum(p1_v[:, 1], p2_v[:, 1])
+                y_high = np.maximum(p1_v[:, 1], p2_v[:, 1])
+                inv_slope = dx_v / dy_v
+                edge_data = np.column_stack([y_low, y_high, p1_v[:, 0], p1_v[:, 1], inv_slope])
+                edges_list.append(edge_data)
+
+        if not edges_list:
+            return []
+
+        all_edges = np.vstack(edges_list)
+        Y = y_levels[:, None]
+        y_low = all_edges[None, :, 0]
+        y_high = all_edges[None, :, 1]
+        x1 = all_edges[None, :, 2]
+        y1 = all_edges[None, :, 3]
+        inv_slope = all_edges[None, :, 4]
+
+        mask = (Y >= y_low) & (Y < y_high)
+        x_intercepts = np.where(mask, x1 + inv_slope * (Y - y1), np.inf)
+        x_sorted = np.sort(x_intercepts, axis=1)
+        counts = np.sum(mask, axis=1)
+
+        result_lines: List[List[Tuple[float, float]]] = []
+        for step_idx in range(steps):
+            cnt = counts[step_idx]
+            if cnt < 2:
+                continue
+            pair_count = (cnt // 2) * 2
+            row_y = y_levels[step_idx]
+
+            for j in range(0, pair_count, 2):
+                x_left = x_sorted[step_idx, j]
+                x_right = x_sorted[step_idx, j + 1]
+                if (x_right - x_left) < 1e-4:
+                    continue
+
+                dx_l = x_left - cx
+                dy_l = row_y - cy
+                orig_lx = cx + (dx_l * cos_a - dy_l * sin_a)
+                orig_ly = cy + (dx_l * sin_a + dy_l * cos_a)
+
+                dx_r = x_right - cx
+                dy_r = row_y - cy
+                orig_rx = cx + (dx_r * cos_a - dy_r * sin_a)
+                orig_ry = cy + (dx_r * sin_a + dy_r * cos_a)
+
+                pt1 = (float(orig_lx), float(orig_ly))
+                pt2 = (float(orig_rx), float(orig_ry))
+
+                if serpentine and (step_idx % 2 == 1):
+                    result_lines.append([pt2, pt1])
+                else:
+                    result_lines.append([pt1, pt2])
+
+        return result_lines
+
+    @staticmethod
+    def _generate_hatch_lines_fallback(
+        geom: Any,
+        poly: VectorPolygon,
+        angle: float,
+        line_spacing_mm: float = 1.0,
+        serpentine: bool = True
+    ) -> List[List[Tuple[float, float]]]:
+        """Fallback geometry clipper using Shapely LineString intersection."""
+        min_x, min_y, max_x, max_y = poly.bounds
+        width = max_x - min_x
+        height = max_y - min_y
+        diag = math.hypot(width, height) + line_spacing_mm * 2.0
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+
+        rad = math.radians(angle)
+        dir_x = math.cos(rad)
+        dir_y = math.sin(rad)
+        norm_x = -dir_y
+        norm_y = dir_x
+
+        coords = list(geom.exterior.coords)
+        projections = [p[0] * norm_x + p[1] * norm_y for p in coords]
+        min_proj = min(projections)
+        max_proj = max(projections)
+        t_center = cx * norm_x + cy * norm_y
+
+        spacing = max(0.05, line_spacing_mm)
+        steps = int(math.ceil((max_proj - min_proj) / spacing))
+        if steps <= 0:
+            return []
+
+        start_t = min_proj + (max_proj - min_proj - (steps - 1) * spacing) / 2.0
+        lines_at_angle: List[List[Tuple[float, float]]] = []
+
+        for step_idx in range(steps):
+            t = start_t + step_idx * spacing
+            pmid_x = cx + (t - t_center) * norm_x
+            pmid_y = cy + (t - t_center) * norm_y
+
+            p1_x = pmid_x - diag * dir_x
+            p1_y = pmid_y - diag * dir_y
+            p2_x = pmid_x + diag * dir_x
+            p2_y = pmid_y + diag * dir_y
+
+            probe_line = LineString([(p1_x, p1_y), (p2_x, p2_y)])
+            try:
+                clipped = geom.intersection(probe_line)
+            except Exception:
+                continue
+
+            if clipped.is_empty:
+                continue
+
+            segments: List[LineString] = []
+            if clipped.geom_type == 'LineString':
+                segments.append(clipped)
+            elif clipped.geom_type == 'MultiLineString':
+                segments.extend(list(clipped.geoms))
+            elif clipped.geom_type == 'GeometryCollection':
+                for g in clipped.geoms:
+                    if g.geom_type == 'LineString':
+                        segments.append(g)
+
+            for seg in segments:
+                if seg.length < 1e-4:
+                    continue
+                seg_coords = list(seg.coords)
+                if serpentine and (step_idx % 2 == 1):
+                    seg_coords.reverse()
+                lines_at_angle.append([(float(x), float(y)) for x, y in seg_coords])
+
+        return lines_at_angle
+
+    @classmethod
     def generate_hatch_lines_for_polygon(
+        cls,
         poly: VectorPolygon,
         angle_deg: float,
         line_spacing_mm: float = 1.0,
@@ -479,20 +656,13 @@ class DirectionalHatchGenerator:
     ) -> List[List[Tuple[float, float]]]:
         """
         Generates parallel scanline toolpaths clipped strictly within the polygon boundary.
+        Uses ultra-fast vectorized scanline sweep with fallback to Shapely intersection.
         Supports serpentine (zig-zag) chaining to minimize laser G0 rapid moves.
         """
         if poly.shapely_polygon is None or poly.shapely_polygon.is_empty:
             return []
 
         geom = poly.shapely_polygon
-        min_x, min_y, max_x, max_y = poly.bounds
-
-        width = max_x - min_x
-        height = max_y - min_y
-        diag = math.hypot(width, height) + line_spacing_mm * 2.0
-        cx = (min_x + max_x) / 2.0
-        cy = (min_y + max_y) / 2.0
-
         angles_to_render = [angle_deg % 180.0]
         if cross_hatch:
             angles_to_render.append((angle_deg + 90.0) % 180.0)
@@ -500,71 +670,28 @@ class DirectionalHatchGenerator:
         all_line_segments: List[List[Tuple[float, float]]] = []
 
         for angle in angles_to_render:
-            rad = math.radians(angle)
-            # Direction vector along the cut line
-            dir_x = math.cos(rad)
-            dir_y = math.sin(rad)
-            # Normal vector perpendicular to the cut line
-            norm_x = -dir_y
-            norm_y = dir_x
+            lines: List[List[Tuple[float, float]]] = []
+            try:
+                lines = cls._generate_hatch_lines_vectorized(
+                    geom=geom,
+                    angle_deg=angle,
+                    line_spacing_mm=line_spacing_mm,
+                    serpentine=serpentine
+                )
+            except Exception:
+                lines = []
 
-            # Determine range of offsets along the normal axis
-            # Project polygon exterior vertices onto the normal
-            coords = list(geom.exterior.coords)
-            projections = [p[0] * norm_x + p[1] * norm_y for p in coords]
-            min_proj = min(projections)
-            max_proj = max(projections)
-            t_center = cx * norm_x + cy * norm_y
+            # If vectorized sweep yielded no lines on a non-trivial polygon, use fallback
+            if not lines and geom.area > 1e-4:
+                lines = cls._generate_hatch_lines_fallback(
+                    geom=geom,
+                    poly=poly,
+                    angle=angle,
+                    line_spacing_mm=line_spacing_mm,
+                    serpentine=serpentine
+                )
 
-            spacing = max(0.05, line_spacing_mm)
-            steps = int(math.ceil((max_proj - min_proj) / spacing))
-            if steps <= 0:
-                continue
-
-            start_t = min_proj + (max_proj - min_proj - (steps - 1) * spacing) / 2.0
-            lines_at_angle: List[List[Tuple[float, float]]] = []
-
-            for step_idx in range(steps):
-                t = start_t + step_idx * spacing
-                # Point on line closest to polygon center
-                pmid_x = cx + (t - t_center) * norm_x
-                pmid_y = cy + (t - t_center) * norm_y
-
-                # Line segment extending across the bounding diameter
-                p1_x = pmid_x - diag * dir_x
-                p1_y = pmid_y - diag * dir_y
-                p2_x = pmid_x + diag * dir_x
-                p2_y = pmid_y + diag * dir_y
-
-                probe_line = LineString([(p1_x, p1_y), (p2_x, p2_y)])
-                try:
-                    clipped = geom.intersection(probe_line)
-                except Exception:
-                    continue
-
-                if clipped.is_empty:
-                    continue
-
-                segments: List[LineString] = []
-                if clipped.geom_type == 'LineString':
-                    segments.append(clipped)
-                elif clipped.geom_type == 'MultiLineString':
-                    segments.extend(list(clipped.geoms))
-                elif clipped.geom_type == 'GeometryCollection':
-                    for g in clipped.geoms:
-                        if g.geom_type == 'LineString':
-                            segments.append(g)
-
-                for seg in segments:
-                    if seg.length < 1e-4:
-                        continue
-                    seg_coords = list(seg.coords)
-                    # Serpentine reversal: alternate direction on alternating passes
-                    if serpentine and (step_idx % 2 == 1):
-                        seg_coords.reverse()
-                    lines_at_angle.append([(float(x), float(y)) for x, y in seg_coords])
-
-            all_line_segments.extend(lines_at_angle)
+            all_line_segments.extend(lines)
 
         return all_line_segments
 
@@ -601,21 +728,31 @@ class DirectionalHatchGenerator:
         for poly in polygons:
             poly.assigned_angle = assigned_angles.get(poly.index, settings.baseline_angle_deg)
 
+        # Multi-threaded parallel hatch generation across polygons
+        def _hatch_worker(p: VectorPolygon) -> Tuple[VectorPolygon, List[List[Tuple[float, float]]]]:
+            lines = cls.generate_hatch_lines_for_polygon(
+                poly=p,
+                angle_deg=p.assigned_angle,
+                line_spacing_mm=settings.line_spacing_mm,
+                cross_hatch=settings.cross_hatch,
+                serpentine=settings.serpentine_toolpath
+            )
+            return (p, lines)
+
+        max_workers = min(12, max(1, os.cpu_count() or 4))
+        if len(polygons) > 1 and max_workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                poly_hatch_results = list(executor.map(_hatch_worker, polygons))
+        else:
+            poly_hatch_results = [_hatch_worker(p) for p in polygons]
+
         # Generate hatching toolpath line contours for each polygon
         hatched_entities: List[PathEntity] = []
         total_length = 0.0
         total_lines = 0
 
-        for poly in polygons:
+        for poly, line_contours in poly_hatch_results:
             ang = poly.assigned_angle
-            line_contours = cls.generate_hatch_lines_for_polygon(
-                poly=poly,
-                angle_deg=ang,
-                line_spacing_mm=settings.line_spacing_mm,
-                cross_hatch=settings.cross_hatch,
-                serpentine=settings.serpentine_toolpath
-            )
-
             for line in line_contours:
                 if len(line) >= 2:
                     for k in range(len(line) - 1):

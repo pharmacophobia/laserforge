@@ -292,7 +292,7 @@ class DirectionalHatchDialog(QDialog):
         # Internal debounce timer for live regeneration
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
-        self._update_timer.setInterval(80)
+        self._update_timer.setInterval(180)
         self._update_timer.timeout.connect(self._run_generation)
 
         self._build_ui()
