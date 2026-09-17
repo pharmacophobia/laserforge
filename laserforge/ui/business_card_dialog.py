@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
     QComboBox, QGroupBox, QTabWidget, QSplitter, QFrame, QMessageBox,
-    QFileDialog
+    QFileDialog, QFontComboBox
 )
 from PyQt6.QtCore import Qt, QRectF, QPointF
 from PyQt6.QtGui import (
@@ -29,17 +29,18 @@ class CardPreviewCanvas(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.config = BusinessCardConfig()
-        self.setMinimumSize(420, 280)
-        self.setStyleSheet("background-color: #1a1a24; border-radius: 6px;")
+        self.setMinimumSize(360, 220)
 
-    def update_config(self, cfg: BusinessCardConfig):
-        self.config = cfg
+    def update_config(self, config: BusinessCardConfig):
+        self.config = config
         self.update()
 
     def paintEvent(self, event: QPaintEvent):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#14141e"))
+
+        # Clear background
+        painter.fillRect(self.rect(), QColor("#181920"))
 
         w_mm = self.config.width
         h_mm = self.config.height
@@ -92,9 +93,10 @@ class CardPreviewCanvas(QWidget):
 
             elif isinstance(ent, TextEntity):
                 painter.setPen(QColor("#f0f4f8"))
-                font = QFont("sans-serif")
-                font.setPointSizeF(max(1.8, ent.font_size * 0.72))
+                font = QFont(getattr(ent, "font_family", "Sans Serif") or "Sans Serif")
+                font.setPointSizeF(max(1.2, ent.font_size * 1.5))
                 font.setBold(ent.bold)
+                font.setItalic(ent.italic)
                 painter.setFont(font)
                 painter.drawText(
                     QRectF(ent.x, ent.y, ent.width, ent.height),
@@ -223,45 +225,75 @@ class BusinessCardStudioDialog(QDialog):
 
         design_layout.addWidget(preset_group)
 
-        # Card Content Info
+        # Card Content Info & Typography
         info_group = QGroupBox("Card Content && Typography")
         info_grid = QGridLayout(info_group)
         info_grid.setSpacing(4)
 
-        info_grid.addWidget(QLabel("Company / Brand:"), 0, 0)
+        info_grid.addWidget(QLabel("Layout Style:"), 0, 0)
+        self.combo_layout_style = QComboBox()
+        self.combo_layout_style.addItems(["Modern Split", "Centered Classic", "Minimalist"])
+        self.combo_layout_style.currentTextChanged.connect(self._update_preview)
+        info_grid.addWidget(self.combo_layout_style, 0, 1)
+
+        info_grid.addWidget(QLabel("Font Family:"), 1, 0)
+        self.font_combo = QFontComboBox()
+        self.font_combo.setCurrentFont(QFont("Sans Serif"))
+        self.font_combo.currentFontChanged.connect(self._update_preview)
+        info_grid.addWidget(self.font_combo, 1, 1)
+
+        # Typography Scale & Auto-fit row
+        scale_row = QHBoxLayout()
+        scale_row.addWidget(QLabel("Text Scale:"))
+        self.spin_font_scale = QDoubleSpinBox()
+        self.spin_font_scale.setRange(50.0, 160.0)
+        self.spin_font_scale.setValue(100.0)
+        self.spin_font_scale.setSingleStep(5.0)
+        self.spin_font_scale.setSuffix(" %")
+        self.spin_font_scale.valueChanged.connect(self._update_preview)
+        scale_row.addWidget(self.spin_font_scale)
+
+        self.chk_auto_fit = QCheckBox("Auto-Fit to Card")
+        self.chk_auto_fit.setChecked(True)
+        self.chk_auto_fit.setToolTip("Automatically scales text so long names never overflow or touch the QR code")
+        self.chk_auto_fit.toggled.connect(self._update_preview)
+        scale_row.addWidget(self.chk_auto_fit)
+        info_grid.addLayout(scale_row, 2, 0, 1, 2)
+
+        info_grid.addWidget(QLabel("Company / Brand:"), 3, 0)
         self.txt_company = QLineEdit("FORGE DYNAMICS")
         self.txt_company.textChanged.connect(self._update_preview)
-        info_grid.addWidget(self.txt_company, 0, 1)
+        info_grid.addWidget(self.txt_company, 3, 1)
 
-        info_grid.addWidget(QLabel("Tagline:"), 1, 0)
+        info_grid.addWidget(QLabel("Tagline:"), 4, 0)
         self.txt_tagline = QLineEdit("Precision Laser Engineering")
         self.txt_tagline.textChanged.connect(self._update_preview)
-        info_grid.addWidget(self.txt_tagline, 1, 1)
+        info_grid.addWidget(self.txt_tagline, 4, 1)
 
-        info_grid.addWidget(QLabel("Cardholder Name:"), 2, 0)
+        info_grid.addWidget(QLabel("Cardholder Name:"), 5, 0)
         self.txt_name = QLineEdit("Alex Mercer")
         self.txt_name.textChanged.connect(self._update_preview)
-        info_grid.addWidget(self.txt_name, 2, 1)
+        info_grid.addWidget(self.txt_name, 5, 1)
 
-        info_grid.addWidget(QLabel("Job Title:"), 3, 0)
+        info_grid.addWidget(QLabel("Job Title:"), 6, 0)
         self.txt_title = QLineEdit("Lead Laser Specialist")
         self.txt_title.textChanged.connect(self._update_preview)
-        info_grid.addWidget(self.txt_title, 3, 1)
+        info_grid.addWidget(self.txt_title, 6, 1)
 
-        info_grid.addWidget(QLabel("Phone:"), 4, 0)
+        info_grid.addWidget(QLabel("Phone:"), 7, 0)
         self.txt_phone = QLineEdit("+1 (555) 382-9104")
         self.txt_phone.textChanged.connect(self._update_preview)
-        info_grid.addWidget(self.txt_phone, 4, 1)
+        info_grid.addWidget(self.txt_phone, 7, 1)
 
-        info_grid.addWidget(QLabel("Email:"), 5, 0)
+        info_grid.addWidget(QLabel("Email:"), 8, 0)
         self.txt_email = QLineEdit("alex@forgedynamics.com")
         self.txt_email.textChanged.connect(self._update_preview)
-        info_grid.addWidget(self.txt_email, 5, 1)
+        info_grid.addWidget(self.txt_email, 8, 1)
 
-        info_grid.addWidget(QLabel("Website:"), 6, 0)
+        info_grid.addWidget(QLabel("Website:"), 9, 0)
         self.txt_web = QLineEdit("https://forgedynamics.com")
         self.txt_web.textChanged.connect(self._update_preview)
-        info_grid.addWidget(self.txt_web, 6, 1)
+        info_grid.addWidget(self.txt_web, 9, 1)
 
         design_layout.addWidget(info_group)
 
@@ -400,6 +432,10 @@ class BusinessCardStudioDialog(QDialog):
             height=self.spin_height.value(),
             corner_radius=self.spin_radius.value(),
             border_mode=self.combo_border.currentData() or "guide",
+            layout_style=self.combo_layout_style.currentText(),
+            font_family=self.font_combo.currentFont().family(),
+            font_scale=self.spin_font_scale.value() / 100.0,
+            auto_fit_text=self.chk_auto_fit.isChecked(),
             company_name=self.txt_company.text().strip(),
             tagline=self.txt_tagline.text().strip(),
             person_name=self.txt_name.text().strip(),

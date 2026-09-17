@@ -114,6 +114,11 @@ class BusinessCardConfig:
     website: str = "https://forgedynamics.com"
     tagline: str = "Precision Laser Engineering & Fabrication"
 
+    # Typography & Scaling
+    font_family: str = "Sans Serif"
+    font_scale: float = 1.0       # Global typography scale factor (0.5 to 2.0)
+    auto_fit_text: bool = True    # Auto-scale text lines to fit inside available card width
+
     # QR Code
     include_qr: bool = True
     qr_data: str = "https://forgedynamics.com"
@@ -124,6 +129,38 @@ class BusinessCardConfig:
     layout_style: str = "Modern Split"  # "Modern Split", "Centered Classic", "Minimalist"
     artwork_layer_id: int = 0  # C00 Black
     border_layer_id: int = 12  # T1 Tool guide
+
+
+def _measure_text_metrics(text: str, font_size_mm: float, bold: bool = False, font_family: str = "Sans Serif") -> Tuple[float, float, float]:
+    """Measures (advance_w, height, cap_height) in mm for text using standardized font scaling."""
+    try:
+        from PyQt6.QtGui import QFont, QFontMetricsF
+        f = QFont(font_family)
+        f.setPointSizeF(max(1.0, font_size_mm * 1.5))
+        f.setBold(bold)
+        fm = QFontMetricsF(f)
+        return float(fm.horizontalAdvance(text)), float(fm.height()), float(fm.capHeight())
+    except Exception:
+        char_w = font_size_mm * (0.65 if bold else 0.55)
+        return float(len(text) * char_w), float(font_size_mm * 1.35), float(font_size_mm * 0.72)
+
+
+def _auto_fit_text_size(
+    text: str,
+    base_fs: float,
+    max_w: float,
+    bold: bool = False,
+    font_family: str = "Sans Serif",
+    min_fs: float = 1.0
+) -> Tuple[float, float, float]:
+    """Auto-scales base_fs down if text exceeds max_w. Returns (fitted_fs, measured_width, measured_height)."""
+    w, h, _ = _measure_text_metrics(text, base_fs, bold, font_family)
+    if w > max_w and w > 0:
+        ratio = max(0.05, (max_w - 0.5) / w)
+        fitted = max(min_fs, base_fs * ratio)
+        w, h, _ = _measure_text_metrics(text, fitted, bold, font_family)
+        return fitted, w, h
+    return base_fs, w, h
 
 
 class BusinessCardGenerator:
@@ -161,9 +198,9 @@ class BusinessCardGenerator:
         qr_placed = False
         qr_x = 0.0
         qr_y = 0.0
-        qr_s = min(cfg.qr_size, h - margin * 2)
+        qr_s = min(cfg.qr_size, h - margin * 2) if (cfg.include_qr and cfg.qr_data) else 0.0
 
-        if cfg.include_qr and cfg.qr_data:
+        if cfg.include_qr and cfg.qr_data and qr_s > 0:
             if cfg.qr_position == "Right":
                 qr_x = origin_x + w - qr_s - margin
                 qr_y = origin_y + (h - qr_s) / 2.0
@@ -186,115 +223,143 @@ class BusinessCardGenerator:
             entities.append(qr_ent)
             qr_placed = True
 
-        # 3. Typography Positioning based on layout style
-        text_start_x = origin_x + margin
-        avail_text_w = (w - qr_s - margin * 3) if (qr_placed and cfg.qr_position == "Right") else (w - margin * 2)
+        # 3. Typography Configuration & Dimensions
+        font_scale = max(0.4, min(2.5, getattr(cfg, "font_scale", 1.0)))
+        font_fam = getattr(cfg, "font_family", "Sans Serif") or "Sans Serif"
+        auto_fit = getattr(cfg, "auto_fit_text", True)
 
-        if qr_placed and cfg.qr_position == "Left":
-            text_start_x = origin_x + qr_s + margin * 2
-            avail_text_w = w - qr_s - margin * 3
+        if qr_placed and cfg.qr_position == "Right":
+            avail_text_w = max(10.0, w - qr_s - margin * 3.0)
+            text_start_x = origin_x + margin
+        elif qr_placed and cfg.qr_position == "Left":
+            avail_text_w = max(10.0, w - qr_s - margin * 3.0)
+            text_start_x = origin_x + qr_s + margin * 2.0
+        elif qr_placed and cfg.qr_position == "Bottom-Right":
+            avail_text_w = max(10.0, w - margin * 2.0)
+            text_start_x = origin_x + margin
+        else:
+            avail_text_w = max(10.0, w - margin * 2.0)
+            text_start_x = origin_x + margin
 
+        y_cursor = origin_y + margin + 2.5
+
+        def _add_line(
+            txt: str,
+            base_fs: float,
+            name: str,
+            bold: bool = False,
+            is_center: bool = False,
+            center_x_pos: float = 0.0,
+            x_override: Optional[float] = None,
+            max_w_override: Optional[float] = None
+        ) -> float:
+            nonlocal y_cursor
+            if not txt.strip():
+                return 0.0
+            col_w = max_w_override if max_w_override is not None else avail_text_w
+            scaled_target_fs = base_fs * font_scale
+            if auto_fit:
+                fs, lw, lh = _auto_fit_text_size(txt, scaled_target_fs, col_w, bold=bold, font_family=font_fam)
+            else:
+                fs = scaled_target_fs
+                lw, lh, _ = _measure_text_metrics(txt, fs, bold=bold, font_family=font_fam)
+
+            ent_w = max(5.0, lw + 2.0)
+            ent_h = max(2.5, lh)
+
+            if is_center:
+                lx = center_x_pos - ent_w / 2.0
+            elif x_override is not None:
+                lx = x_override
+            else:
+                lx = text_start_x
+
+            entities.append(TextEntity(
+                layer_id=cfg.artwork_layer_id,
+                name=name,
+                x=lx,
+                y=y_cursor,
+                width=ent_w,
+                height=ent_h,
+                font_size=fs,
+                font_family=font_fam,
+                bold=bold,
+                text=txt
+            ))
+            step = max(2.8, ent_h * 0.72 + 1.2)
+            y_cursor += step
+            return step
+
+        # Layout-specific typography placement
         if cfg.layout_style == "Centered Classic":
-            cx = origin_x + w / 2.0
-            y_cursor = origin_y + margin + 4.0
+            cx = origin_x + (w / 2.0 if not qr_placed or cfg.qr_position == "Bottom-Right" else (text_start_x + avail_text_w / 2.0))
+            y_cursor = origin_y + margin + 2.0
 
-            if cfg.company_name:
-                entities.append(TextEntity(
-                    layer_id=cfg.artwork_layer_id, name="Company_Name",
-                    x=cx - avail_text_w / 2.0, y=y_cursor,
-                    width=avail_text_w, height=5.5,
-                    font_size=5.5, bold=True, text=cfg.company_name
-                ))
-                y_cursor += 7.0
+            _add_line(cfg.company_name, 3.6, "Company_Name", bold=True, is_center=True, center_x_pos=cx)
+            _add_line(cfg.tagline, 1.8, "Company_Tagline", bold=False, is_center=True, center_x_pos=cx)
+            y_cursor += 1.5
 
-            if cfg.person_name:
-                entities.append(TextEntity(
-                    layer_id=cfg.artwork_layer_id, name="Person_Name",
-                    x=cx - avail_text_w / 2.0, y=y_cursor,
-                    width=avail_text_w, height=4.5,
-                    font_size=4.5, bold=True, text=cfg.person_name
-                ))
-                y_cursor += 5.5
+            _add_line(cfg.person_name, 3.0, "Person_Name", bold=True, is_center=True, center_x_pos=cx)
+            _add_line(cfg.title, 2.0, "Job_Title", bold=False, is_center=True, center_x_pos=cx)
+            y_cursor += 1.5
 
-            if cfg.title:
-                entities.append(TextEntity(
-                    layer_id=cfg.artwork_layer_id, name="Job_Title",
-                    x=cx - avail_text_w / 2.0, y=y_cursor,
-                    width=avail_text_w, height=3.2,
-                    font_size=3.2, text=cfg.title
-                ))
-                y_cursor += 5.5
-
-            # Contact lines
             contacts = [c for c in (cfg.phone, cfg.email, cfg.website) if c]
             for c_txt in contacts:
-                entities.append(TextEntity(
-                    layer_id=cfg.artwork_layer_id, name="Contact_Line",
-                    x=cx - avail_text_w / 2.0, y=y_cursor,
-                    width=avail_text_w, height=2.6,
-                    font_size=2.6, text=c_txt
-                ))
-                y_cursor += 3.8
+                if y_cursor + 2.5 < origin_y + h - margin:
+                    _add_line(c_txt, 1.7, "Contact_Line", bold=False, is_center=True, center_x_pos=cx)
 
-        else:
-            # Modern Split (Left text, right QR)
+        elif cfg.layout_style == "Minimalist":
             y_cursor = origin_y + margin + 3.0
-
-            if cfg.company_name:
-                entities.append(TextEntity(
-                    layer_id=cfg.artwork_layer_id, name="Company_Name",
-                    x=text_start_x, y=y_cursor,
-                    width=avail_text_w, height=5.5,
-                    font_size=5.5, bold=True, text=cfg.company_name
-                ))
-                y_cursor += 7.5
-
+            _add_line(cfg.company_name, 3.2, "Company_Name", bold=True)
             if cfg.tagline:
-                entities.append(TextEntity(
-                    layer_id=cfg.artwork_layer_id, name="Company_Tagline",
-                    x=text_start_x, y=y_cursor,
-                    width=avail_text_w, height=2.4,
-                    font_size=2.4, text=cfg.tagline
-                ))
-                y_cursor += 5.0
+                _add_line(cfg.tagline, 1.6, "Company_Tagline", bold=False)
 
-            # Subtle accent separator line
+            y_cursor += 4.0
+            _add_line(cfg.person_name, 3.2, "Person_Name", bold=True)
+            _add_line(cfg.title, 1.9, "Job_Title", bold=False)
+
+            # Clean minimal divider line
             line_y = y_cursor + 1.0
             entities.append(LineEntity(
                 layer_id=cfg.artwork_layer_id, name="Accent_Line",
                 x=text_start_x, y=line_y,
-                x2=text_start_x + min(40.0, avail_text_w), y2=line_y
+                x2=text_start_x + min(25.0, avail_text_w), y2=line_y
             ))
-            y_cursor += 4.5
-
-            if cfg.person_name:
-                entities.append(TextEntity(
-                    layer_id=cfg.artwork_layer_id, name="Person_Name",
-                    x=text_start_x, y=y_cursor,
-                    width=avail_text_w, height=4.2,
-                    font_size=4.2, bold=True, text=cfg.person_name
-                ))
-                y_cursor += 5.5
-
-            if cfg.title:
-                entities.append(TextEntity(
-                    layer_id=cfg.artwork_layer_id, name="Job_Title",
-                    x=text_start_x, y=y_cursor,
-                    width=avail_text_w, height=3.0,
-                    font_size=3.0, text=cfg.title
-                ))
-                y_cursor += 5.0
+            y_cursor += 3.5
 
             contacts = [c for c in (cfg.phone, cfg.email, cfg.website) if c]
             for c_txt in contacts:
-                if y_cursor + 3.0 < origin_y + h - margin:
-                    entities.append(TextEntity(
-                        layer_id=cfg.artwork_layer_id, name="Contact_Line",
-                        x=text_start_x, y=y_cursor,
-                        width=avail_text_w, height=2.5,
-                        font_size=2.5, text=c_txt
-                    ))
-                    y_cursor += 3.8
+                if y_cursor + 2.5 < origin_y + h - margin:
+                    _add_line(c_txt, 1.6, "Contact_Line", bold=False)
+
+        else:
+            # Modern Split (default)
+            y_cursor = origin_y + margin + 2.5
+            _add_line(cfg.company_name, 3.4, "Company_Name", bold=True)
+            if cfg.tagline:
+                _add_line(cfg.tagline, 1.8, "Company_Tagline", bold=False)
+
+            # Elegant accent line
+            line_y = y_cursor + 1.0
+            entities.append(LineEntity(
+                layer_id=cfg.artwork_layer_id, name="Accent_Line",
+                x=text_start_x, y=line_y,
+                x2=text_start_x + min(35.0, avail_text_w), y2=line_y
+            ))
+            y_cursor += 3.5
+
+            if cfg.person_name:
+                _add_line(cfg.person_name, 2.8, "Person_Name", bold=True)
+            if cfg.title:
+                _add_line(cfg.title, 2.0, "Job_Title", bold=False)
+
+            y_cursor += 1.5
+
+            contacts = [c for c in (cfg.phone, cfg.email, cfg.website) if c]
+            for c_txt in contacts:
+                c_max_w = avail_text_w if (not qr_placed or cfg.qr_position != "Bottom-Right") else (w - qr_s - margin * 3.0)
+                if y_cursor + 2.5 < origin_y + h - margin:
+                    _add_line(c_txt, 1.7, "Contact_Line", bold=False, max_w_override=c_max_w)
 
         return entities
 

@@ -318,7 +318,8 @@ class LaserCanvasView(QGraphicsView):
                     if hasattr(self.scene(), "push_undo_state"):
                         self.scene().push_undo_state()
                     selected_text_ent.text = new_text
-                    font = QFont(selected_text_ent.font_family, max(4, int(round(selected_text_ent.font_size * 2))))
+                    font = QFont(selected_text_ent.font_family)
+                    font.setPointSizeF(max(1.2, selected_text_ent.font_size * 1.5))
                     fm = QFontMetricsF(font)
                     tw = max(10.0, fm.horizontalAdvance(new_text) + 6.0)
                     selected_text_ent.width = max(selected_text_ent.width, tw)

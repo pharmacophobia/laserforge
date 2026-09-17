@@ -462,7 +462,8 @@ class ShapePropertiesPanel(QWidget):
         for item in selected_items:
             if isinstance(item.entity, TextEntity):
                 item.entity.text = text
-                font = QFont(item.entity.font_family, max(4, int(round(item.entity.font_size * 2))))
+                font = QFont(item.entity.font_family)
+                font.setPointSizeF(max(1.2, item.entity.font_size * 1.5))
                 fm = QFontMetricsF(font)
                 tw = max(10.0, fm.horizontalAdvance(text) + 6.0)
                 item.entity.width = max(item.entity.width, tw)

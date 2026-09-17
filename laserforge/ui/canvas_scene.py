@@ -485,7 +485,8 @@ class LaserItemWrapper(QGraphicsItem):
                 if sc and hasattr(sc, "push_undo_state"):
                     sc.push_undo_state()
                 self.entity.text = new_text
-                font = QFont(self.entity.font_family, max(4, int(round(self.entity.font_size * 2))))
+                font = QFont(self.entity.font_family)
+                font.setPointSizeF(max(1.2, self.entity.font_size * 1.5))
                 fm = QFontMetricsF(font)
                 tw = max(10.0, fm.horizontalAdvance(new_text) + 6.0)
                 self.entity.width = max(self.entity.width, tw)
@@ -552,7 +553,8 @@ class LaserItemWrapper(QGraphicsItem):
                 painter.scale(-1.0 if m_h else 1.0, -1.0 if m_v else 1.0)
                 painter.translate(-cx, -cy)
 
-            font = QFont(self.entity.font_family, max(4, int(round(self.entity.font_size * 2))))
+            font = QFont(self.entity.font_family)
+            font.setPointSizeF(max(1.2, self.entity.font_size * 1.5))
             font.setBold(self.entity.bold)
             font.setItalic(self.entity.italic)
             font.setUnderline(getattr(self.entity, "underline", False))
@@ -1261,7 +1263,8 @@ class LaserCanvasScene(QGraphicsScene):
                 if ok and new_text != tent.text:
                     self.push_undo_state()
                     tent.text = new_text
-                    font = QFont(tent.font_family, max(4, int(round(tent.font_size * 2))))
+                    font = QFont(tent.font_family)
+                    font.setPointSizeF(max(1.2, tent.font_size * 1.5))
                     fm = QFontMetricsF(font)
                     tw = max(10.0, fm.horizontalAdvance(new_text) + 6.0)
                     tent.width = max(tent.width, tw)

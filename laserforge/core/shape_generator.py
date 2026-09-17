@@ -231,7 +231,8 @@ class ShapeGenerator:
                     if entity.closed:
                         base_path.closeSubpath()
         elif isinstance(entity, TextEntity):
-            font = QFont(entity.font_family, int(round(entity.font_size * 2)))
+            font = QFont(entity.font_family)
+            font.setPointSizeF(max(1.2, entity.font_size * 1.5))
             font.setBold(entity.bold)
             font.setItalic(entity.italic)
             font.setUnderline(getattr(entity, "underline", False))

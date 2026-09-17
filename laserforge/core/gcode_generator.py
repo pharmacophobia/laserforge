@@ -112,7 +112,8 @@ class GCodeGenerator:
             try:
                 from PyQt6.QtGui import QPainterPath, QFont, QFontMetricsF
                 from PyQt6.QtCore import QPointF
-                font = QFont(entity.font_family, max(6, int(round(entity.font_size * 2.835))))
+                font = QFont(entity.font_family)
+                font.setPointSizeF(max(1.2, entity.font_size * 1.5))
                 font.setBold(entity.bold)
                 font.setItalic(entity.italic)
                 font.setUnderline(getattr(entity, "underline", False))
