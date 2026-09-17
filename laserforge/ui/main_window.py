@@ -147,6 +147,11 @@ class MainWindow(QMainWindow):
         self.license_engine = LicenseEngine()
         self._update_window_title_license()
 
+        # Mobile Web Jogger & Monitoring Pendant Server
+        from laserforge.core.web_pendant import WebPendantServer
+        self.web_pendant = WebPendantServer(port=8088)
+        self._setup_web_pendant_callbacks()
+
         # Maximize to fit display cleanly
         self.showMaximized()
 
@@ -228,6 +233,31 @@ class MainWindow(QMainWindow):
         self.act_living_hinge.setShortcut("Ctrl+Alt+H")
         self.act_living_hinge.setToolTip("Parametric Living Hinge & Lattice Flex pattern generator for curved wood & acrylic bends (Ctrl+Alt+H)")
         self.act_living_hinge.triggered.connect(self.open_living_hinge_studio)
+
+        self.act_material_test_studio = QAction("Automated Material Test Matrix Studio...", self)
+        self.act_material_test_studio.setShortcut("Ctrl+Alt+M")
+        self.act_material_test_studio.setToolTip("Parametric Speed vs Power calibration grid with Hershey stroke labels (Ctrl+Alt+M)")
+        self.act_material_test_studio.triggered.connect(self.open_material_test_studio)
+
+        self.act_relief_studio = QAction("3D Relief & Automated Z-Step Studio...", self)
+        self.act_relief_studio.setShortcut("Ctrl+Alt+Z")
+        self.act_relief_studio.setToolTip("3D grayscale heightmap relief carver and motorized Z-axis multi-pass step down (Ctrl+Alt+Z)")
+        self.act_relief_studio.triggered.connect(self.open_relief_studio)
+
+        self.act_galvo_studio = QAction("Galvo & Fiber Marking Laser Studio...", self)
+        self.act_galvo_studio.setShortcut("Ctrl+Alt+F")
+        self.act_galvo_studio.setToolTip("Galvanometer mirror settle delay tuning and transverse beam wobble generator (Ctrl+Alt+F)")
+        self.act_galvo_studio.triggered.connect(self.open_galvo_studio)
+
+        self.act_ruida_studio = QAction("Ruida DSP Ethernet Controller & .rd Studio...", self)
+        self.act_ruida_studio.setShortcut("Ctrl+Alt+R")
+        self.act_ruida_studio.setToolTip("Compile Ruida .rd binary files and transmit jobs over Ethernet UDP to CO2 lasers (Ctrl+Alt+R)")
+        self.act_ruida_studio.triggered.connect(self.open_ruida_studio)
+
+        self.act_web_pendant = QAction("Mobile Remote Jogger & Web Pendant...", self)
+        self.act_web_pendant.setShortcut("Ctrl+Alt+W")
+        self.act_web_pendant.setToolTip("Launch mobile phone / tablet touch-screen remote jogger and monitoring server (Ctrl+Alt+W)")
+        self.act_web_pendant.triggered.connect(self.open_web_pendant_dialog)
 
         self.act_single_line_text = QAction("Single-Line Stroke Text...", self)
         self.act_single_line_text.setShortcut("Ctrl+Shift+F")
@@ -592,7 +622,9 @@ class MainWindow(QMainWindow):
         menu_laser.addAction(self.act_align_workpiece)
         menu_laser.addAction(self.act_rotary)
         menu_laser.addAction(self.act_material_lib)
-        menu_laser.addAction(self.act_test_matrix)
+        menu_laser.addAction(self.act_material_test_studio)
+        menu_laser.addAction(self.act_ruida_studio)
+        menu_laser.addAction(self.act_web_pendant)
         menu_laser.addSeparator()
         menu_laser.addAction(self.act_camera_wizard)
         menu_laser.addAction(self.act_camera_update)
@@ -633,6 +665,11 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_box_generator)
         menu_tools.addAction(self.act_living_hinge)
         menu_tools.addAction(self.act_single_line_text)
+        menu_tools.addAction(self.act_material_test_studio)
+        menu_tools.addAction(self.act_relief_studio)
+        menu_tools.addAction(self.act_galvo_studio)
+        menu_tools.addAction(self.act_ruida_studio)
+        menu_tools.addAction(self.act_web_pendant)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
         menu_tools.addAction(self.act_test_matrix)
@@ -793,6 +830,20 @@ class MainWindow(QMainWindow):
         btn_mat.setToolTip("3W Diode Laser Material Library (Ctrl+M) - Calibrated speeds, powers & test grids")
         btn_mat.clicked.connect(self.open_material_library)
         tb_studios.addWidget(btn_mat)
+
+        # Material Matrix Studio Button
+        btn_matrix = QPushButton("🧪 Matrix")
+        btn_matrix.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_matrix.setToolTip("Automated Material Test Matrix Studio (Ctrl+Alt+M)")
+        btn_matrix.clicked.connect(self.open_material_test_studio)
+        tb_studios.addWidget(btn_matrix)
+
+        # Mobile Web Jogger Pendant Button
+        btn_pendant = QPushButton("📱 Jogger")
+        btn_pendant.setStyleSheet("font-weight: bold; padding: 3px 6px; font-size: 11px;")
+        btn_pendant.setToolTip("Mobile Remote Jogger & Web Pendant (Ctrl+Alt+W)")
+        btn_pendant.clicked.connect(self.open_web_pendant_dialog)
+        tb_studios.addWidget(btn_pendant)
 
         # Workpiece Alignment Button
         btn_align = QPushButton("🎯 Align")
@@ -2286,6 +2337,93 @@ class MainWindow(QMainWindow):
         self.scene.update()
         self.statusBar().showMessage(f"Added Living Hinge pattern ({len(entities)} entities) to workspace bed.", 4000)
 
+    def open_material_test_studio(self):
+        """Opens the Automated Material Test Matrix & Calibration Studio."""
+        from laserforge.ui.material_test_dialog import MaterialTestDialog
+        dlg = MaterialTestDialog(parent=self)
+        dlg.grid_generated.connect(self._on_material_test_generated)
+        dlg.exec()
+
+    def _on_material_test_generated(self, entities: list):
+        if not entities:
+            return
+        self.scene.push_undo_state()
+        for ent in entities:
+            self.scene.add_entity(ent)
+        self.scene.update()
+        self.statusBar().showMessage(f"Added Material Test Matrix ({len(entities)} entities) to bed.", 4000)
+
+    def open_relief_studio(self):
+        """Opens the 3D Relief Engraving & Automated Z-Step Studio."""
+        from laserforge.ui.relief_dialog import ReliefStudioDialog
+        dlg = ReliefStudioDialog(parent=self)
+        dlg.relief_generated.connect(self._on_relief_generated)
+        dlg.exec()
+
+    def _on_relief_generated(self, entities: list):
+        if not entities:
+            return
+        self.scene.push_undo_state()
+        for ent in entities:
+            self.scene.add_entity(ent)
+        self.scene.update()
+        self.statusBar().showMessage(f"Added 3D Relief toolpaths ({len(entities)} slices) to bed.", 4000)
+
+    def open_galvo_studio(self):
+        """Opens the Galvo & Fiber Laser Marking Studio."""
+        from laserforge.ui.galvo_dialog import GalvoStudioDialog
+        from laserforge.core.galvo_engine import GalvoEngine
+        selected = self.scene.get_selected_entities()
+        dlg = GalvoStudioDialog(selected_entities=selected, parent=self)
+        dlg.wobble_applied.connect(self._on_galvo_wobble_applied)
+        dlg.exec()
+
+    def _on_galvo_wobble_applied(self, res: dict):
+        from laserforge.core.galvo_engine import GalvoEngine
+        wobble_cfg = res.get("wobble")
+        if not wobble_cfg or not wobble_cfg.enabled:
+            return
+        selected = self.scene.get_selected_entities()
+        if not selected:
+            return
+        self.scene.push_undo_state()
+        from laserforge.core.models import PathEntity
+        for ent in selected:
+            if isinstance(ent, PathEntity):
+                new_contours = []
+                for c in ent.contours:
+                    new_contours.append(GalvoEngine.apply_wobble_to_contour(c, wobble_cfg))
+                ent.contours = new_contours
+        self.scene.update()
+        self.statusBar().showMessage(f"Applied {wobble_cfg.pattern} beam wobble ({wobble_cfg.amplitude_mm} mm) to selected artwork.", 4000)
+
+    def open_ruida_studio(self):
+        """Opens the Ruida DSP Ethernet Controller & .rd Toolpath Studio."""
+        from laserforge.ui.ruida_dialog import RuidaDialog
+        targets = self.scene.get_selected_entities() or self.scene.get_all_entities()
+        dlg = RuidaDialog(entities=targets, parent=self)
+        dlg.exec()
+
+    def open_web_pendant_dialog(self):
+        """Opens the Mobile Remote Jogger & Workshop Web Pendant Studio."""
+        from laserforge.ui.web_pendant_dialog import WebPendantDialog
+        dlg = WebPendantDialog(server=self.web_pendant, parent=self)
+        dlg.exec()
+
+    def _setup_web_pendant_callbacks(self):
+        self.web_pendant.on_jog = lambda dx, dy: self.serial_ctrl.jog(dx, dy, self.settings.jog_feedrate)
+        self.web_pendant.on_frame = self.frame_job
+        self.web_pendant.on_guide_beam = lambda: self.serial_ctrl.send_command("M3 G1 S5 F1000")
+        self.web_pendant.on_home = self.serial_ctrl.home
+        self.web_pendant.on_unlock = self.serial_ctrl.unlock
+        self.web_pendant.on_estop = self.serial_ctrl.stop_streaming
+        self.web_pendant.get_status_cb = lambda: {
+            "state": getattr(self.serial_ctrl.machine_state, "state", "Idle") if hasattr(self.serial_ctrl, "machine_state") else "Idle",
+            "x": getattr(self.serial_ctrl.machine_state, "work_x", 0.0) if hasattr(self.serial_ctrl, "machine_state") else 0.0,
+            "y": getattr(self.serial_ctrl.machine_state, "work_y", 0.0) if hasattr(self.serial_ctrl, "machine_state") else 0.0,
+            "z": getattr(self.serial_ctrl.machine_state, "work_z", 0.0) if hasattr(self.serial_ctrl, "machine_state") else 0.0,
+        }
+
     def open_single_line_text_studio(self):
         """Opens the Single-Line Stroke (Hershey Vector) Font dialog."""
         from laserforge.ui.single_line_text_dialog import SingleLineTextDialog
@@ -3363,6 +3501,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up background timers, watchers, and serial threads on exit."""
+        if hasattr(self, "web_pendant"):
+            try:
+                self.web_pendant.stop()
+            except Exception:
+                pass
         if hasattr(self, "import_watcher_timer") and self.import_watcher_timer.isActive():
             self.import_watcher_timer.stop()
         if hasattr(self, "serial"):

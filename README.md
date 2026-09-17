@@ -94,6 +94,25 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - **Multiple Flex Geometries**: Alternating straight slits, sinuous wavy curves (torsional twist flex), and diamond honeycomb lattices.
   - Dial-in slit lengths, uncut bridge gaps, column pitch spacing, and optional solid mounting border tabs.
   - Real-time interactive 2D preview with live geometric diagnostics and one-click export to workspace bed.
+- **Ruida DSP Controller & `.rd` Binary Pipeline (`Ctrl+Alt+R`)**:
+  - Direct binary scancode compilation of vector paths and cut moves into native Ruida DSP `.rd` and `.ud5` formats for industrial CO2 laser cutters (OMTech, Thunder Laser, Boss Laser).
+  - Built-in **Ethernet UDP Client** broadcasting packets directly to Ruida controllers on LAN port `50200` without requiring a USB cable.
+  - Direct machine status diagnostics ping, remote job upload to DSP memory buffer, and one-click burn execution.
+- **Mobile Remote Jogger & Workshop Web Pendant (`Ctrl+Alt+W`)**:
+  - Lightweight embedded HTTP/JSON server hosting a touch-optimized mobile web app on port `8088`.
+  - Open on any smartphone, tablet, or secondary laptop on your workshop Wi-Fi by scanning an automatically generated on-screen QR code.
+  - Touch-friendly 8-direction jog keypad (with 0.1, 1, 10, 50 mm increments), live coordinate telemetry, frame job bounding box, laser guide beam toggle, and emergency stop.
+- **Galvo & Fiber Marking Laser Engine (`Ctrl+Alt+F`)**:
+  - Precision mirror inertia delay compensation: Laser ON delay ($\mu s$), Laser OFF delay ($\mu s$), Mark settle delay ($\mu s$), Jump rapid delay ($\mu s$), and Polygon corner dwell ($\mu s$).
+  - **Transverse Beam Wobble Generator**: Circular helical loops, figure-8 lemniscates, and sinusoidal oscillations with dial-in amplitude and pitch to expand kerf, anneal stainless steel, or perform laser welding.
+  - **360° Cylindrical Rotary Band Slicing**: Slices complex vector artwork into discrete coordinate bands along the rotary axis for galvo mirror marking.
+- **3D Relief Engraving & Automated Z-Axis Step-Down (`Ctrl+Alt+Z`)**:
+  - **Motorized Z-Table Step-Down**: Multi-pass depth calculations (`G0 Z-{pass * step}`) maintaining optimal beam focal spot waist through thick hardwood cutting.
+  - **3D Grayscale Heightmap Slicer**: Converts 8-bit/16-bit depth maps into discrete multi-level Z carving slices with bidirectional scanline toolpath optimization.
+- **Automated Material Test Matrix & Calibration Grid Studio (`Ctrl+Alt+M`)**:
+  - Parametric 2D grid generator varying Speed (rows) vs Power (columns) across configurable steps.
+  - Dual modes (perimeter cutting, internal vector hatching, or both) with per-entity speed and power overrides.
+  - Burns single-line Hershey stroke numeric labels for each row/column and includes an optional perimeter drop-out cutout frame.
 - **Commercial Licensing & 30-Day Free Trial Engine**:
   - Cryptographic HMAC-SHA256 offline license key verification (`LF-XXXX-XXXX-XXXX-XXXX`) supporting perpetual licenses, machine-bound customer keys, and universal site licenses.
   - Hardware machine fingerprinting (CPU architecture and network node hashing) with zero cloud phone-home requirement for fully air-gapped workshop privacy.
