@@ -19,6 +19,7 @@ from laserforge.core.optimizer import PathOptimizer
 from laserforge.core.raster_processor import RasterProcessor
 from laserforge.core.kerf_engine import KerfEngine
 from laserforge.core.rotary_engine import RotaryEngine
+from laserforge.core.tab_engine import TabEngine
 
 @dataclass(slots=True)
 class ToolpathSegment:
@@ -618,7 +619,8 @@ class GCodeGenerator:
                         "override_speed": getattr(vent, "override_speed", None),
                         "override_power": getattr(vent, "override_power", None),
                         "arc_info": arc_data,
-                        "closed": is_closed
+                        "closed": is_closed,
+                        "tabs": getattr(vent, "tabs", [])
                     }
 
                     if isinstance(vent, TextEntity):
@@ -778,9 +780,10 @@ class GCodeGenerator:
                         is_outer = meta.get("is_outer", True) if meta else True
                         is_closed = meta.get("closed", False) if meta else False
 
-                        # Check if native G2/G3 arc generation is applicable (only when no lead-in/out or kerf)
+                        # Check if native G2/G3 arc generation is applicable (only when no lead-in/out, kerf, or tabs)
                         arc = meta.get("arc_info") if meta else None
-                        if arc is not None and lead_in_type in ("None", "") and lead_out_type in ("None", "") and overcut_len <= 0.0:
+                        tabs_enabled = getattr(layer, "tabs_enabled", False)
+                        if arc is not None and lead_in_type in ("None", "") and lead_out_type in ("None", "") and overcut_len <= 0.0 and not tabs_enabled:
                             cx, cy, r = arc["cx"], arc["cy"], arc["r"]
                             start_x, start_y = cx - r, cy
                             all_x.extend([cx - r, cx + r])
@@ -882,17 +885,61 @@ class GCodeGenerator:
                                 cur_x, cur_y = l_pt[0], l_pt[1]
 
                         # Cut along main contour vertices
-                        start_idx = 0 if lead_in_pts else 1
-                        for pt in cut_path[start_idx:]:
-                            all_x.append(pt[0])
-                            all_y.append(pt[1])
-                            c_dist = math.hypot(pt[0] - cur_x, pt[1] - cur_y)
-                            total_cut_dist += c_dist
-                            total_time_sec += (c_dist / eff_feed) * 60.0
+                        tab_count = getattr(layer, "tab_count", 4)
+                        tab_width = getattr(layer, "tab_width", 1.0)
+                        tab_power_pct = getattr(layer, "tab_power_pct", 0.0)
+                        manual_tabs = meta.get("tabs", []) if meta else []
 
-                            gcode_lines.append(f"G1 X{pt[0]:.3f} Y{pt[1]:.3f} F{eff_feed:.0f}")
-                            segments.append(ToolpathSegment("cut", cur_x, cur_y, pt[0], pt[1], eff_feed, eff_p_pct, lid, layer.color))
-                            cur_x, cur_y = pt[0], pt[1]
+                        if tabs_enabled and is_closed and (tab_count > 0 or manual_tabs) and tab_width > 0.0:
+                            tab_slices = TabEngine.slice_contour_with_tabs(
+                                cut_path, tab_count=tab_count, tab_width=tab_width, manual_tab_ratios=manual_tabs
+                            )
+                            for sl in tab_slices:
+                                if sl["type"] == "cut":
+                                    s_path = sl["path"]
+                                    # Ensure laser is ON for cutting segment
+                                    gcode_lines.append(self._laser_on_cmd(eff_s_power))
+                                    for pt in s_path[1:]:
+                                        all_x.append(pt[0])
+                                        all_y.append(pt[1])
+                                        c_dist = math.hypot(pt[0] - cur_x, pt[1] - cur_y)
+                                        total_cut_dist += c_dist
+                                        total_time_sec += (c_dist / eff_feed) * 60.0
+                                        gcode_lines.append(f"G1 X{pt[0]:.3f} Y{pt[1]:.3f} F{eff_feed:.0f}")
+                                        segments.append(ToolpathSegment("cut", cur_x, cur_y, pt[0], pt[1], eff_feed, eff_p_pct, lid, layer.color))
+                                        cur_x, cur_y = pt[0], pt[1]
+                                elif sl["type"] == "tab":
+                                    tab_end = sl["end"]
+                                    all_x.append(tab_end[0])
+                                    all_y.append(tab_end[1])
+                                    t_dist = math.hypot(tab_end[0] - cur_x, tab_end[1] - cur_y)
+                                    if tab_power_pct > 0.0:
+                                        tab_s = int(round((tab_power_pct / 100.0) * max_s))
+                                        gcode_lines.append(self._laser_on_cmd(tab_s))
+                                        total_cut_dist += t_dist
+                                        total_time_sec += (t_dist / eff_feed) * 60.0
+                                        gcode_lines.append(f"G1 X{tab_end[0]:.3f} Y{tab_end[1]:.3f} F{eff_feed:.0f}")
+                                        segments.append(ToolpathSegment("cut", cur_x, cur_y, tab_end[0], tab_end[1], eff_feed, tab_power_pct, lid, layer.color))
+                                    else:
+                                        # Laser OFF across holding bridge
+                                        gcode_lines.append(self._laser_off_cmd())
+                                        total_rapid_dist += t_dist
+                                        total_time_sec += (t_dist / self.settings.rapid_speed) * 60.0
+                                        gcode_lines.append(f"G0 X{tab_end[0]:.3f} Y{tab_end[1]:.3f} F{self.settings.rapid_speed:.0f}")
+                                        segments.append(ToolpathSegment("rapid", cur_x, cur_y, tab_end[0], tab_end[1], self.settings.rapid_speed, 0, lid, layer.color))
+                                    cur_x, cur_y = tab_end[0], tab_end[1]
+                        else:
+                            start_idx = 0 if lead_in_pts else 1
+                            for pt in cut_path[start_idx:]:
+                                all_x.append(pt[0])
+                                all_y.append(pt[1])
+                                c_dist = math.hypot(pt[0] - cur_x, pt[1] - cur_y)
+                                total_cut_dist += c_dist
+                                total_time_sec += (c_dist / eff_feed) * 60.0
+
+                                gcode_lines.append(f"G1 X{pt[0]:.3f} Y{pt[1]:.3f} F{eff_feed:.0f}")
+                                segments.append(ToolpathSegment("cut", cur_x, cur_y, pt[0], pt[1], eff_feed, eff_p_pct, lid, layer.color))
+                                cur_x, cur_y = pt[0], pt[1]
 
                         # Cut Lead-out (if present)
                         if lead_out_pts:

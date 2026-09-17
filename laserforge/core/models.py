@@ -35,6 +35,10 @@ class LayerCutSettings:
     lead_out_type: str = "None"  # "None", "Line", "Arc", "Perpendicular"
     lead_out_length: float = 2.0  # mm
     overcut_length: float = 0.0  # mm to travel past closing point before M5
+    tabs_enabled: bool = False  # Enable holding tabs / bridges on closed contours
+    tab_count: int = 4  # Number of tabs per closed contour
+    tab_width: float = 1.0  # Width of each uncut bridge in mm
+    tab_power_pct: float = 0.0  # % laser power across tab (0 = off/rapid)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -62,7 +66,11 @@ class LayerCutSettings:
             "lead_in_length": self.lead_in_length,
             "lead_out_type": self.lead_out_type,
             "lead_out_length": self.lead_out_length,
-            "overcut_length": self.overcut_length
+            "overcut_length": self.overcut_length,
+            "tabs_enabled": self.tabs_enabled,
+            "tab_count": self.tab_count,
+            "tab_width": self.tab_width,
+            "tab_power_pct": self.tab_power_pct
         }
 
     @classmethod
@@ -83,6 +91,7 @@ class LaserEntity:
     locked: bool = False
     override_speed: Optional[float] = None  # mm/min (overrides layer speed if set)
     override_power: Optional[float] = None  # % 0-100 (overrides layer power_max if set)
+    tabs: List[float] = field(default_factory=list)  # Manual tab positions (0.0 to 1.0 along perimeter)
 
     def get_bounds(self) -> Tuple[float, float, float, float]:
         """Returns (min_x, min_y, max_x, max_y) in mm."""

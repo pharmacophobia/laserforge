@@ -162,6 +162,40 @@ class CutSettingsDialog(QDialog):
 
         layout.addWidget(kerf_group)
 
+        # 3. Holding Tabs & Bridges Group
+        tab_group = QGroupBox("Holding Tabs & Bridges (Micro-Tabs)")
+        tab_form = QFormLayout(tab_group)
+
+        self.chk_tabs = QCheckBox("Enable Holding Tabs")
+        self.chk_tabs.setChecked(getattr(self.layer, "tabs_enabled", False))
+        self.chk_tabs.setToolTip("Leave uncut bridges along contours so cut parts don't drop or tilt")
+        tab_form.addRow(self.chk_tabs)
+
+        self.spin_tab_count = QSpinBox()
+        self.spin_tab_count.setRange(1, 50)
+        self.spin_tab_count.setValue(getattr(self.layer, "tab_count", 4))
+        self.spin_tab_count.setToolTip("Number of holding tabs evenly spaced around each closed perimeter")
+        tab_form.addRow("Tabs Per Part:", self.spin_tab_count)
+
+        self.spin_tab_width = QDoubleSpinBox()
+        self.spin_tab_width.setRange(0.2, 20.0)
+        self.spin_tab_width.setDecimals(2)
+        self.spin_tab_width.setSingleStep(0.2)
+        self.spin_tab_width.setValue(getattr(self.layer, "tab_width", 1.0))
+        self.spin_tab_width.setSuffix(" mm")
+        self.spin_tab_width.setToolTip("Width of the uncut bridge holding the part in place")
+        tab_form.addRow("Tab Bridge Width:", self.spin_tab_width)
+
+        self.spin_tab_power = QDoubleSpinBox()
+        self.spin_tab_power.setRange(0.0, 100.0)
+        self.spin_tab_power.setDecimals(1)
+        self.spin_tab_power.setValue(getattr(self.layer, "tab_power_pct", 0.0))
+        self.spin_tab_power.setSuffix(" %")
+        self.spin_tab_power.setToolTip("Laser power across tab: 0% = full uncut gap, >0% = partial skin bridge")
+        tab_form.addRow("Bridge Power:", self.spin_tab_power)
+
+        layout.addWidget(tab_group)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._apply_and_accept)
         buttons.rejected.connect(self.reject)
@@ -184,6 +218,10 @@ class CutSettingsDialog(QDialog):
         self.layer.lead_out_type = self.combo_lead_out.currentText()
         self.layer.lead_out_length = self.spin_lead_out_len.value()
         self.layer.overcut_length = self.spin_overcut.value()
+        self.layer.tabs_enabled = self.chk_tabs.isChecked()
+        self.layer.tab_count = self.spin_tab_count.value()
+        self.layer.tab_width = self.spin_tab_width.value()
+        self.layer.tab_power_pct = self.spin_tab_power.value()
         self.accept()
 
 
