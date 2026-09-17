@@ -44,6 +44,7 @@ class BurnPerimeterVisualWidget(QWidget):
         self.perimeter_bbox: Tuple[float, float, float, float] = (20.0, 20.0, 100.0, 80.0)
         self.mode: str = "box"
         self.corner_tick_len: float = 8.0
+        self.center_cross_len: float = 10.0
         self.hull_points: List[Tuple[float, float]] = []
         self.laser_pos: Tuple[float, float] = (0.0, 0.0)
 
@@ -55,6 +56,7 @@ class BurnPerimeterVisualWidget(QWidget):
         perimeter_bbox: Tuple[float, float, float, float],
         mode: str,
         corner_tick_len: float = 8.0,
+        center_cross_len: float = 10.0,
         hull_points: Optional[List[Tuple[float, float]]] = None,
         laser_pos: Optional[Tuple[float, float]] = None
     ):
@@ -62,6 +64,7 @@ class BurnPerimeterVisualWidget(QWidget):
         self.perimeter_bbox = perimeter_bbox
         self.mode = mode
         self.corner_tick_len = corner_tick_len
+        self.center_cross_len = center_cross_len
         self.hull_points = hull_points or []
         if laser_pos is not None:
             self.laser_pos = laser_pos
@@ -156,7 +159,7 @@ class BurnPerimeterVisualWidget(QWidget):
                 painter.drawLine(to_screen(px1, cy), to_screen(px2, cy))
                 painter.drawLine(to_screen(cx, py1), to_screen(cx, py2))
 
-        elif self.mode == "corners":
+        elif self.mode in ("corners", "corners_and_center", "corners_plus"):
             t = max(1.0, min(self.corner_tick_len, pw / 2.0, ph / 2.0))
             corner_lines = [
                 # BL
@@ -173,6 +176,34 @@ class BurnPerimeterVisualWidget(QWidget):
                 (to_screen(px1, py2), to_screen(px1, py2 - t)),
             ]
             for p1, p2 in corner_lines:
+                painter.setPen(burn_pen_glow)
+                painter.drawLine(p1, p2)
+                painter.setPen(burn_pen)
+                painter.drawLine(p1, p2)
+
+            if self.mode in ("corners_and_center", "corners_plus"):
+                cx = (px1 + px2) / 2.0
+                cy = (py1 + py2) / 2.0
+                half_c = max(1.0, min(self.center_cross_len / 2.0, pw / 2.0, ph / 2.0))
+                p_h1 = to_screen(cx - half_c, cy)
+                p_h2 = to_screen(cx + half_c, cy)
+                p_v1 = to_screen(cx, cy - half_c)
+                p_v2 = to_screen(cx, cy + half_c)
+                for p1, p2 in [(p_h1, p_h2), (p_v1, p_v2)]:
+                    painter.setPen(burn_pen_glow)
+                    painter.drawLine(p1, p2)
+                    painter.setPen(burn_pen)
+                    painter.drawLine(p1, p2)
+
+        elif self.mode == "center_plus":
+            cx = (px1 + px2) / 2.0
+            cy = (py1 + py2) / 2.0
+            half_c = max(1.0, min(self.center_cross_len / 2.0, pw / 2.0, ph / 2.0))
+            p_h1 = to_screen(cx - half_c, cy)
+            p_h2 = to_screen(cx + half_c, cy)
+            p_v1 = to_screen(cx, cy - half_c)
+            p_v2 = to_screen(cx, cy + half_c)
+            for p1, p2 in [(p_h1, p_h2), (p_v1, p_v2)]:
                 painter.setPen(burn_pen_glow)
                 painter.drawLine(p1, p2)
                 painter.setPen(burn_pen)
@@ -361,8 +392,10 @@ class BurnPerimeterDialog(QDialog):
         self.combo_mode = QComboBox()
         self.combo_mode.addItem("🔲 Full Bounding Rectangle", "box")
         self.combo_mode.addItem("🎯 Bounding Box + Center Crosshair", "box_crosshair")
-        self.combo_mode.addItem("📐 Corner L-Ticks (Corner Stops)", "corners")
-        self.combo_mode.addItem("➕ Center Crosshair Only", "crosshair_only")
+        self.combo_mode.addItem("📐 Corner 90° L-Marks (Corner Stops)", "corners")
+        self.combo_mode.addItem("➕ Center '+' Mark (Registration Cross)", "center_plus")
+        self.combo_mode.addItem("🎯 Corner L-Marks + Center '+' Cross", "corners_and_center")
+        self.combo_mode.addItem("✛ Edge-to-Edge Crosshair Only", "crosshair_only")
         self.combo_mode.addItem("🔷 Tight Convex Hull Outline", "hull")
         self.combo_mode.currentIndexChanged.connect(self._recalculate_perimeter)
         geom_layout.addWidget(self.combo_mode, 0, 1)
@@ -377,16 +410,29 @@ class BurnPerimeterDialog(QDialog):
         self.spin_margin.valueChanged.connect(self._recalculate_perimeter)
         geom_layout.addWidget(self.spin_margin, 1, 1)
 
-        self.lbl_tick_len = QLabel("L-Tick Length:")
+        self.lbl_tick_len = QLabel("Corner L Length:")
         self.spin_tick_len = QDoubleSpinBox()
         self.spin_tick_len.setRange(2.0, 50.0)
         self.spin_tick_len.setValue(8.0)
         self.spin_tick_len.setSuffix(" mm")
+        self.spin_tick_len.setToolTip("Length of each 90-degree leg of the corner L marks")
         self.spin_tick_len.valueChanged.connect(self._recalculate_perimeter)
         geom_layout.addWidget(self.lbl_tick_len, 2, 0)
         geom_layout.addWidget(self.spin_tick_len, 2, 1)
         self.lbl_tick_len.setVisible(False)
         self.spin_tick_len.setVisible(False)
+
+        self.lbl_cross_len = QLabel("Center '+' Size:")
+        self.spin_cross_len = QDoubleSpinBox()
+        self.spin_cross_len.setRange(2.0, 100.0)
+        self.spin_cross_len.setValue(10.0)
+        self.spin_cross_len.setSuffix(" mm")
+        self.spin_cross_len.setToolTip("Length of each perpendicular arm of the center '+' registration mark")
+        self.spin_cross_len.valueChanged.connect(self._recalculate_perimeter)
+        geom_layout.addWidget(self.lbl_cross_len, 3, 0)
+        geom_layout.addWidget(self.spin_cross_len, 3, 1)
+        self.lbl_cross_len.setVisible(False)
+        self.spin_cross_len.setVisible(False)
 
         left_col.addWidget(geom_grp)
 
@@ -642,8 +688,12 @@ class BurnPerimeterDialog(QDialog):
 
     def _recalculate_perimeter(self):
         mode = self.combo_mode.currentData() or "box"
-        self.lbl_tick_len.setVisible(mode == "corners")
-        self.spin_tick_len.setVisible(mode == "corners")
+        has_corners = mode in ("corners", "corners_and_center", "corners_plus")
+        has_cross = mode in ("center_plus", "corners_and_center", "corners_plus")
+        self.lbl_tick_len.setVisible(has_corners)
+        self.spin_tick_len.setVisible(has_corners)
+        self.lbl_cross_len.setVisible(has_cross)
+        self.spin_cross_len.setVisible(has_cross)
 
         x1 = self.spin_x.value()
         y1 = self.spin_y.value()
@@ -690,6 +740,7 @@ class BurnPerimeterDialog(QDialog):
             perimeter_bbox=perimeter_bbox,
             mode=mode,
             corner_tick_len=self.spin_tick_len.value(),
+            center_cross_len=self.spin_cross_len.value(),
             hull_points=hull_pts
         )
         self._update_metrics()
@@ -707,6 +758,13 @@ class BurnPerimeterDialog(QDialog):
         elif mode == "corners":
             t = max(1.0, min(self.spin_tick_len.value(), w / 2.0, h / 2.0))
             return 8.0 * t
+        elif mode == "center_plus":
+            c = max(1.0, min(self.spin_cross_len.value(), w, h))
+            return 2.0 * c
+        elif mode in ("corners_and_center", "corners_plus"):
+            t = max(1.0, min(self.spin_tick_len.value(), w / 2.0, h / 2.0))
+            c = max(1.0, min(self.spin_cross_len.value(), w, h))
+            return 8.0 * t + 2.0 * c
         elif mode == "crosshair_only":
             return w + h
         elif mode == "hull" and len(self.visual_widget.hull_points) >= 3:
@@ -738,6 +796,7 @@ class BurnPerimeterDialog(QDialog):
         speed = override_speed if override_speed is not None else self.spin_speed.value()
         passes = 1 if override_power_pct is not None else self.spin_passes.value()
         tick_len = self.spin_tick_len.value()
+        cross_len = self.spin_cross_len.value()
         air = self.chk_air.isChecked()
 
         return self.gcode_gen.generate_burn_perimeter_gcode(
@@ -748,6 +807,7 @@ class BurnPerimeterDialog(QDialog):
             speed=speed,
             passes=passes,
             corner_tick_len_mm=tick_len,
+            center_cross_len_mm=cross_len,
             air_assist=air
         )
 
@@ -841,13 +901,15 @@ class BurnPerimeterDialog(QDialog):
         if layer_id is None:
             layer_id = 12
         tick_len = self.spin_tick_len.value()
+        cross_len = self.spin_cross_len.value()
 
         entities = self.gcode_gen.generate_burn_perimeter_entities(
             target=target,
             mode=mode,
             margin_mm=margin,
             layer_id=layer_id,
-            corner_tick_len_mm=tick_len
+            corner_tick_len_mm=tick_len,
+            center_cross_len_mm=cross_len
         )
 
         if not entities:

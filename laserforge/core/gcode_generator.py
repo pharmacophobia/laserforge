@@ -1179,6 +1179,7 @@ class GCodeGenerator:
         speed: float = 1500.0,
         passes: int = 1,
         corner_tick_len_mm: float = 8.0,
+        center_cross_len_mm: float = 10.0,
         air_assist: bool = False,
     ) -> str:
         """
@@ -1188,6 +1189,8 @@ class GCodeGenerator:
         - "box": Full rectangular bounding boundary.
         - "box_crosshair": Bounding box rectangle plus center alignment crosshairs.
         - "corners": 4 L-shaped corner tick marks (alignment corner stops).
+        - "center_plus": Center '+' mark of specified cross length.
+        - "corners_and_center": 4 L-shaped corner ticks plus center '+' cross.
         - "crosshair_only": Center crosshair lines spanning the workpiece envelope.
         - "hull": Tight convex hull perimeter around actual vector entities.
         """
@@ -1271,6 +1274,31 @@ class GCodeGenerator:
             # Top-Left
             named_polylines.append(("Corner Tick TL", [(min_x + t, max_y), (min_x, max_y), (min_x, max_y - t)]))
 
+        elif mode == "center_plus":
+            w = max_x - min_x
+            h = max_y - min_y
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            half_c = max(1.0, min(center_cross_len_mm / 2.0, w / 2.0, h / 2.0))
+            named_polylines.append(("Center Cross H", [(cx - half_c, cy), (cx + half_c, cy)]))
+            named_polylines.append(("Center Cross V", [(cx, cy - half_c), (cx, cy + half_c)]))
+
+        elif mode in ("corners_and_center", "corners_plus"):
+            w = max_x - min_x
+            h = max_y - min_y
+            t = max(1.0, min(corner_tick_len_mm, w / 2.0, h / 2.0))
+            # 4 Corners
+            named_polylines.append(("Corner Tick BL", [(min_x + t, min_y), (min_x, min_y), (min_x, min_y + t)]))
+            named_polylines.append(("Corner Tick BR", [(max_x - t, min_y), (max_x, min_y), (max_x, min_y + t)]))
+            named_polylines.append(("Corner Tick TR", [(max_x - t, max_y), (max_x, max_y), (max_x, max_y - t)]))
+            named_polylines.append(("Corner Tick TL", [(min_x + t, max_y), (min_x, max_y), (min_x, max_y - t)]))
+            # Center +
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            half_c = max(1.0, min(center_cross_len_mm / 2.0, w / 2.0, h / 2.0))
+            named_polylines.append(("Center Cross H", [(cx - half_c, cy), (cx + half_c, cy)]))
+            named_polylines.append(("Center Cross V", [(cx, cy - half_c), (cx, cy + half_c)]))
+
         elif mode == "crosshair_only":
             cx = (min_x + max_x) / 2.0
             cy = (min_y + max_y) / 2.0
@@ -1343,6 +1371,7 @@ class GCodeGenerator:
         margin_mm: float = 0.0,
         layer_id: int = 12,
         corner_tick_len_mm: float = 8.0,
+        center_cross_len_mm: float = 10.0,
     ) -> List[LaserEntity]:
         """
         Creates vector CAD LaserEntities representing the alignment perimeter
@@ -1496,6 +1525,103 @@ class GCodeGenerator:
                 )
             )
 
+        elif mode == "center_plus":
+            w = max_x - min_x
+            h = max_y - min_y
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            half_c = max(1.0, min(center_cross_len_mm / 2.0, w / 2.0, h / 2.0))
+            entities.append(
+                LineEntity(
+                    layer_id=layer_id,
+                    name="Center_Mark_Plus_H",
+                    x=cx - half_c,
+                    y=cy,
+                    x2=cx + half_c,
+                    y2=cy,
+                )
+            )
+            entities.append(
+                LineEntity(
+                    layer_id=layer_id,
+                    name="Center_Mark_Plus_V",
+                    x=cx,
+                    y=cy - half_c,
+                    x2=cx,
+                    y2=cy + half_c,
+                )
+            )
+
+        elif mode in ("corners_and_center", "corners_plus"):
+            w = max_x - min_x
+            h = max_y - min_y
+            t = max(1.0, min(corner_tick_len_mm, w / 2.0, h / 2.0))
+            # 4 Corners
+            entities.append(
+                PathEntity(
+                    layer_id=layer_id,
+                    name="Corner_Tick_BL",
+                    x=min_x,
+                    y=min_y,
+                    contours=[[(t, 0.0), (0.0, 0.0), (0.0, t)]],
+                    closed=False,
+                )
+            )
+            entities.append(
+                PathEntity(
+                    layer_id=layer_id,
+                    name="Corner_Tick_BR",
+                    x=max_x,
+                    y=min_y,
+                    contours=[[(-t, 0.0), (0.0, 0.0), (0.0, t)]],
+                    closed=False,
+                )
+            )
+            entities.append(
+                PathEntity(
+                    layer_id=layer_id,
+                    name="Corner_Tick_TR",
+                    x=max_x,
+                    y=max_y,
+                    contours=[[(-t, 0.0), (0.0, 0.0), (0.0, -t)]],
+                    closed=False,
+                )
+            )
+            entities.append(
+                PathEntity(
+                    layer_id=layer_id,
+                    name="Corner_Tick_TL",
+                    x=min_x,
+                    y=max_y,
+                    contours=[[(t, 0.0), (0.0, 0.0), (0.0, -t)]],
+                    closed=False,
+                )
+            )
+            # Center +
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            half_c = max(1.0, min(center_cross_len_mm / 2.0, w / 2.0, h / 2.0))
+            entities.append(
+                LineEntity(
+                    layer_id=layer_id,
+                    name="Center_Mark_Plus_H",
+                    x=cx - half_c,
+                    y=cy,
+                    x2=cx + half_c,
+                    y2=cy,
+                )
+            )
+            entities.append(
+                LineEntity(
+                    layer_id=layer_id,
+                    name="Center_Mark_Plus_V",
+                    x=cx,
+                    y=cy - half_c,
+                    x2=cx,
+                    y2=cy + half_c,
+                )
+            )
+
         elif mode == "crosshair_only":
             cx = (min_x + max_x) / 2.0
             cy = (min_y + max_y) / 2.0
@@ -1521,4 +1647,55 @@ class GCodeGenerator:
             )
 
         return entities
+
+    def generate_corner_l_marks(
+        self,
+        target: Any,
+        tick_len_mm: float = 8.0,
+        margin_mm: float = 0.0,
+        layer_id: int = 12,
+    ) -> List[LaserEntity]:
+        """Convenience method: generates 4 corner 90° L-tick alignment marks."""
+        return self.generate_burn_perimeter_entities(
+            target=target,
+            mode="corners",
+            margin_mm=margin_mm,
+            layer_id=layer_id,
+            corner_tick_len_mm=tick_len_mm,
+        )
+
+    def generate_center_cross_mark(
+        self,
+        target: Any,
+        cross_len_mm: float = 10.0,
+        margin_mm: float = 0.0,
+        layer_id: int = 12,
+    ) -> List[LaserEntity]:
+        """Convenience method: generates a centered '+' registration cross mark."""
+        return self.generate_burn_perimeter_entities(
+            target=target,
+            mode="center_plus",
+            margin_mm=margin_mm,
+            layer_id=layer_id,
+            center_cross_len_mm=cross_len_mm,
+        )
+
+    def generate_alignment_marks(
+        self,
+        target: Any,
+        mode: str = "corners_and_center",
+        tick_len_mm: float = 8.0,
+        cross_len_mm: float = 10.0,
+        margin_mm: float = 0.0,
+        layer_id: int = 12,
+    ) -> List[LaserEntity]:
+        """Generates registration / alignment marks (Corners, Center +, or Both)."""
+        return self.generate_burn_perimeter_entities(
+            target=target,
+            mode=mode,
+            margin_mm=margin_mm,
+            layer_id=layer_id,
+            corner_tick_len_mm=tick_len_mm,
+            center_cross_len_mm=cross_len_mm,
+        )
 

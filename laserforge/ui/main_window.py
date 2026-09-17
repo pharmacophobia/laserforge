@@ -51,6 +51,7 @@ from laserforge.ui.business_card_dialog import BusinessCardStudioDialog
 from laserforge.ui.material_library_dialog import MaterialLibraryDialog, TestMatrixDialog
 from laserforge.ui.alignment_dialog import LaserAlignmentDialog
 from laserforge.ui.burn_perimeter_dialog import BurnPerimeterDialog
+from laserforge.ui.alignment_marks_dialog import AlignmentMarksDialog
 from laserforge.ui.photo_engrave_dialog import PhotoEngraveDialog
 from laserforge.ui.templates_dialog import TemplatesStudioDialog
 from laserforge.ui.shape_generator_dialog import ShapeGeneratorDialog
@@ -227,6 +228,18 @@ class MainWindow(QMainWindow):
         self.act_kerf_test.setShortcut("Ctrl+Alt+K")
         self.act_kerf_test.setToolTip("Generate automated parametric kerf calibration test gauges (Ctrl+Alt+K)")
         self.act_kerf_test.triggered.connect(self.open_kerf_test_studio)
+
+        self.act_corner_l_marks = QAction("Add Corner 90° L-Marks", self)
+        self.act_corner_l_marks.setToolTip("Draw 90-degree corner L-tick alignment marks on workpiece perimeter")
+        self.act_corner_l_marks.triggered.connect(self.add_corner_l_marks_quick)
+
+        self.act_center_cross = QAction("Add Center '+' Registration Mark", self)
+        self.act_center_cross.setToolTip("Draw a centered '+' registration cross mark on workpiece center")
+        self.act_center_cross.triggered.connect(self.add_center_cross_quick)
+
+        self.act_alignment_marks_studio = QAction("Alignment & Registration Marks Studio...", self)
+        self.act_alignment_marks_studio.setToolTip("Studio for Corner 90° L-Marks and Center '+' Cross registration marks")
+        self.act_alignment_marks_studio.triggered.connect(lambda: self.open_alignment_marks_studio())
 
         self.act_snap_grid = QAction("Snap to Grid", self)
         self.act_snap_grid.setCheckable(True)
@@ -589,6 +602,7 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_kerf_test)
         menu_tools.addAction(self.act_align_workpiece)
         menu_tools.addAction(self.act_burn_perimeter)
+        menu_tools.addAction(self.act_alignment_marks_studio)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_preview)
         menu_tools.addAction(self.act_zoom_fit)
@@ -621,6 +635,10 @@ class MainWindow(QMainWindow):
         menu_arrange.addSeparator()
         menu_arrange.addAction(self.act_grid_array)
         menu_arrange.addAction(self.act_offset_border)
+        menu_arrange.addSeparator()
+        menu_arrange.addAction(self.act_corner_l_marks)
+        menu_arrange.addAction(self.act_center_cross)
+        menu_arrange.addAction(self.act_alignment_marks_studio)
 
         # Help Menu
         menu_help = menubar.addMenu("&Help")
@@ -1055,6 +1073,12 @@ class MainWindow(QMainWindow):
         act_cad_array = QAction(create_tool_icon("⊞", fg_color="#00e5ff"), "Grid Array Matrix (Ctrl+Shift+A)", self)
         act_cad_array.triggered.connect(self.open_grid_array_dialog)
         cad_tb.addAction(act_cad_array)
+
+        # Alignment & Registration Marks quick tool
+        act_cad_align_marks = QAction(create_tool_icon("📐", fg_color="#ff9100"), "Alignment & Registration Marks Studio...", self)
+        act_cad_align_marks.setToolTip("Generate 90° corner L-marks and center '+' registration marks for stock alignment")
+        act_cad_align_marks.triggered.connect(lambda: self.open_alignment_marks_studio())
+        cad_tb.addAction(act_cad_align_marks)
 
         cad_tb.addSeparator()
 
@@ -2614,6 +2638,56 @@ class MainWindow(QMainWindow):
             w.setSelected(True)
         self.canvas_widget.view.zoom_to_fit()
         self.statusBar().showMessage(f"Added {len(entities)} alignment perimeter shape(s) to canvas.", 4000)
+
+    def add_corner_l_marks_quick(self):
+        """Quick 1-click action: generate 90° corner L-tick alignment marks on selected shapes or canvas."""
+        selected_entities = self.scene.get_selected_entities()
+        target = selected_entities if selected_entities else self.scene.get_all_entities()
+        if not target:
+            QMessageBox.information(self, "Corner L-Marks", "Canvas is empty. Draw or import shapes first.")
+            return
+
+        l_marks = self.gcode_gen.generate_corner_l_marks(
+            target=target,
+            tick_len_mm=8.0,
+            margin_mm=0.0,
+            layer_id=12  # Tool / Alignment Guide
+        )
+        self._add_entities_to_canvas(l_marks)
+        self.statusBar().showMessage("Added 4 Corner 90° L-marks (Layer T1) to workpiece bounding perimeter.", 4000)
+
+    def add_center_cross_quick(self):
+        """Quick 1-click action: generate a centered '+' registration cross mark on selected shapes or canvas."""
+        selected_entities = self.scene.get_selected_entities()
+        target = selected_entities if selected_entities else self.scene.get_all_entities()
+        if not target:
+            QMessageBox.information(self, "Center Cross Mark", "Canvas is empty. Draw or import shapes first.")
+            return
+
+        cross_lines = self.gcode_gen.generate_center_cross_mark(
+            target=target,
+            cross_len_mm=10.0,
+            margin_mm=0.0,
+            layer_id=12  # Tool / Alignment Guide
+        )
+        self._add_entities_to_canvas(cross_lines)
+        self.statusBar().showMessage("Added Centered '+' Registration Mark (Layer T1) at geometric center.", 4000)
+
+    def open_alignment_marks_studio(self, default_mode: str = "both"):
+        """Opens the Alignment & Registration Marks Studio dialog."""
+        selected_entities = self.scene.get_selected_entities()
+        all_entities = self.scene.get_all_entities()
+
+        dlg = AlignmentMarksDialog(
+            parent=self,
+            target_entities=selected_entities,
+            all_entities=all_entities,
+            settings=self.settings,
+            serial_ctrl=self.serial_ctrl,
+            default_mode=default_mode,
+        )
+        dlg.marks_generated.connect(self._add_entities_to_canvas)
+        dlg.exec()
 
     def generate_vector_qr_code(self):
         """Prompts user for URL/text and generates a clean vector QR code on the active layer."""

@@ -218,5 +218,125 @@ class TestKerfTestGenerator(unittest.TestCase):
         self.assertFalse(title.closed)
 
 
+class TestAlignmentMarksGenerator(unittest.TestCase):
+    """Test 90° corner L-marks and center '+' registration marks generation."""
+
+    def setUp(self):
+        self.settings = MachineSettings(bed_width=300, bed_height=200)
+        self.layer_manager = LayerManager()
+        self.gcode_gen = GCodeGenerator(self.settings, self.layer_manager)
+        self.target_bbox = (20.0, 30.0, 120.0, 130.0)  # 100x100mm box at (20, 30)
+
+    def test_corner_l_marks_generation(self):
+        """Corner L-marks should create 4 unclosed 90° tick marks at the 4 corners."""
+        marks = self.gcode_gen.generate_corner_l_marks(
+            target=self.target_bbox,
+            tick_len_mm=8.0,
+            margin_mm=0.0,
+            layer_id=12
+        )
+        self.assertEqual(len(marks), 4)
+
+        names = [m.name for m in marks]
+        self.assertIn("Corner_Tick_BL", names)
+        self.assertIn("Corner_Tick_BR", names)
+        self.assertIn("Corner_Tick_TR", names)
+        self.assertIn("Corner_Tick_TL", names)
+
+        for m in marks:
+            self.assertEqual(m.layer_id, 12)
+            self.assertFalse(m.closed)
+            self.assertEqual(len(m.contours), 1)
+            pts = m.contours[0]
+            self.assertEqual(len(pts), 3)  # L-shape: arm 1, corner vertex (0,0), arm 2
+            # Middle vertex is relative (0,0)
+            self.assertEqual(pts[1], (0.0, 0.0))
+
+        # Bottom Left: absolute origin is (20, 30), arms along +X and +Y
+        bl = next(m for m in marks if m.name == "Corner_Tick_BL")
+        self.assertEqual(bl.x, 20.0)
+        self.assertEqual(bl.y, 30.0)
+        self.assertEqual(bl.contours[0], [(8.0, 0.0), (0.0, 0.0), (0.0, 8.0)])
+
+        # Top Right: absolute origin is (120, 130), arms along -X and -Y
+        tr = next(m for m in marks if m.name == "Corner_Tick_TR")
+        self.assertEqual(tr.x, 120.0)
+        self.assertEqual(tr.y, 130.0)
+        self.assertEqual(tr.contours[0], [(-8.0, 0.0), (0.0, 0.0), (0.0, -8.0)])
+
+    def test_center_cross_mark_generation(self):
+        """Center cross mark should create two intersecting lines at the exact geometric center."""
+        marks = self.gcode_gen.generate_center_cross_mark(
+            target=self.target_bbox,
+            cross_len_mm=10.0,
+            margin_mm=0.0,
+            layer_id=12
+        )
+        self.assertEqual(len(marks), 2)
+        h_line = next(m for m in marks if m.name == "Center_Mark_Plus_H")
+        v_line = next(m for m in marks if m.name == "Center_Mark_Plus_V")
+
+        # Center of (20, 30) -> (120, 130) is cx=70.0, cy=80.0
+        # Horizontal line: X from 65 to 75, Y = 80
+        self.assertAlmostEqual(h_line.x, 65.0)
+        self.assertAlmostEqual(h_line.x2, 75.0)
+        self.assertAlmostEqual(h_line.y, 80.0)
+        self.assertAlmostEqual(h_line.y2, 80.0)
+
+        # Vertical line: X = 70, Y from 75 to 85
+        self.assertAlmostEqual(v_line.x, 70.0)
+        self.assertAlmostEqual(v_line.x2, 70.0)
+        self.assertAlmostEqual(v_line.y, 75.0)
+        self.assertAlmostEqual(v_line.y2, 85.0)
+
+    def test_combined_alignment_marks(self):
+        """Combined mode generates 4 corner ticks + 2 center cross lines = 6 entities."""
+        marks = self.gcode_gen.generate_alignment_marks(
+            target=self.target_bbox,
+            mode="corners_and_center",
+            tick_len_mm=8.0,
+            cross_len_mm=10.0,
+            layer_id=1
+        )
+        self.assertEqual(len(marks), 6)
+        corner_count = sum(1 for m in marks if "Corner_Tick" in m.name)
+        cross_count = sum(1 for m in marks if "Center_Mark_Plus" in m.name)
+        self.assertEqual(corner_count, 4)
+        self.assertEqual(cross_count, 2)
+        for m in marks:
+            self.assertEqual(m.layer_id, 1)
+
+    def test_alignment_marks_gcode_emission(self):
+        """G-code generator must generate valid laser scoring paths for center_plus and corners_and_center."""
+        # Test center_plus G-code
+        gcode_plus = self.gcode_gen.generate_burn_perimeter_gcode(
+            target=self.target_bbox,
+            mode="center_plus",
+            power_pct=15.0,
+            speed=1500.0,
+            center_cross_len_mm=10.0
+        )
+        self.assertIn("Center Cross H", gcode_plus)
+        self.assertIn("Center Cross V", gcode_plus)
+        self.assertIn("G1", gcode_plus)
+        self.assertIn("X65.000", gcode_plus)
+        self.assertIn("X75.000", gcode_plus)
+        self.assertIn("Y75.000", gcode_plus)
+        self.assertIn("Y85.000", gcode_plus)
+
+        # Test corners_and_center G-code
+        gcode_both = self.gcode_gen.generate_burn_perimeter_gcode(
+            target=self.target_bbox,
+            mode="corners_and_center",
+            power_pct=12.0,
+            speed=1200.0,
+            corner_tick_len_mm=8.0,
+            center_cross_len_mm=10.0
+        )
+        self.assertIn("Corner Tick BL", gcode_both)
+        self.assertIn("Center Cross H", gcode_both)
+
+
 if __name__ == "__main__":
     unittest.main()
+

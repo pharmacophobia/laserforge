@@ -379,6 +379,20 @@ class LaserCanvasView(QGraphicsView):
             menu.addSeparator()
 
         menu.addSeparator()
+        align_marks_menu = menu.addMenu("📐 Alignment & Registration Marks")
+        act_add_l = align_marks_menu.addAction("📐 Add Corner 90° L-Marks")
+        act_add_l.setToolTip("Draw 90-degree corner L-tick alignment marks on perimeter corners")
+        act_add_l.triggered.connect(lambda: getattr(main_win, "add_corner_l_marks_quick", lambda: None)())
+
+        act_add_c = align_marks_menu.addAction("➕ Add Center '+' Mark")
+        act_add_c.setToolTip("Draw a centered '+' registration cross mark on workpiece center")
+        act_add_c.triggered.connect(lambda: getattr(main_win, "add_center_cross_quick", lambda: None)())
+
+        align_marks_menu.addSeparator()
+        act_marks_studio = align_marks_menu.addAction("🎯 Alignment Marks Studio...")
+        act_marks_studio.setToolTip("Open full studio for Corner L-Marks and Center '+' Cross configuration")
+        act_marks_studio.triggered.connect(lambda: getattr(main_win, "open_alignment_marks_studio", lambda: None)())
+
         guide_menu = menu.addMenu("📏 Alignment Guides")
         act_add_hg = guide_menu.addAction(f"Add Horizontal Guide @ Y={scene_pos.y():.1f}mm")
         act_add_hg.triggered.connect(lambda: getattr(self.scene(), "add_guide", lambda o, p: None)("horizontal", scene_pos.y()))
