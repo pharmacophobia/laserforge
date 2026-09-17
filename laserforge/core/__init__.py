@@ -26,4 +26,8 @@ __all__ = [
     "kerf_engine",
     "nesting_engine",
     "rotary_engine",
+    "tab_engine",
+    "boolean_engine",
+    "box_engine",
+    "hershey_font",
 ]

@@ -213,6 +213,16 @@ class MainWindow(QMainWindow):
         self.act_rotary.setToolTip("Configure Roller and Chuck rotary attachments for cylindrical laser engraving (Ctrl+Shift+R)")
         self.act_rotary.triggered.connect(self.open_rotary_studio)
 
+        self.act_box_generator = QAction("Box & Enclosure Studio...", self)
+        self.act_box_generator.setShortcut("Ctrl+Shift+J")
+        self.act_box_generator.setToolTip("Parametric Box & Finger-Joint Enclosure Studio (Ctrl+Shift+J)")
+        self.act_box_generator.triggered.connect(self.open_box_studio)
+
+        self.act_single_line_text = QAction("Single-Line Stroke Text...", self)
+        self.act_single_line_text.setShortcut("Ctrl+Shift+F")
+        self.act_single_line_text.setToolTip("Generate single-stroke Hershey vector text for fast laser engraving (Ctrl+Shift+F)")
+        self.act_single_line_text.triggered.connect(self.open_single_line_text_studio)
+
         self.act_snap_grid = QAction("Snap to Grid", self)
         self.act_snap_grid.setCheckable(True)
         self.act_snap_grid.setChecked(True)
@@ -301,6 +311,10 @@ class MainWindow(QMainWindow):
         self.act_intersect.setShortcut("Ctrl+Shift+X")
         self.act_intersect.setToolTip("Keep only common overlapping area between selected shapes (Ctrl+Shift+X)")
         self.act_intersect.triggered.connect(lambda: self.scene.boolean_operation("intersect"))
+
+        self.act_xor = QAction("⊻ Exclusive OR (XOR) Shapes", self)
+        self.act_xor.setToolTip("Keep non-overlapping regions between selected shapes (Symmetric Difference)")
+        self.act_xor.triggered.connect(lambda: self.scene.boolean_operation("xor"))
 
         # Design Aid & Workflow Actions
         self.act_photo_studio = QAction("Photo Engrave Studio...", self)
@@ -504,9 +518,11 @@ class MainWindow(QMainWindow):
         menu_bool.addAction(self.act_weld)
         menu_bool.addAction(self.act_subtract)
         menu_bool.addAction(self.act_intersect)
+        menu_bool.addAction(self.act_xor)
         menu_edit.addAction(self.act_weld)
         menu_edit.addAction(self.act_subtract)
         menu_edit.addAction(self.act_intersect)
+        menu_edit.addAction(self.act_xor)
 
         # Laser Menu
         menu_laser = menubar.addMenu("&Laser")
@@ -560,6 +576,8 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_directional_hatch)
         menu_tools.addAction(self.act_nesting)
         menu_tools.addAction(self.act_rotary)
+        menu_tools.addAction(self.act_box_generator)
+        menu_tools.addAction(self.act_single_line_text)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
         menu_tools.addAction(self.act_test_matrix)
@@ -973,6 +991,18 @@ class MainWindow(QMainWindow):
         act_cad_rotary.setToolTip("Configure Roller and Chuck rotary attachments for cylindrical laser engraving (Ctrl+Shift+R)")
         act_cad_rotary.triggered.connect(self.open_rotary_studio)
         cad_tb.addAction(act_cad_rotary)
+
+        # Box & Enclosure Studio quick tool
+        act_cad_box = QAction(create_tool_icon("📦", fg_color="#b388ff"), "Box & Enclosure Studio (Ctrl+Shift+J)", self)
+        act_cad_box.setToolTip("Parametric Box & Finger-Joint Enclosure Studio (Ctrl+Shift+J)")
+        act_cad_box.triggered.connect(self.open_box_studio)
+        cad_tb.addAction(act_cad_box)
+
+        # Single-Line Stroke Font quick tool
+        act_cad_single_line = QAction(create_tool_icon("✍️", fg_color="#18ffff"), "Single-Line Stroke Text (Ctrl+Shift+F)", self)
+        act_cad_single_line.setToolTip("Generate single-stroke Hershey vector text for fast laser engraving (Ctrl+Shift+F)")
+        act_cad_single_line.triggered.connect(self.open_single_line_text_studio)
+        cad_tb.addAction(act_cad_single_line)
 
         # Photo Studio quick tool
         act_cad_photo = QAction(create_tool_icon("📷", fg_color="#e040fb"), "Photo Engrave Studio (Ctrl+Shift+I)", self)
@@ -1971,6 +2001,37 @@ class MainWindow(QMainWindow):
             f"Rotary Axis {status}: {self.settings.rotary_type} ({self.settings.rotary_mode}, ⌀ {self.settings.rotary_object_diameter:.1f} mm)",
             5000
         )
+
+    def open_box_studio(self):
+        """Opens the Parametric Box & Finger-Joint Enclosure Studio dialog."""
+        from laserforge.ui.box_dialog import BoxGeneratorDialog
+        dlg = BoxGeneratorDialog(parent=self)
+        dlg.panels_generated.connect(self._on_box_panels_generated)
+        dlg.exec()
+
+    def _on_box_panels_generated(self, entities: list):
+        if not entities:
+            return
+        self.scene.push_undo_state()
+        for ent in entities:
+            self.scene.add_entity(ent)
+        self.scene.update()
+        self.statusBar().showMessage(f"Added {len(entities)} box panels & labels to workspace bed.", 4000)
+
+    def open_single_line_text_studio(self):
+        """Opens the Single-Line Stroke (Hershey Vector) Font dialog."""
+        from laserforge.ui.single_line_text_dialog import SingleLineTextDialog
+        dlg = SingleLineTextDialog(parent=self)
+        dlg.entity_created.connect(self._on_single_line_text_created)
+        dlg.exec()
+
+    def _on_single_line_text_created(self, entity):
+        if not entity:
+            return
+        self.scene.push_undo_state()
+        self.scene.add_entity(entity)
+        self.scene.update()
+        self.statusBar().showMessage("Added Single-Line Vector Text to workspace bed.", 4000)
 
     def export_gcode(self):
 
