@@ -176,6 +176,9 @@ python3 -m laserforge.main
 | **Save Project** | `Ctrl + S` |
 | **Import SVG Vector** | `Ctrl + I` |
 | **Import AutoCAD DXF** | `Ctrl + Alt + D` |
+| **Import LightBurn (.lbrn, .lbrn2)** | `Ctrl + Alt + L` |
+| **Holding Tabs & Bridges Studio** | `Ctrl + Alt + T` |
+| **Print & Cut (2-Point Registration)** | `Ctrl + Alt + P` |
 | **Export G-Code** | `Ctrl + E` |
 | **Export Canvas to SVG** | `Ctrl + Shift + E` |
 | **Auto Cutout to SVG** | `Ctrl + Shift + C` |

@@ -329,7 +329,6 @@ class ImageTracer:
         morphological skeletonization. Ideal for signatures, handwriting, line art,
         and single-pass laser score cutting.
         """
-        import skimage.morphology
         if binary_mask is not None:
             binary = binary_mask
         else:
@@ -354,7 +353,25 @@ class ImageTracer:
         if not np.any(fg):
             return []
 
-        skel = skimage.morphology.skeletonize(fg)
+        try:
+            import skimage.morphology
+            skel = skimage.morphology.skeletonize(fg)
+        except ImportError:
+            # Morphological thinning using OpenCV
+            src = (fg.astype(np.uint8) * 255)
+            skel_arr = np.zeros(src.shape, dtype=np.uint8)
+            element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+            curr = src.copy()
+            for _ in range(500):
+                eroded = cv2.erode(curr, element)
+                temp = cv2.dilate(eroded, element)
+                temp = cv2.subtract(curr, temp)
+                skel_arr = cv2.bitwise_or(skel_arr, temp)
+                curr = eroded
+                if cv2.countNonZero(curr) == 0:
+                    break
+            skel = (skel_arr > 0)
+
         y_indices, x_indices = np.where(skel)
         if len(y_indices) == 0:
             return []

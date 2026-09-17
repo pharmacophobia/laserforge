@@ -171,3 +171,48 @@ class TabEngine:
             subpath.append(p_end)
 
         return subpath
+
+    @classmethod
+    def compute_tab_coordinates(
+        cls,
+        contour: List[Tuple[float, float]],
+        tab_count: int = 4,
+        tab_width: float = 1.0,
+        manual_tab_ratios: Optional[List[float]] = None
+    ) -> List[Tuple[float, float, float, float]]:
+        """
+        Calculates (center_x, center_y, angle_deg, width) for every holding tab.
+        Useful for canvas rendering and interactive previewing.
+        """
+        if len(contour) < 3:
+            return []
+
+        pts = list(contour)
+        if math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) > 1e-5:
+            pts.append(pts[0])
+
+        total_length = cls.polyline_length(pts)
+        if total_length < 1e-3:
+            return []
+
+        if manual_tab_ratios and len(manual_tab_ratios) > 0:
+            centers = sorted([r % 1.0 for r in manual_tab_ratios])
+            dists = [c * total_length for c in centers]
+        else:
+            if tab_count <= 0:
+                return []
+            interval = total_length / float(tab_count)
+            dists = [(i + 0.5) * interval for i in range(tab_count)]
+
+        tabs_info = []
+        for d in dists:
+            cx, cy = cls.interpolate_point_at_distance(pts, d)
+            # Sample slight delta to get tangent angle
+            p_prev = cls.interpolate_point_at_distance(pts, max(0.0, d - 0.2))
+            p_next = cls.interpolate_point_at_distance(pts, min(total_length, d + 0.2))
+            dx = p_next[0] - p_prev[0]
+            dy = p_next[1] - p_prev[1]
+            angle = math.degrees(math.atan2(dy, dx))
+            tabs_info.append((cx, cy, angle, tab_width))
+
+        return tabs_info

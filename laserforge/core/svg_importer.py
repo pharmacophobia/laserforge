@@ -21,8 +21,23 @@ from laserforge.config import LAYER_PALETTE, DEFAULT_BED_WIDTH_MM, DEFAULT_BED_H
 from laserforge.core.models import LaserEntity, PathEntity, RectEntity, CircleEntity, LineEntity
 
 
+_CSS_NAMED_COLORS = {
+    "black": (0, 0, 0), "white": (255, 255, 255), "red": (255, 0, 0),
+    "green": (0, 128, 0), "blue": (0, 0, 255), "cyan": (0, 255, 255),
+    "magenta": (255, 0, 255), "yellow": (255, 255, 0), "orange": (255, 165, 0),
+    "purple": (128, 0, 128), "gray": (128, 128, 128), "grey": (128, 128, 128),
+    "lime": (0, 255, 0), "navy": (0, 0, 128), "teal": (0, 128, 128)
+}
+
 def _hex_to_rgb(hex_str: str) -> Optional[Tuple[int, int, int]]:
-    hex_clean = hex_str.strip().lstrip("#")
+    val = hex_str.strip().lower()
+    if val in _CSS_NAMED_COLORS:
+        return _CSS_NAMED_COLORS[val]
+    if val.startswith("rgb"):
+        m = re.match(r"rgba?\(\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]+)", val)
+        if m:
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    hex_clean = val.lstrip("#")
     if len(hex_clean) == 3:
         hex_clean = "".join([c * 2 for c in hex_clean])
     if len(hex_clean) == 6:

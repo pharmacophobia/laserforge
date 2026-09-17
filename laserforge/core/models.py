@@ -39,6 +39,9 @@ class LayerCutSettings:
     tab_count: int = 4  # Number of tabs per closed contour
     tab_width: float = 1.0  # Width of each uncut bridge in mm
     tab_power_pct: float = 0.0  # % laser power across tab (0 = off/rapid)
+    corner_power_ramping: bool = False  # Proactively ramp power down around sharp decelerating corners
+    corner_ramp_angle_deg: float = 45.0  # Minimum corner angle (degrees) to trigger power reduction
+    corner_min_power_pct: float = 50.0  # Minimum laser power % at vertex to prevent charring
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -70,7 +73,10 @@ class LayerCutSettings:
             "tabs_enabled": self.tabs_enabled,
             "tab_count": self.tab_count,
             "tab_width": self.tab_width,
-            "tab_power_pct": self.tab_power_pct
+            "tab_power_pct": self.tab_power_pct,
+            "corner_power_ramping": self.corner_power_ramping,
+            "corner_ramp_angle_deg": self.corner_ramp_angle_deg,
+            "corner_min_power_pct": self.corner_min_power_pct
         }
 
     @classmethod

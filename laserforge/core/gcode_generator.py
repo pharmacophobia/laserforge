@@ -931,12 +931,37 @@ class GCodeGenerator:
                                     cur_x, cur_y = tab_end[0], tab_end[1]
                         else:
                             start_idx = 0 if lead_in_pts else 1
-                            for pt in cut_path[start_idx:]:
+                            corner_ramping = getattr(layer, "corner_power_ramping", False)
+                            min_power_pct = getattr(layer, "corner_min_power_pct", 50.0)
+                            ramp_angle = getattr(layer, "corner_ramp_angle_deg", 45.0)
+
+                            pts_to_cut = cut_path[start_idx:]
+                            for idx_pt, pt in enumerate(pts_to_cut):
                                 all_x.append(pt[0])
                                 all_y.append(pt[1])
                                 c_dist = math.hypot(pt[0] - cur_x, pt[1] - cur_y)
                                 total_cut_dist += c_dist
                                 total_time_sec += (c_dist / eff_feed) * 60.0
+
+                                # Dynamic Corner Deceleration Power Ramping
+                                if corner_ramping and idx_pt + 1 < len(pts_to_cut):
+                                    next_pt = pts_to_cut[idx_pt + 1]
+                                    v1 = (pt[0] - cur_x, pt[1] - cur_y)
+                                    v2 = (next_pt[0] - pt[0], next_pt[1] - pt[1])
+                                    mag1 = math.hypot(v1[0], v1[1])
+                                    mag2 = math.hypot(v2[0], v2[1])
+                                    if mag1 > 1e-4 and mag2 > 1e-4:
+                                        cos_val = max(-1.0, min(1.0, (v1[0]*v2[0] + v1[1]*v2[1]) / (mag1 * mag2)))
+                                        turn_deg = math.degrees(math.acos(cos_val))
+                                        if turn_deg >= ramp_angle:
+                                            # Steppers decelerate at vertex; ramp down laser power to prevent corner scorching
+                                            ratio = (min_power_pct / 100.0) + (1.0 - min_power_pct / 100.0) * max(0.0, 1.0 - (turn_deg / 180.0))
+                                            corner_s = max(1, int(round(eff_s_power * ratio)))
+                                            gcode_lines.append(f"G1 X{pt[0]:.3f} Y{pt[1]:.3f} S{corner_s} F{eff_feed:.0f}")
+                                            segments.append(ToolpathSegment("cut", cur_x, cur_y, pt[0], pt[1], eff_feed, eff_p_pct * ratio, lid, layer.color))
+                                            cur_x, cur_y = pt[0], pt[1]
+                                            gcode_lines.append(self._laser_on_cmd(eff_s_power))
+                                            continue
 
                                 gcode_lines.append(f"G1 X{pt[0]:.3f} Y{pt[1]:.3f} F{eff_feed:.0f}")
                                 segments.append(ToolpathSegment("cut", cur_x, cur_y, pt[0], pt[1], eff_feed, eff_p_pct, lid, layer.color))

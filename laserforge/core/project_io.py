@@ -221,3 +221,9 @@ class ProjectIO:
         """Tokenizer & linearizer for SVG path commands (delegates to SVGImporter)."""
         from laserforge.core.svg_importer import SVGImporter
         return SVGImporter.parse_path_d(d)
+
+    @staticmethod
+    def import_lbrn(filepath: str, layer_manager: Optional[LayerManager] = None) -> Tuple[List[LaserEntity], Dict[int, LayerCutSettings]]:
+        """Parses a LightBurn .lbrn2 or .lbrn project file."""
+        from laserforge.core.lbrn_importer import LightBurnImporter
+        return LightBurnImporter.import_file(filepath, layer_manager=layer_manager)

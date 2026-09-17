@@ -229,6 +229,21 @@ class MainWindow(QMainWindow):
         self.act_kerf_test.setToolTip("Generate automated parametric kerf calibration test gauges (Ctrl+Alt+K)")
         self.act_kerf_test.triggered.connect(self.open_kerf_test_studio)
 
+        self.act_import_lbrn = QAction("Import LightBurn Project (.lbrn, .lbrn2)...", self)
+        self.act_import_lbrn.setShortcut("Ctrl+Alt+L")
+        self.act_import_lbrn.setToolTip("Import native LightBurn .lbrn2 (JSON) or .lbrn (XML) project files (Ctrl+Alt+L)")
+        self.act_import_lbrn.triggered.connect(self.import_lbrn)
+
+        self.act_holding_tabs = QAction("Holding Tabs & Micro-Bridges Studio...", self)
+        self.act_holding_tabs.setShortcut("Ctrl+Alt+T")
+        self.act_holding_tabs.setToolTip("Configure structural holding tabs and uncut micro-bridges for honeycomb bed protection (Ctrl+Alt+T)")
+        self.act_holding_tabs.triggered.connect(self.open_holding_tabs_studio)
+
+        self.act_print_and_cut = QAction("Print & Cut (2-Point Optical Registration)...", self)
+        self.act_print_and_cut.setShortcut("Ctrl+Alt+P")
+        self.act_print_and_cut.setToolTip("Align digital cut lines to physical pre-printed stock via 2-point optical / machine registration (Ctrl+Alt+P)")
+        self.act_print_and_cut.triggered.connect(self.open_print_and_cut_studio)
+
         self.act_corner_l_marks = QAction("Add Corner 90° L-Marks", self)
         self.act_corner_l_marks.setToolTip("Draw 90-degree corner L-tick alignment marks on workpiece perimeter")
         self.act_corner_l_marks.triggered.connect(self.add_corner_l_marks_quick)
@@ -508,6 +523,7 @@ class MainWindow(QMainWindow):
         menu_file.addSeparator()
         menu_file.addAction(self.act_import_svg)
         menu_file.addAction(self.act_import_dxf)
+        menu_file.addAction(self.act_import_lbrn)
         menu_file.addAction(self.act_import_img)
         menu_file.addAction(self.act_trace_image)
         menu_file.addAction(self.act_image_cutout)
@@ -592,6 +608,8 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_trace_image)
         menu_tools.addAction(self.act_image_cutout)
         menu_tools.addAction(self.act_directional_hatch)
+        menu_tools.addAction(self.act_holding_tabs)
+        menu_tools.addAction(self.act_print_and_cut)
         menu_tools.addAction(self.act_nesting)
         menu_tools.addAction(self.act_rotary)
         menu_tools.addAction(self.act_box_generator)
@@ -1800,6 +1818,164 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, "DXF Import Error", f"Failed to import DXF file: {e}")
+
+    # ---------------- Phase 2 Pro Production Additions ----------------
+
+    def import_lbrn(self, filepath: Optional[str] = None):
+        """Imports LightBurn .lbrn2 (JSON) or .lbrn (XML) project files."""
+        if not filepath:
+            filepath, _ = QFileDialog.getOpenFileName(
+                self, "Import LightBurn Project", "",
+                "LightBurn Projects (*.lbrn *.lbrn2);;All Files (*)"
+            )
+        if not filepath:
+            return
+        self.import_lbrn_file(filepath)
+
+    def import_lbrn_file(self, filepath: str):
+        try:
+            from laserforge.core.lbrn_importer import LightBurnImporter
+            entities, layer_map = LightBurnImporter.import_file(filepath, layer_manager=self.layer_manager)
+            if not entities:
+                QMessageBox.warning(self, "LightBurn Import", f"No shapes found in '{os.path.basename(filepath)}'.")
+                return
+
+            if hasattr(self.scene, "push_undo_state"):
+                self.scene.push_undo_state()
+
+            for ent in entities:
+                self.scene.add_entity(ent)
+
+            self.cuts_panel.update_table()
+            self._add_recent_file(filepath)
+            self.canvas_widget.view.zoom_to_fit()
+            self.statusBar().showMessage(
+                f"Imported LightBurn project: {len(entities)} shapes, {len(layer_map)} cut layers!", 4000
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "LightBurn Import Error", f"Failed to import LightBurn file: {e}")
+
+    def open_holding_tabs_studio(self):
+        """Opens the Holding Tabs & Micro-Bridges Studio dialog."""
+        from laserforge.ui.tabs_dialog import HoldingTabsDialog
+        selected = self.scene.get_selected_entities()
+        targets = selected if selected else self.scene.get_all_entities()
+        layer = self.layer_manager.get_layer(self.scene.active_layer_id)
+        dlg = HoldingTabsDialog(targets, layer_settings=layer, parent=self)
+        dlg.tabs_applied.connect(self._on_tabs_applied)
+        dlg.exec()
+
+    def _on_tabs_applied(self, config: dict):
+        if hasattr(self.scene, "push_undo_state"):
+            self.scene.push_undo_state()
+        target = config.get("target", "selected")
+        enabled = config.get("tabs_enabled", True)
+        t_count = config.get("tab_count", 4)
+        t_width = config.get("tab_width", 1.2)
+        t_power = config.get("tab_power_pct", 0.0)
+
+        if target == "layer":
+            layer = self.layer_manager.get_layer(self.scene.active_layer_id)
+            layer.tabs_enabled = enabled
+            layer.tab_count = t_count
+            layer.tab_width = t_width
+            layer.tab_power_pct = t_power
+        else:
+            targets = self.scene.get_selected_entities()
+            if not targets:
+                targets = self.scene.get_all_entities()
+            for ent in targets:
+                layer = self.layer_manager.get_layer(ent.layer_id)
+                layer.tabs_enabled = enabled
+                layer.tab_count = t_count
+                layer.tab_width = t_width
+                layer.tab_power_pct = t_power
+
+        self.cuts_panel.update_table()
+        self.scene.update()
+        self.statusBar().showMessage(f"Holding tabs updated ({t_count} tabs, {t_width} mm width, {t_power}% power).", 4000)
+
+    def open_print_and_cut_studio(self):
+        """Opens the Print & Cut (2-Point Optical / Machine Registration) dialog."""
+        from laserforge.ui.print_and_cut_dialog import PrintAndCutDialog
+        targets = self.scene.get_selected_entities()
+        if not targets:
+            targets = [e for e in self.scene.get_all_entities() if not self.layer_manager.get_layer(e.layer_id).is_tool]
+        dlg = PrintAndCutDialog(
+            targets,
+            serial_controller=self.serial,
+            bed_size=(self.settings.bed_width, self.settings.bed_height),
+            parent=self
+        )
+        dlg.alignment_applied.connect(self._on_print_and_cut_applied)
+        dlg.exec()
+
+    def _on_print_and_cut_applied(self, res: dict):
+        dig_p1 = res["dig_p1"]
+        phys_p1 = res["phys_p1"]
+        angle_deg = res["angle_deg"]
+        scale = res.get("scale", 1.0)
+
+        if hasattr(self.scene, "push_undo_state"):
+            self.scene.push_undo_state()
+
+        targets = self.scene.get_selected_entities()
+        if not targets:
+            targets = [e for e in self.scene.get_all_entities() if not self.layer_manager.get_layer(e.layer_id).is_tool]
+
+        rad = math.radians(angle_deg)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+
+        for ent in targets:
+            if isinstance(ent, PathEntity):
+                new_contours = []
+                for c in ent.contours:
+                    nc = []
+                    for px, py in c:
+                        dx = (px - dig_p1[0]) * scale
+                        dy = (py - dig_p1[1]) * scale
+                        rx = dx * cos_a - dy * sin_a + phys_p1[0]
+                        ry = dx * sin_a + dy * cos_a + phys_p1[1]
+                        nc.append((rx, ry))
+                    new_contours.append(nc)
+                ent.contours = new_contours
+            elif isinstance(ent, RectEntity):
+                dx = (ent.x - dig_p1[0]) * scale
+                dy = (ent.y - dig_p1[1]) * scale
+                ent.x = dx * cos_a - dy * sin_a + phys_p1[0]
+                ent.y = dx * sin_a + dy * cos_a + phys_p1[1]
+                ent.width *= scale
+                ent.height *= scale
+                ent.rotation += angle_deg
+            elif isinstance(ent, CircleEntity):
+                dx = (ent.x - dig_p1[0]) * scale
+                dy = (ent.y - dig_p1[1]) * scale
+                ent.x = dx * cos_a - dy * sin_a + phys_p1[0]
+                ent.y = dx * sin_a + dy * cos_a + phys_p1[1]
+                ent.radius_x *= scale
+                ent.radius_y *= scale
+                ent.rotation += angle_deg
+            elif isinstance(ent, LineEntity):
+                dx1 = (ent.x - dig_p1[0]) * scale
+                dy1 = (ent.y - dig_p1[1]) * scale
+                dx2 = (ent.x2 - dig_p1[0]) * scale
+                dy2 = (ent.y2 - dig_p1[1]) * scale
+                ent.x = dx1 * cos_a - dy1 * sin_a + phys_p1[0]
+                ent.y = dx1 * sin_a + dy1 * cos_a + phys_p1[1]
+                ent.x2 = dx2 * cos_a - dy2 * sin_a + phys_p1[0]
+                ent.y2 = dx2 * sin_a + dy2 * cos_a + phys_p1[1]
+            elif isinstance(ent, TextEntity):
+                dx = (ent.x - dig_p1[0]) * scale
+                dy = (ent.y - dig_p1[1]) * scale
+                ent.x = dx * cos_a - dy * sin_a + phys_p1[0]
+                ent.y = dx * sin_a + dy * cos_a + phys_p1[1]
+                ent.font_size *= scale
+                ent.rotation += angle_deg
+
+        self.scene.rebuild_from_entities(self.scene.get_all_entities())
+        self.scene.update()
+        self.statusBar().showMessage(f"Print & Cut Alignment Applied ({angle_deg:+.2f}°, scale {scale:.3f}x)", 4000)
 
     def export_dxf(self):
         """Exports canvas vectors to standard AutoCAD DXF file."""
