@@ -48,6 +48,99 @@ class GuideLineItem(QGraphicsLineItem):
             self.setLine(self.pos_mm, 0, self.pos_mm, self.bed_h)
 
 
+class LaserReticleItem(QGraphicsItem):
+    """
+    Live physical laser head reticle rendered on the CAD canvas.
+    Displays an animated crosshair and coordinates showing real-time MPos/WPos.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setZValue(9999)  # Always topmost overlay
+        self.laser_x = 0.0
+        self.laser_y = 0.0
+        self.machine_state = "Disconnected"
+        self.is_connected = False
+        self.show_reticle = True
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setEnabled(False)
+        self.setVisible(False)
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-25.0, -25.0, 90.0, 50.0)
+
+    def update_position(self, x: float, y: float, state: str = "Idle", connected: bool = True):
+        self.laser_x = x
+        self.laser_y = y
+        self.machine_state = state
+        self.is_connected = connected
+        self.setPos(x, y)
+        self.setVisible(self.show_reticle and connected and state != "Disconnected")
+        self.update()
+
+    def set_reticle_visible(self, visible: bool):
+        self.show_reticle = visible
+        self.setVisible(visible and self.is_connected and self.machine_state != "Disconnected")
+        self.update()
+
+    def paint(self, painter: QPainter, option, widget=None):
+        if not self.isVisible():
+            return
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # State-based accent color
+        state_colors = {
+            "Run": QColor("#ff1744"),       # Bright red when firing/running
+            "Hold": QColor("#ff9100"),      # Orange when paused/held
+            "Jog": QColor("#00e5ff"),       # Cyan when jogging
+            "Alarm": QColor("#d50000"),     # Deep red when alarm
+            "Idle": QColor("#00e676"),      # Bright green when ready
+        }
+        accent = state_colors.get(self.machine_state, QColor("#00e676"))
+
+        # Outer target ring
+        pen_outer = QPen(accent, 1.2, Qt.PenStyle.SolidLine)
+        pen_outer.setCosmetic(True)
+        painter.setPen(pen_outer)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(0, 0), 4.0, 4.0)
+
+        # Dashed outer ring
+        pen_inner = QPen(accent, 0.8, Qt.PenStyle.DashLine)
+        pen_inner.setCosmetic(True)
+        painter.setPen(pen_inner)
+        painter.drawEllipse(QPointF(0, 0), 8.0, 8.0)
+
+        # Crosshair reticle lines with center aperture
+        pen_cross = QPen(accent, 1.5, Qt.PenStyle.SolidLine)
+        pen_cross.setCosmetic(True)
+        painter.setPen(pen_cross)
+        painter.drawLine(QLineF(-12.0, 0.0, -2.0, 0.0))
+        painter.drawLine(QLineF(2.0, 0.0, 12.0, 0.0))
+        painter.drawLine(QLineF(0.0, -12.0, 0.0, -2.0))
+        painter.drawLine(QLineF(0.0, 2.0, 0.0, 12.0))
+
+        # Center laser focal dot
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(accent))
+        painter.drawEllipse(QPointF(0, 0), 1.0, 1.0)
+
+        # Floating HUD badge
+        hud_font = QFont("monospace", 7, QFont.Weight.Bold)
+        painter.setFont(hud_font)
+        painter.setBrush(QBrush(QColor(18, 18, 18, 200)))
+        painter.setPen(QPen(accent, 0.8))
+        hud_rect = QRectF(14.0, -12.0, 52.0, 24.0)
+        painter.drawRoundedRect(hud_rect, 3.0, 3.0)
+
+        text_pen = QPen(accent, 1.0)
+        text_pen.setCosmetic(True)
+        painter.setPen(text_pen)
+        painter.drawText(QRectF(16.0, -11.0, 48.0, 11.0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, f"{self.laser_x:.1f},{self.laser_y:.1f}")
+        painter.setPen(QPen(QColor("#ffffff"), 1.0))
+        painter.drawText(QRectF(16.0, 0.0, 48.0, 11.0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.machine_state[:6])
+
+
 class LaserItemWrapper(QGraphicsItem):
     """Wrapper item for CAD entities with selection bounding box and interactive handles."""
     def __init__(self, entity: LaserEntity, layer_manager: LayerManager):
@@ -566,7 +659,15 @@ class LaserCanvasScene(QGraphicsScene):
         self._camera_overlay_item.setEnabled(False)
         self.addItem(self._camera_overlay_item)
 
+        # Real-time Laser Head Position Reticle
+        self.laser_reticle = LaserReticleItem()
+        self.addItem(self.laser_reticle)
+
         self.selectionChanged.connect(self._on_selection_changed)
+
+    def update_laser_position(self, x: float, y: float, state: str = "Idle", connected: bool = True):
+        """Updates the physical laser head crosshair on the CAD canvas."""
+        self.laser_reticle.update_position(x, y, state, connected)
 
     def set_camera_overlay_pixmap(self, pixmap: QPixmap, bed_width: float, bed_height: float):
         """Sets the rectified top-down orthophoto onto the laser bed at exact millimeter scale."""

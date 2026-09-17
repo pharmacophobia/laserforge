@@ -303,6 +303,161 @@ class ImageTracer:
         return processed_contours
 
     @staticmethod
+    def trace_centerline(
+        img: Optional[Image.Image] = None,
+        binary_mask: Optional[np.ndarray] = None,
+        threshold: int = 128,
+        mode: str = "sketch",
+        invert: bool = False,
+        blur_radius: int = 1,
+        adaptive_block_size: int = 11,
+        adaptive_c: int = 2,
+        contrast: float = 1.0,
+        brightness: float = 0.0,
+        high_pass: bool = False,
+        clahe: bool = False,
+        edge_dilation: int = 0,
+        min_length_pixels: float = 4.0,
+        smoothness: float = 1.0,
+        scale_x: float = 1.0,
+        scale_y: float = 1.0,
+        offset_x: float = 0.0,
+        offset_y: float = 0.0
+    ) -> List[List[Tuple[float, float]]]:
+        """
+        Extracts single-stroke centerline vector paths from raster images using
+        morphological skeletonization. Ideal for signatures, handwriting, line art,
+        and single-pass laser score cutting.
+        """
+        import skimage.morphology
+        if binary_mask is not None:
+            binary = binary_mask
+        else:
+            if img is None:
+                raise ValueError("Either img or binary_mask must be provided")
+            binary = ImageTracer.get_binary_mask(
+                img,
+                threshold=threshold,
+                mode=mode,
+                invert=invert,
+                blur_radius=blur_radius,
+                adaptive_block_size=adaptive_block_size,
+                adaptive_c=adaptive_c,
+                contrast=contrast,
+                brightness=brightness,
+                high_pass=high_pass,
+                clahe=clahe,
+                edge_dilation=edge_dilation
+            )
+
+        fg = (binary > 127)
+        if not np.any(fg):
+            return []
+
+        skel = skimage.morphology.skeletonize(fg)
+        y_indices, x_indices = np.where(skel)
+        if len(y_indices) == 0:
+            return []
+
+        pts_set = set(zip(x_indices, y_indices))
+        adj: Dict[Tuple[int, int], List[Tuple[int, int]]] = {p: [] for p in pts_set}
+        for x, y in pts_set:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nbr = (x + dx, y + dy)
+                    if nbr in pts_set:
+                        adj[(x, y)].append(nbr)
+
+        visited_edges = set()
+        paths: List[List[Tuple[float, float]]] = []
+
+        # Find key nodes: endpoints (deg == 1) and junctions (deg >= 3)
+        key_nodes = [p for p, nbrs in adj.items() if len(nbrs) != 2]
+
+        # 1. Walk from key nodes
+        for start_node in key_nodes:
+            for nbr in adj[start_node]:
+                edge_id = tuple(sorted([start_node, nbr]))
+                if edge_id in visited_edges:
+                    continue
+
+                curr_path = [start_node, nbr]
+                visited_edges.add(edge_id)
+                prev = start_node
+                curr = nbr
+
+                while True:
+                    next_nodes = [n for n in adj[curr] if n != prev]
+                    if len(next_nodes) != 1:
+                        break
+                    next_n = next_nodes[0]
+                    next_edge = tuple(sorted([curr, next_n]))
+                    if next_edge in visited_edges:
+                        break
+                    visited_edges.add(next_edge)
+                    curr_path.append(next_n)
+                    prev, curr = curr, next_n
+
+                if len(curr_path) >= 2:
+                    paths.append([(float(px), float(py)) for px, py in curr_path])
+
+        # 2. Walk isolated closed loops
+        for p in pts_set:
+            for nbr in adj[p]:
+                edge_id = tuple(sorted([p, nbr]))
+                if edge_id in visited_edges:
+                    continue
+
+                curr_path = [p, nbr]
+                visited_edges.add(edge_id)
+                prev = p
+                curr = nbr
+
+                while True:
+                    next_nodes = [n for n in adj[curr] if n != prev]
+                    if not next_nodes:
+                        break
+                    next_n = next_nodes[0]
+                    next_edge = tuple(sorted([curr, next_n]))
+                    if next_edge in visited_edges:
+                        if next_n == p:
+                            curr_path.append(p)
+                        break
+                    visited_edges.add(next_edge)
+                    curr_path.append(next_n)
+                    prev, curr = curr, next_n
+
+                if len(curr_path) >= 2:
+                    paths.append([(float(px), float(py)) for px, py in curr_path])
+
+        # Post-process: RDP simplify and scale to mm
+        processed = []
+        epsilon = max(0.2, smoothness * 0.75)
+        for path in paths:
+            if len(path) < 2:
+                continue
+            arr = np.array(path, dtype=np.float32).reshape(-1, 1, 2)
+            closed = (path[0] == path[-1])
+            simplified = cv2.approxPolyDP(arr, epsilon, closed=closed).reshape(-1, 2)
+            if len(simplified) < 2:
+                continue
+
+            diffs = simplified[1:] - simplified[:-1]
+            dist = float(np.sum(np.hypot(diffs[:, 0], diffs[:, 1])))
+            if dist < min_length_pixels:
+                continue
+
+            scaled = [
+                (offset_x + float(pt[0]) * scale_x, offset_y + float(pt[1]) * scale_y)
+                for pt in simplified
+            ]
+            processed.append(scaled)
+
+        return processed
+
+    @staticmethod
     def contours_to_svg(
         contours: List[List[Tuple[float, float]]],
         width_mm: float,

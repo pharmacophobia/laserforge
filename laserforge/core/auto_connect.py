@@ -149,6 +149,20 @@ class PortDetector:
             ))
 
         ranked.sort(key=lambda x: x.score, reverse=True)
+
+        # Always include the Virtual GRBL Simulator port for test-driving
+        ranked.append(RankedPort(
+            device="VIRTUAL_GRBL",
+            description="LaserForge Virtual GRBL 1.1f Simulator",
+            hwid="VIRTUAL_SIMULATOR",
+            vid=0x0000,
+            pid=0x0000,
+            chip_info="In-Memory GRBL Simulator",
+            display_name="VIRTUAL_GRBL (Software Simulator)",
+            score=5,
+            is_usb=False
+        ))
+
         return ranked
 
 
@@ -162,6 +176,8 @@ def probe_port_for_grbl(
     Returns: (is_grbl, baud_rate, status_or_banner)
     Non-destructive: closes port before returning.
     """
+    if port.upper().startswith("VIRTUAL"):
+        return True, 115200, "Grbl 1.1f ['$' for help] (Virtual Simulator)"
     for baud in baud_rates:
         ser = None
         try:

@@ -7,6 +7,7 @@ tangential/arc/perpendicular lead-ins, lead-outs, and overcut path extensions.
 import math
 from typing import List, Tuple, Optional, Dict, Any, Union
 import shapely
+import shapely.affinity
 from shapely.geometry import Polygon, MultiPolygon, LineString, LinearRing
 
 
@@ -45,17 +46,22 @@ class KerfEngine:
     def apply_kerf_to_paths(
         cls,
         paths: List[Path2D],
-        kerf_offset: float,
+        kerf_offset: float = 0.0,
+        kerf_x: Optional[float] = None,
+        kerf_y: Optional[float] = None,
         direction: str = "Auto",
         mitre_limit: float = 5.0
     ) -> List[Dict[str, Any]]:
         """
         Applies directional kerf compensation to a list of vector paths.
+        Supports dual-axis asymmetric kerf offset (kerf_x != kerf_y) to compensate
+        for elliptical / rectangular diode and CO2 laser beam focal spots.
 
         Parameters:
             paths: List of vertex loops [[(x,y), ...], ...]
-            kerf_offset: Laser beam width / total kerf in mm (e.g. 0.15mm).
-                         The offset distance applied is kerf_offset / 2.0.
+            kerf_offset: Scalar laser beam width / total kerf in mm (e.g. 0.15mm).
+            kerf_x: Optional separate X-axis kerf in mm. Overrides kerf_offset for X.
+            kerf_y: Optional separate Y-axis kerf in mm. Overrides kerf_offset for Y.
             direction: "Auto" (outer perimeters outward, inner holes inward),
                        "Outward" (all paths expanded),
                        "Inward" (all paths shrunk),
@@ -63,18 +69,16 @@ class KerfEngine:
             mitre_limit: Mitre ratio limit to avoid extreme spikes on acute corners.
 
         Returns:
-            List of dicts:
-              {
-                "path": Path2D,
-                "is_outer": bool,
-                "is_closed": bool,
-                "original_path": Path2D
-              }
+            List of dicts with offset path geometry and metadata.
         """
         results: List[Dict[str, Any]] = []
-        half_kerf = kerf_offset / 2.0
+        eff_kx = kerf_x if kerf_x is not None else kerf_offset
+        eff_ky = kerf_y if kerf_y is not None else kerf_offset
 
-        if abs(half_kerf) < 1e-5 or direction in ("Off", "None"):
+        half_kx = eff_kx / 2.0
+        half_ky = eff_ky / 2.0
+
+        if (abs(half_kx) < 1e-5 and abs(half_ky) < 1e-5) or direction in ("Off", "None"):
             for p in paths:
                 results.append({
                     "path": p,
@@ -146,16 +150,11 @@ class KerfEngine:
             is_outer = is_outer_flags[idx]
 
             # Determine signed offset distance
-            if direction == "Auto":
-                d = half_kerf if is_outer else -half_kerf
-            elif direction == "Outward":
-                d = half_kerf
-            elif direction == "Inward":
-                d = -half_kerf
-            else:
-                d = 0.0
+            sign = 1.0 if (direction == "Outward" or (direction == "Auto" and is_outer)) else -1.0
+            if direction in ("Off", "None"):
+                sign = 0.0
 
-            if abs(d) < 1e-6:
+            if abs(half_kx) < 1e-6 and abs(half_ky) < 1e-6:
                 results.append({
                     "path": orig_p,
                     "is_outer": is_outer,
@@ -165,8 +164,17 @@ class KerfEngine:
                 continue
 
             try:
-                # Buffer with mitre join (join_style=2) to retain sharp corners on cut pieces
-                buffered = poly.buffer(d, join_style=shapely.BufferJoinStyle.mitre, mitre_limit=mitre_limit)
+                # If X and Y kerfs differ, apply affine scaling to compute exact elliptical Minkowski sum
+                if abs(half_kx - half_ky) > 1e-5 and half_kx > 1e-5 and half_ky > 1e-5:
+                    sx = half_ky / half_kx
+                    d_y = sign * half_ky
+                    poly_scaled = shapely.affinity.scale(poly, xfact=sx, yfact=1.0, origin=(0, 0))
+                    buffered = poly_scaled.buffer(d_y, join_style=shapely.BufferJoinStyle.mitre, mitre_limit=mitre_limit)
+                    buffered = shapely.affinity.scale(buffered, xfact=1.0 / sx, yfact=1.0, origin=(0, 0))
+                else:
+                    d = sign * (half_kx if half_kx > 1e-5 else half_ky)
+                    buffered = poly.buffer(d, join_style=shapely.BufferJoinStyle.mitre, mitre_limit=mitre_limit)
+
                 if buffered.is_empty:
                     continue
 

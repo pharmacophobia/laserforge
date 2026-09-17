@@ -31,6 +31,7 @@ class LaserControlPanel(QWidget):
     start_job_requested = pyqtSignal()
     simulate_job_requested = pyqtSignal()
     frame_job_requested = pyqtSignal()
+    contour_frame_job_requested = pyqtSignal()
     burn_perimeter_requested = pyqtSignal()
     alignment_dialog_requested = pyqtSignal()
     settings_requested = pyqtSignal()
@@ -311,41 +312,47 @@ class LaserControlPanel(QWidget):
         run_row = QHBoxLayout()
         run_row.setSpacing(3)
 
-        self.btn_frame = QPushButton("⛶ Frame")
-        self.btn_frame.setToolTip("Trace job boundary with laser guide before cutting")
-        self.btn_frame.setStyleSheet("font-weight: bold; padding: 5px; background-color: #00796b; color: white; font-size: 11px;")
+        self.btn_frame = QPushButton("⛶ Rect Frame")
+        self.btn_frame.setToolTip("Trace rectangular bounding box with laser guide before cutting")
+        self.btn_frame.setStyleSheet("font-weight: bold; padding: 4px; background-color: #00796b; color: white; font-size: 10px;")
         self.btn_frame.clicked.connect(self.frame_job_requested.emit)
+
+        self.btn_contour_frame = QPushButton("⬡ Contour Frame")
+        self.btn_contour_frame.setToolTip("Trace exact rubber-band perimeter of artwork for aligning on scrap wood/materials")
+        self.btn_contour_frame.setStyleSheet("font-weight: bold; padding: 4px; background-color: #00897b; color: white; font-size: 10px;")
+        self.btn_contour_frame.clicked.connect(self.contour_frame_job_requested.emit)
 
         self.btn_simulate = QPushButton("🎬 Simulate")
         self.btn_simulate.setToolTip("Simulate project outcomes, material finish, burn trajectory, and time breakdown (Alt+P)")
         self.btn_simulate.setStyleSheet(
-            "background-color: #5c6bc0; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
+            "background-color: #5c6bc0; color: white; font-weight: bold; padding: 4px; font-size: 10px;"
         )
         self.btn_simulate.clicked.connect(self.simulate_job_requested.emit)
 
         self.btn_start = QPushButton("▶ Start")
         self.btn_start.setStyleSheet(
-            "background-color: #2e7d32; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
+            "background-color: #2e7d32; color: white; font-weight: bold; padding: 4px; font-size: 10px;"
         )
         self.btn_start.clicked.connect(self.start_job_requested.emit)
 
         self.btn_pause = QPushButton("⏸ Pause")
         self.btn_pause.setStyleSheet(
-            "background-color: #f57f17; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
+            "background-color: #f57f17; color: white; font-weight: bold; padding: 4px; font-size: 10px;"
         )
         self.btn_pause.clicked.connect(self._toggle_pause)
 
         self.btn_stop = QPushButton("⏹ Stop")
         self.btn_stop.setStyleSheet(
-            "background-color: #c62828; color: white; font-weight: bold; padding: 5px; font-size: 11px;"
+            "background-color: #c62828; color: white; font-weight: bold; padding: 4px; font-size: 10px;"
         )
         self.btn_stop.clicked.connect(self.serial_ctrl.stop_streaming)
 
-        run_row.addWidget(self.btn_frame, 1)
-        run_row.addWidget(self.btn_simulate, 1)
-        run_row.addWidget(self.btn_start, 1)
-        run_row.addWidget(self.btn_pause, 1)
-        run_row.addWidget(self.btn_stop, 1)
+        run_row.addWidget(self.btn_frame)
+        run_row.addWidget(self.btn_contour_frame)
+        run_row.addWidget(self.btn_simulate)
+        run_row.addWidget(self.btn_start)
+        run_row.addWidget(self.btn_pause)
+        run_row.addWidget(self.btn_stop)
         job_layout.addLayout(run_row)
 
         self.progress_bar = QProgressBar()
@@ -359,6 +366,68 @@ class LaserControlPanel(QWidget):
         self.progress_label.setStyleSheet("color: #9e9e9e; font-size: 9px;")
         self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         job_layout.addWidget(self.progress_label)
+
+        # Real-time GRBL 1.1 Overrides
+        ov_group = QGroupBox("Live Speed & Power Overrides")
+        ov_layout = QVBoxLayout(ov_group)
+        ov_layout.setContentsMargins(4, 2, 4, 2)
+        ov_layout.setSpacing(2)
+
+        # Feed override row
+        feed_row = QHBoxLayout()
+        feed_row.setSpacing(2)
+        self.lbl_feed_ov = QLabel("Speed: 100%")
+        self.lbl_feed_ov.setStyleSheet("font-size: 9px; font-weight: bold; color: #4fc3f7; min-width: 65px;")
+        btn_f_reset = QPushButton("100%")
+        btn_f_reset.setToolTip("Reset feed rate to 100%")
+        btn_f_reset.clicked.connect(lambda: self.serial_ctrl.set_feed_override("100"))
+        btn_f_m10 = QPushButton("-10%")
+        btn_f_m10.clicked.connect(lambda: self.serial_ctrl.set_feed_override("-10"))
+        btn_f_p10 = QPushButton("+10%")
+        btn_f_p10.clicked.connect(lambda: self.serial_ctrl.set_feed_override("+10"))
+        btn_f_m1 = QPushButton("-1%")
+        btn_f_m1.clicked.connect(lambda: self.serial_ctrl.set_feed_override("-1"))
+        btn_f_p1 = QPushButton("+1%")
+        btn_f_p1.clicked.connect(lambda: self.serial_ctrl.set_feed_override("+1"))
+        for b in (btn_f_reset, btn_f_m10, btn_f_p10, btn_f_m1, btn_f_p1):
+            b.setStyleSheet("padding: 1px 3px; font-size: 8px;")
+
+        feed_row.addWidget(self.lbl_feed_ov)
+        feed_row.addWidget(btn_f_m10)
+        feed_row.addWidget(btn_f_m1)
+        feed_row.addWidget(btn_f_reset)
+        feed_row.addWidget(btn_f_p1)
+        feed_row.addWidget(btn_f_p10)
+        ov_layout.addLayout(feed_row)
+
+        # Laser power override row
+        power_row = QHBoxLayout()
+        power_row.setSpacing(2)
+        self.lbl_power_ov = QLabel("Power: 100%")
+        self.lbl_power_ov.setStyleSheet("font-size: 9px; font-weight: bold; color: #ffb74d; min-width: 65px;")
+        btn_p_reset = QPushButton("100%")
+        btn_p_reset.setToolTip("Reset laser power to 100%")
+        btn_p_reset.clicked.connect(lambda: self.serial_ctrl.set_power_override("100"))
+        btn_p_m10 = QPushButton("-10%")
+        btn_p_m10.clicked.connect(lambda: self.serial_ctrl.set_power_override("-10"))
+        btn_p_p10 = QPushButton("+10%")
+        btn_p_p10.clicked.connect(lambda: self.serial_ctrl.set_power_override("+10"))
+        btn_p_m1 = QPushButton("-1%")
+        btn_p_m1.clicked.connect(lambda: self.serial_ctrl.set_power_override("-1"))
+        btn_p_p1 = QPushButton("+1%")
+        btn_p_p1.clicked.connect(lambda: self.serial_ctrl.set_power_override("+1"))
+        for b in (btn_p_reset, btn_p_m10, btn_p_p10, btn_p_m1, btn_p_p1):
+            b.setStyleSheet("padding: 1px 3px; font-size: 8px;")
+
+        power_row.addWidget(self.lbl_power_ov)
+        power_row.addWidget(btn_p_m10)
+        power_row.addWidget(btn_p_m1)
+        power_row.addWidget(btn_p_reset)
+        power_row.addWidget(btn_p_p1)
+        power_row.addWidget(btn_p_p10)
+        ov_layout.addLayout(power_row)
+
+        job_layout.addWidget(ov_group)
 
         main_layout.addWidget(job_group)
 
@@ -496,6 +565,14 @@ class LaserControlPanel(QWidget):
         y_val = wpos[1] if (wpos and len(wpos) > 1) else 0.0
         z_val = wpos[2] if (wpos and len(wpos) > 2) else 0.0
         self.pos_label.setText(f"X:{x_val:.1f} Y:{y_val:.1f} Z:{z_val:.1f}")
+
+        # Update real-time overrides readout if provided
+        overrides = status.get("overrides")
+        if overrides:
+            feed_pct = overrides.get("feed", 100)
+            power_pct = overrides.get("power", 100)
+            self.lbl_feed_ov.setText(f"Speed: {feed_pct}%")
+            self.lbl_power_ov.setText(f"Power: {power_pct}%")
 
         # Check for active hardware limit switches in Pn:
         limit_axes = [ax for ax in ("X", "Y", "Z") if ax in pins]

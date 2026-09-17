@@ -797,12 +797,23 @@ class TraceImageDialog(QDialog):
         refine_grid.setSpacing(6)
 
         # Smoothness (RDP Epsilon)
-        refine_grid.addWidget(QLabel("Simplification:"), 0, 0)
+        refine_grid.addWidget(QLabel("Trace Style:"), 0, 0)
+        self.combo_trace_style = QComboBox()
+        self.combo_trace_style.addItem("Outline Trace (Closed Boundaries)")
+        self.combo_trace_style.addItem("Centerline Trace (Single Stroke Skeleton)")
+        self.combo_trace_style.setToolTip(
+            "Outline: Traces outer boundaries and interior holes.\n"
+            "Centerline: Skeletonizes strokes into single-line vector paths for signatures, handwriting, and line scoring."
+        )
+        self.combo_trace_style.currentIndexChanged.connect(self._on_user_param_changed)
+        refine_grid.addWidget(self.combo_trace_style, 0, 1, 1, 2)
+
+        refine_grid.addWidget(QLabel("Simplification:"), 1, 0)
         self.smooth_slider = QSlider(Qt.Orientation.Horizontal)
         self.smooth_slider.setRange(5, 400)  # maps to 0.05 - 4.00 px
         self.smooth_slider.setValue(60)
         self.smooth_slider.valueChanged.connect(self._on_smooth_slider_changed)
-        refine_grid.addWidget(self.smooth_slider, 0, 1)
+        refine_grid.addWidget(self.smooth_slider, 1, 1)
 
         self.smooth_spin = QDoubleSpinBox()
         self.smooth_spin.setRange(0.05, 5.0)
@@ -1335,18 +1346,29 @@ class TraceImageDialog(QDialog):
         ignore_holes = self.chk_ignore_holes.isChecked()
         ignore_border = self.chk_ignore_border.isChecked()
 
+        is_centerline = (getattr(self, "combo_trace_style", None) is not None and self.combo_trace_style.currentIndex() == 1)
+
         try:
-            contours = ImageTracer.trace_image(
-                binary_mask=binary_mask,
-                smoothness=smooth,
-                corner_sharpness_deg=corner_deg,
-                smooth_iterations=smooth_iter,
-                min_area_pixels=noise_area,
-                ignore_holes=ignore_holes,
-                ignore_border=ignore_border,
-                scale_x=1.0,
-                scale_y=1.0
-            )
+            if is_centerline:
+                contours = ImageTracer.trace_centerline(
+                    binary_mask=binary_mask,
+                    smoothness=smooth,
+                    min_length_pixels=max(2.0, float(noise_area) * 0.4),
+                    scale_x=1.0,
+                    scale_y=1.0
+                )
+            else:
+                contours = ImageTracer.trace_image(
+                    binary_mask=binary_mask,
+                    smoothness=smooth,
+                    corner_sharpness_deg=corner_deg,
+                    smooth_iterations=smooth_iter,
+                    min_area_pixels=noise_area,
+                    ignore_holes=ignore_holes,
+                    ignore_border=ignore_border,
+                    scale_x=1.0,
+                    scale_y=1.0
+                )
         except Exception as e:
             self.lbl_stats.setText(f"Error tracing contours: {e}")
             return
@@ -1357,8 +1379,9 @@ class TraceImageDialog(QDialog):
         self.canvas.set_contours(contours)
 
         total_pts = sum(len(c) for c in contours)
+        style_name = "Centerline strokes" if is_centerline else "Outline contours"
         self.lbl_stats.setText(
-            f"Vectors: {len(contours)} contours | {total_pts} vertices | {t_calc:.1f} ms"
+            f"{style_name}: {len(contours)} paths | {total_pts} vertices | {t_calc:.1f} ms"
         )
 
     # -----------------------------------------------------------------
@@ -1381,7 +1404,9 @@ class TraceImageDialog(QDialog):
             scaled_contours.append(scaled_poly)
 
         layer_id = self.layer_combo.currentData()
-        name = f"Traced_{os.path.splitext(self.image_name)[0]}"
+        is_centerline = (getattr(self, "combo_trace_style", None) is not None and self.combo_trace_style.currentIndex() == 1)
+        prefix = "Centerline" if is_centerline else "Traced"
+        name = f"{prefix}_{os.path.splitext(self.image_name)[0]}"
 
         self.result_path_entity = PathEntity(
             layer_id=layer_id,
@@ -1389,7 +1414,7 @@ class TraceImageDialog(QDialog):
             x=0.0,
             y=0.0,
             contours=scaled_contours,
-            closed=True
+            closed=(not is_centerline)
         )
         self.delete_original_image = self.chk_delete_orig.isChecked()
         self.accept()

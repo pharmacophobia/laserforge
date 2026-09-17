@@ -107,6 +107,190 @@ GRBL_SETTING_DESCRIPTIONS: Dict[str, Tuple[str, str, str]] = {
     "$132": ("Z Max travel", "mm", "Maximum travel distance of Z axis before soft limit alarm"),
 }
 
+
+class VirtualGrblSerial:
+    """
+    In-memory virtual GRBL 1.1f controller for test-driving LaserForge without hardware.
+    Simulates motion coordinates, status polling '<Idle|MPos:x,y,z|FS:0,0|Ov:100,100,100>',
+    feed/power overrides, homing, alarms, and G-code execution.
+    """
+    def __init__(self, port: str = "VIRTUAL_GRBL", baudrate: int = 115200, timeout: float = 0.1):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.is_open = True
+
+        self._rx_buffer = bytearray()
+        self._tx_buffer = bytearray()
+        self._lock = threading.Lock()
+
+        # Simulated machine state
+        self.state = "Idle"
+        self.mpos = [0.0, 0.0, 0.0]
+        self.wpos = [0.0, 0.0, 0.0]
+        self.wco = [0.0, 0.0, 0.0]
+        self.feed_rate = 0.0
+        self.laser_power = 0
+        self.overrides = [100, 100, 100]  # Feed, Rapid, Power %
+
+        # Startup banner
+        self._enqueue(b"\r\nGrbl 1.1f ['$' for help]\r\n")
+
+    def _enqueue(self, data: bytes):
+        with self._lock:
+            self._rx_buffer.extend(data)
+
+    @property
+    def in_waiting(self) -> int:
+        with self._lock:
+            return len(self._rx_buffer)
+
+    def read(self, size: int = 1) -> bytes:
+        with self._lock:
+            chunk = bytes(self._rx_buffer[:size])
+            del self._rx_buffer[:size]
+            return chunk
+
+    def readline(self, size: int = -1) -> bytes:
+        with self._lock:
+            idx = self._rx_buffer.find(b"\n")
+            if idx != -1:
+                line = bytes(self._rx_buffer[:idx + 1])
+                del self._rx_buffer[:idx + 1]
+                return line
+            else:
+                line = bytes(self._rx_buffer)
+                self._rx_buffer.clear()
+                return line
+
+    def reset_input_buffer(self):
+        with self._lock:
+            self._rx_buffer.clear()
+
+    def reset_output_buffer(self):
+        with self._lock:
+            self._tx_buffer.clear()
+
+    def write(self, data: bytes) -> int:
+        for b in data:
+            # Single-byte real-time commands
+            if b == ord('?'):
+                # Send status report
+                status = (
+                    f"<{self.state}|MPos:{self.mpos[0]:.3f},{self.mpos[1]:.3f},{self.mpos[2]:.3f}|"
+                    f"WPos:{self.wpos[0]:.3f},{self.wpos[1]:.3f},{self.wpos[2]:.3f}|"
+                    f"FS:{int(self.feed_rate)},{self.laser_power}|"
+                    f"Ov:{self.overrides[0]},{self.overrides[1]},{self.overrides[2]}>\r\n"
+                )
+                self._enqueue(status.encode('latin1'))
+            elif b == 0x18:  # Soft reset
+                self.state = "Idle"
+                self._enqueue(b"\r\nGrbl 1.1f ['$' for help]\r\nok\r\n")
+            elif b == ord('!'):  # Feed hold
+                self.state = "Hold"
+            elif b == ord('~'):  # Cycle start / resume
+                if self.state == "Hold":
+                    self.state = "Idle"
+            elif b == 0x90:  # Reset feed 100%
+                self.overrides[0] = 100
+            elif b == 0x91:  # Feed +10%
+                self.overrides[0] = min(200, self.overrides[0] + 10)
+            elif b == 0x92:  # Feed -10%
+                self.overrides[0] = max(10, self.overrides[0] - 10)
+            elif b == 0x93:  # Feed +1%
+                self.overrides[0] = min(200, self.overrides[0] + 1)
+            elif b == 0x94:  # Feed -1%
+                self.overrides[0] = max(10, self.overrides[0] - 1)
+            elif b == 0x95:  # Rapid 100%
+                self.overrides[1] = 100
+            elif b == 0x96:  # Rapid 50%
+                self.overrides[1] = 50
+            elif b == 0x97:  # Rapid 25%
+                self.overrides[1] = 25
+            elif b == 0x99:  # Reset power 100%
+                self.overrides[2] = 100
+            elif b == 0x9A:  # Power +10%
+                self.overrides[2] = min(200, self.overrides[2] + 10)
+            elif b == 0x9B:  # Power -10%
+                self.overrides[2] = max(0, self.overrides[2] - 10)
+            elif b == 0x9C:  # Power +1%
+                self.overrides[2] = min(200, self.overrides[2] + 1)
+            elif b == 0x9D:  # Power -1%
+                self.overrides[2] = max(0, self.overrides[2] - 1)
+            elif b == ord('\n') or b == ord('\r'):
+                if self._tx_buffer:
+                    line = self._tx_buffer.decode('latin1', errors='ignore').strip()
+                    self._tx_buffer.clear()
+                    if line:
+                        self._process_command_line(line)
+            else:
+                self._tx_buffer.append(b)
+        return len(data)
+
+    def _process_command_line(self, line: str):
+        if line == "$$":
+            resp = [
+                "$0=10", "$1=25", "$2=0", "$3=0", "$4=0", "$5=0", "$6=0",
+                "$10=1", "$11=0.010", "$12=0.002", "$13=0",
+                "$20=0", "$21=0", "$22=0", "$23=0", "$24=25.000", "$25=500.000",
+                "$26=250", "$27=1.000", "$30=1000", "$31=0", "$32=1",
+                "$100=80.000", "$101=80.000", "$102=250.000",
+                "$110=6000.000", "$111=6000.000", "$112=1000.000",
+                "$120=500.000", "$121=500.000", "$122=100.000",
+                "$130=400.000", "$131=400.000", "$132=50.000",
+                "ok\r\n"
+            ]
+            self._enqueue(("\r\n".join(resp)).encode('latin1'))
+        elif line == "$I":
+            self._enqueue(b"[VER:1.1f.20260917:LaserForge-Virtual]\r\n[OPT:V,15,128]\r\nok\r\n")
+        elif line == "$G":
+            self._enqueue(b"[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]\r\nok\r\n")
+        elif line == "$H":
+            self.mpos = [0.0, 0.0, 0.0]
+            self.wpos = [0.0, 0.0, 0.0]
+            self._enqueue(b"ok\r\n")
+        elif line == "$X":
+            self.state = "Idle"
+            self._enqueue(b"[MSG:Caution: Unlocked]\r\nok\r\n")
+        elif line.startswith("$"):
+            self._enqueue(b"ok\r\n")
+        else:
+            # Parse G-code motion
+            parts = line.upper().split()
+            for p in parts:
+                if p.startswith("X"):
+                    try:
+                        x = float(p[1:])
+                        self.mpos[0] = x
+                        self.wpos[0] = x
+                    except ValueError: pass
+                elif p.startswith("Y"):
+                    try:
+                        y = float(p[1:])
+                        self.mpos[1] = y
+                        self.wpos[1] = y
+                    except ValueError: pass
+                elif p.startswith("Z"):
+                    try:
+                        z = float(p[1:])
+                        self.mpos[2] = z
+                        self.wpos[2] = z
+                    except ValueError: pass
+                elif p.startswith("F"):
+                    try: self.feed_rate = float(p[1:])
+                    except ValueError: pass
+                elif p.startswith("S"):
+                    try: self.laser_power = int(float(p[1:]))
+                    except ValueError: pass
+            self._enqueue(b"ok\r\n")
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.is_open = False
+
+
 class SerialController(QObject):
     # Signals for UI updates
     connected = pyqtSignal(str)          # Port name
@@ -139,6 +323,9 @@ class SerialController(QObject):
         self.wpos = [0.0, 0.0, 0.0]
         self.wco = [0.0, 0.0, 0.0]
         self.active_pins = ""
+        self.feed_override_pct = 100
+        self.rapid_override_pct = 100
+        self.power_override_pct = 100
         self.grbl_settings: Dict[str, str] = {}
         self.machine_limits: Dict[str, Any] = {
             "bed_width": 400.0,
@@ -250,8 +437,12 @@ class SerialController(QObject):
             self.disconnect()
 
         try:
-            self.serial_port = serial.Serial(port, baud, timeout=0.1)
-            time.sleep(1.0)  # Wait for GRBL boot reset
+            if port.upper() in ("VIRTUAL_GRBL", "VIRTUAL", "SIMULATOR"):
+                self.serial_port = VirtualGrblSerial(port=port, baudrate=baud)
+                time.sleep(0.1)
+            else:
+                self.serial_port = serial.Serial(port, baud, timeout=0.1)
+                time.sleep(1.0)  # Wait for GRBL boot reset
             self.serial_port.reset_input_buffer()
             self.serial_port.reset_output_buffer()
 
@@ -261,7 +452,7 @@ class SerialController(QObject):
 
             # Wake up GRBL with clean newlines and check status
             self.serial_port.write(b"\n\n")
-            time.sleep(0.2)
+            time.sleep(0.1 if port.upper().startswith("VIRTUAL") else 0.2)
 
             # Start background reader and poller thread
             self.stop_worker = False
@@ -351,15 +542,62 @@ class SerialController(QObject):
         """Kill alarm lock ($X)."""
         self.send_command("$X")
 
-    def reset(self):
-        """Soft reset (Ctrl+X)."""
+    def _send_realtime_byte(self, byte_val: bytes, desc: str = ""):
+        """Sends a single-byte real-time GRBL command bypassing buffer queues."""
         if self.is_connected and self.serial_port:
             with self.lock:
                 try:
-                    self.serial_port.write(b"\x18")  # 0x18 = Ctrl+X
-                    self.log_received.emit("tx", "<Soft Reset Ctrl+X>")
+                    self.serial_port.write(byte_val)
+                    if desc:
+                        self.log_received.emit("tx", f"<Realtime Override: {desc}>")
                 except Exception as e:
-                    self.log_received.emit("err", f"Reset error: {e}")
+                    self.log_received.emit("err", f"Override send error: {e}")
+
+    def set_feed_override(self, code: str):
+        """
+        Sends GRBL 1.1 real-time feed override byte:
+        code: '+10', '-10', '+1', '-1', '100'
+        """
+        mapping = {
+            "100": (b"\x90", "Feed 100% Reset"),
+            "+10": (b"\x91", "Feed +10%"),
+            "-10": (b"\x92", "Feed -10%"),
+            "+1":  (b"\x93", "Feed +1%"),
+            "-1":  (b"\x94", "Feed -1%"),
+        }
+        entry = mapping.get(str(code))
+        if entry:
+            self._send_realtime_byte(entry[0], entry[1])
+
+    def set_power_override(self, code: str):
+        """
+        Sends GRBL 1.1 real-time laser power override byte:
+        code: '+10', '-10', '+1', '-1', '100'
+        """
+        mapping = {
+            "100": (b"\x99", "Laser Power 100% Reset"),
+            "+10": (b"\x9A", "Laser Power +10%"),
+            "-10": (b"\x9B", "Laser Power -10%"),
+            "+1":  (b"\x9C", "Laser Power +1%"),
+            "-1":  (b"\x9D", "Laser Power -1%"),
+        }
+        entry = mapping.get(str(code))
+        if entry:
+            self._send_realtime_byte(entry[0], entry[1])
+
+    def set_rapid_override(self, code: str):
+        """
+        Sends GRBL 1.1 real-time rapid travel override byte:
+        code: '100', '50', '25'
+        """
+        mapping = {
+            "100": (b"\x95", "Rapid 100%"),
+            "50":  (b"\x96", "Rapid 50%"),
+            "25":  (b"\x97", "Rapid 25%"),
+        }
+        entry = mapping.get(str(code))
+        if entry:
+            self._send_realtime_byte(entry[0], entry[1])
 
     def set_zero(self, x: bool = True, y: bool = True, z: bool = True):
         """Sets current position as work zero (WPos = 0)."""
@@ -754,6 +992,19 @@ class SerialController(QObject):
                     pins = p[3:]
                     self.active_pins = pins
                     status_dict["pins"] = pins
+                elif p.startswith("Ov:"):
+                    try:
+                        ovs = [int(v) for v in p[3:].split(",")]
+                        self.feed_override_pct = ovs[0]
+                        self.rapid_override_pct = ovs[1]
+                        self.power_override_pct = ovs[2]
+                        status_dict["overrides"] = {
+                            "feed": ovs[0],
+                            "rapid": ovs[1],
+                            "power": ovs[2]
+                        }
+                    except Exception:
+                        pass
 
             # If controller only reports MPos ($10=1), compute WPos = MPos - WCO
             if not any(p.startswith("WPos:") for p in parts[1:]):

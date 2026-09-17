@@ -223,6 +223,11 @@ class MainWindow(QMainWindow):
         self.act_single_line_text.setToolTip("Generate single-stroke Hershey vector text for fast laser engraving (Ctrl+Shift+F)")
         self.act_single_line_text.triggered.connect(self.open_single_line_text_studio)
 
+        self.act_kerf_test = QAction("Kerf Test Gauge Studio...", self)
+        self.act_kerf_test.setShortcut("Ctrl+Alt+K")
+        self.act_kerf_test.setToolTip("Generate automated parametric kerf calibration test gauges (Ctrl+Alt+K)")
+        self.act_kerf_test.triggered.connect(self.open_kerf_test_studio)
+
         self.act_snap_grid = QAction("Snap to Grid", self)
         self.act_snap_grid.setCheckable(True)
         self.act_snap_grid.setChecked(True)
@@ -581,6 +586,7 @@ class MainWindow(QMainWindow):
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
         menu_tools.addAction(self.act_test_matrix)
+        menu_tools.addAction(self.act_kerf_test)
         menu_tools.addAction(self.act_align_workpiece)
         menu_tools.addAction(self.act_burn_perimeter)
         menu_tools.addSeparator()
@@ -1004,6 +1010,12 @@ class MainWindow(QMainWindow):
         act_cad_single_line.triggered.connect(self.open_single_line_text_studio)
         cad_tb.addAction(act_cad_single_line)
 
+        # Kerf Test Gauge quick tool
+        act_cad_kerf = QAction(create_tool_icon("📏", fg_color="#00e676"), "Kerf Test Studio (Ctrl+Alt+K)", self)
+        act_cad_kerf.setToolTip("Generate automated parametric kerf calibration test gauges (Ctrl+Alt+K)")
+        act_cad_kerf.triggered.connect(self.open_kerf_test_studio)
+        cad_tb.addAction(act_cad_kerf)
+
         # Photo Studio quick tool
         act_cad_photo = QAction(create_tool_icon("📷", fg_color="#e040fb"), "Photo Engrave Studio (Ctrl+Shift+I)", self)
         act_cad_photo.triggered.connect(lambda: self.open_photo_studio())
@@ -1168,6 +1180,7 @@ class MainWindow(QMainWindow):
         self.laser_panel.start_job_requested.connect(self.start_job)
         self.laser_panel.simulate_job_requested.connect(self.preview_simulation)
         self.laser_panel.frame_job_requested.connect(self.frame_job)
+        self.laser_panel.contour_frame_job_requested.connect(self.contour_frame_job)
         self.laser_panel.burn_perimeter_requested.connect(lambda: self.open_burn_perimeter_tool())
         self.laser_panel.alignment_dialog_requested.connect(self.open_alignment_assistant)
 
@@ -1183,6 +1196,15 @@ class MainWindow(QMainWindow):
         self.serial_ctrl.disconnected.connect(self._on_laser_disconnected)
         self.serial_ctrl.machine_parameters_loaded.connect(self._on_machine_parameters_loaded)
         self.serial_ctrl.auto_connect_progress.connect(lambda msg: self.statusBar().showMessage(msg, 2500))
+        self.serial_ctrl.status_updated.connect(self._on_laser_status_for_canvas)
+
+    def _on_laser_status_for_canvas(self, status: dict):
+        """Updates the physical laser head position crosshair on the CAD canvas."""
+        wpos = status.get("wpos", [0.0, 0.0, 0.0])
+        state = status.get("state", "Idle")
+        x = wpos[0] if (wpos and len(wpos) > 0) else 0.0
+        y = wpos[1] if (wpos and len(wpos) > 1) else 0.0
+        self.scene.update_laser_position(x, y, state, self.serial_ctrl.is_connected)
 
     def _on_laser_connected(self, port: str):
         self.settings.last_connected_port = port
@@ -2033,6 +2055,22 @@ class MainWindow(QMainWindow):
         self.scene.update()
         self.statusBar().showMessage("Added Single-Line Vector Text to workspace bed.", 4000)
 
+    def open_kerf_test_studio(self):
+        """Opens the Automated Kerf Test Gauge Studio dialog."""
+        from laserforge.ui.kerf_test_dialog import KerfTestDialog
+        dlg = KerfTestDialog(parent=self)
+        dlg.gauge_generated.connect(self._on_kerf_gauge_generated)
+        dlg.exec()
+
+    def _on_kerf_gauge_generated(self, entities: list):
+        if not entities:
+            return
+        self.scene.push_undo_state()
+        for ent in entities:
+            self.scene.add_entity(ent)
+        self.scene.update()
+        self.statusBar().showMessage(f"Added Kerf Test Gauge ({len(entities)} elements) to workspace bed.", 4000)
+
     def export_gcode(self):
 
         entities = self.scene.get_all_entities()
@@ -2085,6 +2123,25 @@ class MainWindow(QMainWindow):
 
         self.serial_ctrl.start_job(frame_gcode)
         self.statusBar().showMessage("Framing bounding box with laser guide beam...", 3000)
+
+    def contour_frame_job(self):
+        """Traces the exact rubber-band perimeter / convex hull of artwork with low-power guide."""
+        if not self.serial_ctrl.is_connected:
+            QMessageBox.warning(self, "Contour Frame Error", "Laser is not connected. Please connect in the Laser tab first.")
+            return
+
+        entities = self.scene.get_all_entities()
+        if not entities:
+            QMessageBox.warning(self, "Contour Frame Error", "Canvas is empty.")
+            return
+
+        contour_gcode = self.gcode_gen.generate_contour_framing_gcode(entities)
+        if not contour_gcode:
+            QMessageBox.warning(self, "Contour Frame Error", "Could not calculate artwork contour for framing.")
+            return
+
+        self.serial_ctrl.start_job(contour_gcode)
+        self.statusBar().showMessage("Contour framing artwork silhouette with laser guide beam...", 3000)
 
     def validate_current_job(self):
         """Generates G-code for current canvas items and displays full validation report."""

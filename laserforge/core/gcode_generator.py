@@ -1049,6 +1049,70 @@ class GCodeGenerator:
         ]
         return "\n".join(lines)
 
+    def generate_contour_framing_gcode(self, target: Any) -> str:
+        """
+        Generates G-code to trace the precise 2D convex hull / rubber-band perimeter
+        of the target entities with a visible low-power guide beam (0.5%).
+        Useful for aligning artwork onto irregular materials and scrap wood.
+        """
+        if not target or not isinstance(target, list):
+            return self.generate_framing_gcode(target)
+
+        # Collect 2D points from all entities
+        points = []
+        for e in target:
+            if hasattr(e, "contours") and e.contours:
+                for c in e.contours:
+                    for p in c:
+                        points.append((e.x + p[0], e.y + p[1]))
+            elif hasattr(e, "get_bounds"):
+                b = e.get_bounds()
+                points.extend([(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])])
+
+        if len(points) < 3:
+            return self.generate_framing_gcode(target)
+
+        try:
+            import shapely.geometry
+            mp = shapely.geometry.MultiPoint(points)
+            hull = mp.convex_hull
+            if hull.is_empty or hull.geom_type != 'Polygon':
+                return self.generate_framing_gcode(target)
+            coords = list(hull.exterior.coords)
+        except Exception:
+            return self.generate_framing_gcode(target)
+
+        if len(coords) < 3:
+            return self.generate_framing_gcode(target)
+
+        # Mirroring if configured
+        final_coords = []
+        for x, y in coords:
+            if getattr(self.settings, "software_mirror_x", False):
+                x = self.settings.bed_width - x
+            if getattr(self.settings, "software_mirror_y", False):
+                y = self.settings.bed_height - y
+            final_coords.append((x, y))
+
+        s_frame = int(round((self.settings.framing_power_pct / 100.0) * self.settings.max_s_value))
+        speed = self.settings.framing_speed
+
+        first_pt = final_coords[0]
+        lines = [
+            "; --- Rubber-Band Contour Framing ---",
+            "G21",
+            "G90",
+            self._laser_off_cmd(),
+            f"G0 X{first_pt[0]:.3f} Y{first_pt[1]:.3f} F{speed:.0f}",
+            f"{self._laser_on_cmd(s_frame)} ; Framing Beam ON",
+        ]
+
+        for pt in final_coords[1:]:
+            lines.append(f"G1 X{pt[0]:.3f} Y{pt[1]:.3f} F{speed:.0f}")
+
+        lines.append(f"{self._laser_off_cmd()} ; Framing Beam OFF")
+        return "\n".join(lines)
+
     def generate_target_point_gcode(self, target_x: float, target_y: float, power_pct: float = 0.5) -> str:
         """Generates G-code to jog the laser to target coordinate and project low-power guide dot."""
         if getattr(self.settings, "software_mirror_x", False):
