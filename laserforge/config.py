@@ -49,6 +49,7 @@ class MachineSettings:
     min_s_value: int = 0
     laser_mode: str = DEFAULT_LASER_MODE  # "M4", "M3", or "M106"
     use_inline_power: bool = True         # Use inline G1 S... commands for smooth raster & vector moves
+    enable_arcs: bool = True              # Emit native G2/G3 circular arcs instead of polygonal micro-lines
     rapid_speed: float = DEFAULT_RAPID_SPEED
     baud_rate: int = DEFAULT_BAUD_RATE
     jog_speed: float = DEFAULT_JOG_SPEED
@@ -116,4 +117,16 @@ class MachineSettings:
     # Connectivity
     auto_connect: bool = True
     last_connected_port: str = ""
+
+    # Rotary Axis Parameters (Rollers & Chucks)
+    rotary_enabled: bool = False
+    rotary_type: str = "Roller"           # "Roller" or "Chuck"
+    rotary_mode: str = "Software Scaling" # "Software Scaling" or "Hardware $101"
+    rotary_axis: str = "Y"                # Axis driven by rotary ("Y" or "X")
+    rotary_roller_diameter: float = 20.0  # Drive roller wheel diameter in mm
+    rotary_roller_distance: float = 50.0  # Center-to-center distance between rollers in mm
+    rotary_object_diameter: float = 65.0  # Cylindrical workpiece outer diameter in mm
+    rotary_steps_per_rev: float = 3200.0  # Steps per 360 degree revolution of rotary motor
+    rotary_original_y_steps: float = 80.0 # Original Y-axis steps/mm ($101) to restore
+    rotary_invert_dir: bool = False       # Invert rotation direction
 

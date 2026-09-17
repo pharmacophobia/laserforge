@@ -17,6 +17,8 @@ from laserforge.core.models import (
 from laserforge.core.layer_manager import LayerManager
 from laserforge.core.optimizer import PathOptimizer
 from laserforge.core.raster_processor import RasterProcessor
+from laserforge.core.kerf_engine import KerfEngine
+from laserforge.core.rotary_engine import RotaryEngine
 
 @dataclass(slots=True)
 class ToolpathSegment:
@@ -248,6 +250,18 @@ class GCodeGenerator:
         gcode_lines.append(f"{self._laser_off_cmd()}          ; Ensure laser is OFF")
         if self.settings.enable_z_moves:
             gcode_lines.append(f"G0 Z0 F{self.settings.rapid_speed:.0f} ; Safe Z")
+
+        # Rotary Axis Telemetry Header
+        if getattr(self.settings, "rotary_enabled", False):
+            rot_type = getattr(self.settings, "rotary_type", "Roller")
+            rot_mode = getattr(self.settings, "rotary_mode", "Software Scaling")
+            rot_diam = getattr(self.settings, "rotary_object_diameter", 65.0)
+            circ = RotaryEngine.compute_circumference(rot_diam)
+            rot_scale = RotaryEngine.calculate_software_scale_factor(self.settings) if rot_mode == "Software Scaling" else 1.0
+            gcode_lines.append(f"; --- Rotary Axis Active: {rot_type} ({rot_mode}) ---")
+            gcode_lines.append(f"; Workpiece Diameter: {rot_diam:.1f} mm, Circumference: {circ:.1f} mm")
+            if rot_mode == "Software Scaling":
+                gcode_lines.append(f"; Software Y-Scaling Factor: {rot_scale:.5f}")
 
         # Custom Start G-Code
         start_script = getattr(self.settings, "custom_start_gcode", "").strip()
@@ -562,7 +576,10 @@ class GCodeGenerator:
                 # 2. VECTOR PATHS (Line, Fill, Fill + Line, Text Modes)
                 vector_entities = [e for e in group_entities if not isinstance(e, ImageEntity)]
                 raw_fill_paths = []
+                raw_fill_meta = []
                 raw_line_paths = []
+                raw_line_meta = []
+                raw_line_closed = []
 
                 for vent in vector_entities:
                     epaths = self.entity_to_paths(vent)
@@ -578,28 +595,74 @@ class GCodeGenerator:
                             t_poly = [((bw - px) if m_x else px, (bh - py) if m_y else py) for px, py in poly]
                             t_epaths.append(t_poly)
                         epaths = t_epaths
+
+                    # Check for Rotary software coordinate scaling
+                    rot_scale_y = 1.0
+                    if getattr(self.settings, "rotary_enabled", False) and getattr(self.settings, "rotary_mode", "Software Scaling") == "Software Scaling":
+                        rot_scale_y = RotaryEngine.calculate_software_scale_factor(self.settings)
+                    if abs(rot_scale_y - 1.0) > 1e-4:
+                        epaths = [[(px, py * rot_scale_y) for px, py in poly] for poly in epaths]
+
+                    # Check for native G2/G3 arc support on CircleEntity (only when not scaled by rotary)
+                    arc_data = None
+                    if abs(rot_scale_y - 1.0) < 1e-4 and isinstance(vent, CircleEntity) and getattr(self.settings, "enable_arcs", True):
+                        rx, ry = vent.radius_x, vent.radius_y
+                        if abs(rx - ry) < 1e-3:
+                            eff_cx = (self.settings.bed_width - vent.x) if getattr(self.settings, "software_mirror_x", False) else vent.x
+                            eff_cy = (self.settings.bed_height - vent.y) if getattr(self.settings, "software_mirror_y", False) else vent.y
+                            arc_data = {"cx": eff_cx, "cy": eff_cy, "r": rx}
+
+                    is_closed = getattr(vent, "closed", True) if not isinstance(vent, LineEntity) else False
+                    ent_meta = {
+                        "entity": vent,
+                        "override_speed": getattr(vent, "override_speed", None),
+                        "override_power": getattr(vent, "override_power", None),
+                        "arc_info": arc_data,
+                        "closed": is_closed
+                    }
+
                     if isinstance(vent, TextEntity):
                         t_mode = getattr(vent, "fill_mode", "Fill")
                         if t_mode == "Outline":
-                            raw_line_paths.extend(epaths)
+                            for p in epaths:
+                                raw_line_paths.append(p)
+                                raw_line_meta.append(ent_meta)
+                                raw_line_closed.append(is_closed)
                         elif t_mode == "Fill":
-                            raw_fill_paths.extend(epaths)
+                            for p in epaths:
+                                raw_fill_paths.append(p)
+                                raw_fill_meta.append(ent_meta)
                             if layer.mode == "Fill + Line":
-                                raw_line_paths.extend(epaths)
+                                for p in epaths:
+                                    raw_line_paths.append(p)
+                                    raw_line_meta.append(ent_meta)
+                                    raw_line_closed.append(is_closed)
                         else:
                             if layer.mode in ("Fill", "Fill + Line"):
-                                raw_fill_paths.extend(epaths)
+                                for p in epaths:
+                                    raw_fill_paths.append(p)
+                                    raw_fill_meta.append(ent_meta)
                             if layer.mode in ("Line", "Fill + Line"):
-                                raw_line_paths.extend(epaths)
+                                for p in epaths:
+                                    raw_line_paths.append(p)
+                                    raw_line_meta.append(ent_meta)
+                                    raw_line_closed.append(is_closed)
                     else:
                         if layer.mode in ("Fill", "Fill + Line"):
-                            raw_fill_paths.extend(epaths)
+                            for p in epaths:
+                                raw_fill_paths.append(p)
+                                raw_fill_meta.append(ent_meta)
                         if layer.mode in ("Line", "Fill + Line"):
-                            raw_line_paths.extend(epaths)
+                            for p in epaths:
+                                raw_line_paths.append(p)
+                                raw_line_meta.append(ent_meta)
+                                raw_line_closed.append(is_closed)
 
                 # FILL MODE
                 if raw_fill_paths:
-                    optimized_fill_paths = PathOptimizer.optimize_paths(raw_fill_paths, start_pos=(cur_x, cur_y))
+                    optimized_fill_paths, optimized_fill_meta = PathOptimizer.optimize_paths(
+                        raw_fill_paths, start_pos=(cur_x, cur_y), metadata=raw_fill_meta
+                    )
                     interval = max(0.02, layer.line_interval)
                     # Fix #6: F feedrate is modal in GRBL — track and emit only on change
                     current_rapid_feed: float = -1.0
@@ -612,7 +675,12 @@ class GCodeGenerator:
                     if continuous_streaming:
                         gcode_lines.append(f"{laser_cmd} S0 ; Fill Turbo Mode ON")
 
-                    for poly in optimized_fill_paths:
+                    for poly, meta in zip(optimized_fill_paths, optimized_fill_meta):
+                        # Effective speed and power (per-entity override or layer settings)
+                        eff_feed = meta["override_speed"] if (meta and meta.get("override_speed") is not None) else layer.speed
+                        eff_p_pct = meta["override_power"] if (meta and meta.get("override_power") is not None) else layer.power_max
+                        eff_s_power = int(round((eff_p_pct / 100.0) * max_s))
+
                         fill_segs = self.generate_fill_scanlines(poly, interval)
                         for seg_x1, seg_x2, seg_y in fill_segs:
                             all_x.extend([seg_x1, seg_x2])
@@ -638,22 +706,22 @@ class GCodeGenerator:
                             # Cut fill stroke
                             cut_dist = abs(seg_x2 - seg_x1)
                             total_cut_dist += cut_dist
-                            total_time_sec += (cut_dist / feed) * 60.0
+                            total_time_sec += (cut_dist / eff_feed) * 60.0
 
                             if continuous_streaming:
-                                if feed != current_cut_feed:
-                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} S{s_power} F{feed:.0f}")
-                                    current_cut_feed = feed
+                                if eff_feed != current_cut_feed:
+                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} S{eff_s_power} F{eff_feed:.0f}")
+                                    current_cut_feed = eff_feed
                                 else:
-                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} S{s_power}")
+                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} S{eff_s_power}")
                             else:
-                                gcode_lines.append(self._laser_on_cmd(s_power))
+                                gcode_lines.append(self._laser_on_cmd(eff_s_power))
                                 fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
                                 if fire_dwell > 0.0:
                                     gcode_lines.append(f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell")
-                                if feed != current_cut_feed:
-                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} F{feed:.0f}")
-                                    current_cut_feed = feed
+                                if eff_feed != current_cut_feed:
+                                    gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} F{eff_feed:.0f}")
+                                    current_cut_feed = eff_feed
                                 else:
                                     gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f}")
                                 gcode_lines.append(self._laser_off_cmd())
@@ -661,7 +729,7 @@ class GCodeGenerator:
                                 if off_dwell > 0.0:
                                     gcode_lines.append(f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell")
 
-                            segments.append(ToolpathSegment("cut", seg_x1, seg_y, seg_x2, seg_y, feed, layer.power_max, lid, layer.color))
+                            segments.append(ToolpathSegment("cut", seg_x1, seg_y, seg_x2, seg_y, eff_feed, eff_p_pct, lid, layer.color))
                             cur_x, cur_y = seg_x2, seg_y
 
                     if continuous_streaming:
@@ -669,46 +737,174 @@ class GCodeGenerator:
 
                 # LINE (VECTOR CUT) MODE
                 if raw_line_paths:
-                    optimized_line_paths = PathOptimizer.optimize_paths(raw_line_paths, start_pos=(cur_x, cur_y))
-                    for path in optimized_line_paths:
+                    # Apply kerf compensation if configured on this layer
+                    kerf_offset = getattr(layer, "kerf_offset", 0.0)
+                    kerf_dir = getattr(layer, "kerf_direction", "Auto")
+                    if kerf_offset > 0.0 and kerf_dir not in ("Off", "None"):
+                        kerf_res = KerfEngine.apply_kerf_to_paths(raw_line_paths, kerf_offset, direction=kerf_dir)
+                        comp_paths = []
+                        comp_meta = []
+                        comp_closed = []
+                        for kr, meta in zip(kerf_res, raw_line_meta):
+                            comp_paths.append(kr["path"])
+                            m_copy = dict(meta)
+                            m_copy["is_outer"] = kr["is_outer"]
+                            m_copy["closed"] = kr["is_closed"]
+                            # Disable raw circular arc substitution so the compensated polygon is traced
+                            m_copy["arc_info"] = None
+                            comp_meta.append(m_copy)
+                            comp_closed.append(kr["is_closed"])
+                        raw_line_paths = comp_paths
+                        raw_line_meta = comp_meta
+                        raw_line_closed = comp_closed
+
+                    optimized_line_paths, optimized_line_meta = PathOptimizer.optimize_paths(
+                        raw_line_paths, closed_flags=raw_line_closed, start_pos=(cur_x, cur_y), metadata=raw_line_meta
+                    )
+                    lead_in_type = getattr(layer, "lead_in_type", "None")
+                    lead_in_len = getattr(layer, "lead_in_length", 2.0)
+                    lead_out_type = getattr(layer, "lead_out_type", "None")
+                    lead_out_len = getattr(layer, "lead_out_length", 2.0)
+                    overcut_len = getattr(layer, "overcut_length", 0.0)
+
+                    for path, meta in zip(optimized_line_paths, optimized_line_meta):
                         if len(path) < 2:
                             continue
 
-                        start_p = path[0]
-                        all_x.append(start_p[0])
-                        all_y.append(start_p[1])
+                        eff_feed = meta["override_speed"] if (meta and meta.get("override_speed") is not None) else layer.speed
+                        eff_p_pct = meta["override_power"] if (meta and meta.get("override_power") is not None) else layer.power_max
+                        eff_s_power = int(round((eff_p_pct / 100.0) * max_s))
 
-                        # Rapid to path start
-                        rap_dist = math.hypot(start_p[0] - cur_x, start_p[1] - cur_y)
+                        is_outer = meta.get("is_outer", True) if meta else True
+                        is_closed = meta.get("closed", False) if meta else False
+
+                        # Check if native G2/G3 arc generation is applicable (only when no lead-in/out or kerf)
+                        arc = meta.get("arc_info") if meta else None
+                        if arc is not None and lead_in_type in ("None", "") and lead_out_type in ("None", "") and overcut_len <= 0.0:
+                            cx, cy, r = arc["cx"], arc["cy"], arc["r"]
+                            start_x, start_y = cx - r, cy
+                            all_x.extend([cx - r, cx + r])
+                            all_y.extend([cy - r, cy + r])
+
+                            rap_dist = math.hypot(start_x - cur_x, start_y - cur_y)
+                            total_rapid_dist += rap_dist
+                            total_time_sec += (rap_dist / self.settings.rapid_speed) * 60.0
+
+                            if rap_dist > 0.01:
+                                gcode_lines.append(f"G0 X{start_x:.3f} Y{start_y:.3f} F{self.settings.rapid_speed:.0f}")
+                                segments.append(ToolpathSegment("rapid", cur_x, cur_y, start_x, start_y, self.settings.rapid_speed, 0, lid, layer.color))
+                                cur_x, cur_y = start_x, start_y
+                            if not job_start_captured:
+                                job_start_x, job_start_y = cur_x, cur_y
+                                job_start_captured = True
+
+                            # Laser ON
+                            gcode_lines.append(self._laser_on_cmd(eff_s_power))
+                            fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
+                            if fire_dwell > 0.0:
+                                gcode_lines.append(f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell")
+
+                            # Two 180-degree semicircular arcs (G2 clockwise)
+                            mid_x, mid_y = cx + r, cy
+                            circ_semi_dist = math.pi * r
+                            total_cut_dist += circ_semi_dist * 2.0
+                            total_time_sec += (circ_semi_dist * 2.0 / eff_feed) * 60.0
+
+                            gcode_lines.append(f"G2 X{mid_x:.3f} Y{mid_y:.3f} I{r:.3f} J0.000 F{eff_feed:.0f}")
+                            gcode_lines.append(f"G2 X{start_x:.3f} Y{start_y:.3f} I{-r:.3f} J0.000")
+
+                            # Simulation segments for preview dialog
+                            num_sim_pts = max(24, int(math.pi * r))
+                            prev_px, prev_py = start_x, start_y
+                            for s_i in range(1, num_sim_pts + 1):
+                                ang = math.pi - (2.0 * math.pi * s_i / num_sim_pts)
+                                px = cx + r * math.cos(ang)
+                                py = cy + r * math.sin(ang)
+                                segments.append(ToolpathSegment("cut", prev_px, prev_py, px, py, eff_feed, eff_p_pct, lid, layer.color))
+                                prev_px, prev_py = px, py
+                            cur_x, cur_y = start_x, start_y
+
+                            # Laser OFF
+                            gcode_lines.append(self._laser_off_cmd())
+                            off_dwell = getattr(self.settings, "laser_off_delay_ms", 0.0)
+                            if off_dwell > 0.0:
+                                gcode_lines.append(f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell")
+                            continue
+
+                        # Generate Lead-in / Lead-out / Overcut
+                        lead_in_pts = []
+                        if is_closed and lead_in_type not in ("None", "") and lead_in_len > 0.0:
+                            lead_in_pts = KerfEngine.generate_lead_in(path, lead_type=lead_in_type, length=lead_in_len, is_outer=is_outer)
+
+                        lead_out_pts = []
+                        if is_closed and lead_out_type not in ("None", "") and lead_out_len > 0.0:
+                            lead_out_pts = KerfEngine.generate_lead_out(path, lead_type=lead_out_type, length=lead_out_len, is_outer=is_outer)
+
+                        cut_path = path
+                        if is_closed and overcut_len > 0.0:
+                            cut_path = KerfEngine.apply_overcut(path, overcut_dist=overcut_len)
+
+                        # Determine start position (pierce point)
+                        initial_pt = lead_in_pts[0] if lead_in_pts else cut_path[0]
+                        all_x.append(initial_pt[0])
+                        all_y.append(initial_pt[1])
+
+                        # Rapid to initial start
+                        rap_dist = math.hypot(initial_pt[0] - cur_x, initial_pt[1] - cur_y)
                         total_rapid_dist += rap_dist
                         total_time_sec += (rap_dist / self.settings.rapid_speed) * 60.0
 
                         if rap_dist > 0.01:
-                            gcode_lines.append(f"G0 X{start_p[0]:.3f} Y{start_p[1]:.3f} F{self.settings.rapid_speed:.0f}")
-                            segments.append(ToolpathSegment("rapid", cur_x, cur_y, start_p[0], start_p[1], self.settings.rapid_speed, 0, lid, layer.color))
-                            cur_x, cur_y = start_p[0], start_p[1]
-                        # Fix #1: capture true job start on first cutting move
+                            gcode_lines.append(f"G0 X{initial_pt[0]:.3f} Y{initial_pt[1]:.3f} F{self.settings.rapid_speed:.0f}")
+                            segments.append(ToolpathSegment("rapid", cur_x, cur_y, initial_pt[0], initial_pt[1], self.settings.rapid_speed, 0, lid, layer.color))
+                            cur_x, cur_y = initial_pt[0], initial_pt[1]
+
                         if not job_start_captured:
                             job_start_x, job_start_y = cur_x, cur_y
                             job_start_captured = True
 
                         # Laser ON
-                        gcode_lines.append(self._laser_on_cmd(s_power))
+                        gcode_lines.append(self._laser_on_cmd(eff_s_power))
                         fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
                         if fire_dwell > 0.0:
                             gcode_lines.append(f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell")
 
-                        # Cut along vertices
-                        for pt in path[1:]:
+                        # Cut Lead-in (if present)
+                        if lead_in_pts:
+                            for l_pt in lead_in_pts[1:]:
+                                all_x.append(l_pt[0])
+                                all_y.append(l_pt[1])
+                                l_dist = math.hypot(l_pt[0] - cur_x, l_pt[1] - cur_y)
+                                total_cut_dist += l_dist
+                                total_time_sec += (l_dist / eff_feed) * 60.0
+                                gcode_lines.append(f"G1 X{l_pt[0]:.3f} Y{l_pt[1]:.3f} F{eff_feed:.0f}")
+                                segments.append(ToolpathSegment("cut", cur_x, cur_y, l_pt[0], l_pt[1], eff_feed, eff_p_pct, lid, layer.color))
+                                cur_x, cur_y = l_pt[0], l_pt[1]
+
+                        # Cut along main contour vertices
+                        start_idx = 0 if lead_in_pts else 1
+                        for pt in cut_path[start_idx:]:
                             all_x.append(pt[0])
                             all_y.append(pt[1])
                             c_dist = math.hypot(pt[0] - cur_x, pt[1] - cur_y)
                             total_cut_dist += c_dist
-                            total_time_sec += (c_dist / feed) * 60.0
+                            total_time_sec += (c_dist / eff_feed) * 60.0
 
-                            gcode_lines.append(f"G1 X{pt[0]:.3f} Y{pt[1]:.3f} F{feed:.0f}")
-                            segments.append(ToolpathSegment("cut", cur_x, cur_y, pt[0], pt[1], feed, layer.power_max, lid, layer.color))
+                            gcode_lines.append(f"G1 X{pt[0]:.3f} Y{pt[1]:.3f} F{eff_feed:.0f}")
+                            segments.append(ToolpathSegment("cut", cur_x, cur_y, pt[0], pt[1], eff_feed, eff_p_pct, lid, layer.color))
                             cur_x, cur_y = pt[0], pt[1]
+
+                        # Cut Lead-out (if present)
+                        if lead_out_pts:
+                            for lo_pt in lead_out_pts[1:]:
+                                all_x.append(lo_pt[0])
+                                all_y.append(lo_pt[1])
+                                lo_dist = math.hypot(lo_pt[0] - cur_x, lo_pt[1] - cur_y)
+                                total_cut_dist += lo_dist
+                                total_time_sec += (lo_dist / eff_feed) * 60.0
+                                gcode_lines.append(f"G1 X{lo_pt[0]:.3f} Y{lo_pt[1]:.3f} F{eff_feed:.0f}")
+                                segments.append(ToolpathSegment("cut", cur_x, cur_y, lo_pt[0], lo_pt[1], eff_feed, eff_p_pct, lid, layer.color))
+                                cur_x, cur_y = lo_pt[0], lo_pt[1]
 
                         # Laser OFF
                         gcode_lines.append(self._laser_off_cmd())
