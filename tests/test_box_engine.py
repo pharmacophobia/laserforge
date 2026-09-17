@@ -60,6 +60,28 @@ class TestBoxEngine(unittest.TestCase):
         positions = set((e.x, e.y) for e in path_ents)
         self.assertEqual(len(positions), 6)
 
+    def test_generate_dovetail_box(self):
+        """Tests that dovetail joint generation produces valid trapezoidal interlocking panels."""
+        panels = BoxEngine.generate_box(
+            width=100.0, depth=80.0, height=60.0, thickness=3.0, finger_width=10.0,
+            kerf=0.1, style="6-sided", joint_type="dovetail", dovetail_angle=12.0
+        )
+        self.assertEqual(len(panels), 6)
+        for p in panels:
+            self.assertGreaterEqual(len(p.outline), 12)
+            self.assertEqual(p.outline[0], p.outline[-1])
+
+        # Verify that dovetail panels have trapezoidal flared vertices (distinct from pure 90° rectangular coords)
+        # Compare a standard finger joint panel against a dovetail joint panel
+        std_panels = BoxEngine.generate_box(
+            width=100.0, depth=80.0, height=60.0, thickness=3.0, finger_width=10.0,
+            kerf=0.1, style="6-sided", joint_type="finger"
+        )
+        # Front panel outline points should differ between finger and dovetail
+        front_dovetail = next(p for p in panels if p.name == "Front")
+        front_finger = next(p for p in std_panels if p.name == "Front")
+        self.assertNotEqual(front_dovetail.outline, front_finger.outline)
+
 
 if __name__ == "__main__":
     unittest.main()

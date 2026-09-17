@@ -76,9 +76,10 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
 - **Holding Tabs & Bridges (Micro-Tabs)**:
   - Automatically leaves small structural uncut bridges ($0.5$–$2.0$ mm) along closed cutting contours to prevent small cut parts from dropping through honeycomb slats or tipping into the laser nozzle.
   - Slices contours into precision sub-paths with either complete laser cutouts (`G0` rapid across bridge) or configurable skin bridge laser power (`> 0%` micro-tabs for easy clean breakout).
-- **Parametric Box & Finger-Joint Enclosure Studio (`Ctrl+Shift+J`)**:
-  - Interactive CAD studio generating 2D flat interlocking panels for 6-sided enclosed boxes, 5-sided open-top bins, and sliding-lid cases with finger joints.
-  - Fully adjustable material thickness ($1.0$–$25.0$ mm), finger joint pitch, and laser kerf compensation for snug friction press-fits without glue.
+- **Parametric Box, Finger-Joint & Dovetail Enclosure Studio (`Ctrl+Shift+J`)**:
+  - Interactive CAD studio generating 2D flat interlocking panels for 6-sided enclosed boxes, 5-sided open-top bins, and sliding-lid cases.
+  - **Dual Joint Modes**: Traditional 90° Box Finger Joints and classic **Dovetail Joints** (with trapezoidal interlocking pins and tails, adjustable slope angle $4^\circ$–$25^\circ$).
+  - Fully adjustable material thickness ($1.0$–$25.0$ mm), joint pitch, and laser kerf compensation for snug friction press-fits without glue.
   - Real-time 2D canvas preview with sheet footprint telemetry and automated panel layout with text labels.
 - **Single-Line Stroke (Hershey Vector) Fonts (`Ctrl+Shift+F`)**:
   - True centerline single-pass vector stroke fonts for rapid laser engraving of serial numbers, scales, dials, and small text.

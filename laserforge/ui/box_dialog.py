@@ -225,6 +225,20 @@ class BoxGeneratorDialog(QDialog):
         self.spin_kerf.valueChanged.connect(self._on_params_changed)
         mat_form.addRow("Kerf Compensation:", self.spin_kerf)
 
+        self.combo_joint_type = QComboBox()
+        self.combo_joint_type.addItems(["Finger Joint (90° Box)", "Dovetail Joint (Interlocking)"])
+        self.combo_joint_type.currentIndexChanged.connect(self._on_joint_type_changed)
+        mat_form.addRow("Joint Style:", self.combo_joint_type)
+
+        self.spin_dovetail_angle = QDoubleSpinBox()
+        self.spin_dovetail_angle.setRange(4.0, 25.0)
+        self.spin_dovetail_angle.setValue(10.0)
+        self.spin_dovetail_angle.setSuffix("°")
+        self.spin_dovetail_angle.setToolTip("Angle of dovetail pin/tail flare (typically 7° - 14°)")
+        self.spin_dovetail_angle.setEnabled(False)
+        self.spin_dovetail_angle.valueChanged.connect(self._on_params_changed)
+        mat_form.addRow("Dovetail Angle:", self.spin_dovetail_angle)
+
         self.combo_style = QComboBox()
         self.combo_style.addItems(["6-Sided Enclosed", "5-Sided Open Top", "Sliding Lid Case"])
         self.combo_style.currentIndexChanged.connect(self._on_params_changed)
@@ -321,6 +335,11 @@ class BoxGeneratorDialog(QDialog):
 
         self._on_params_changed()
 
+    def _on_joint_type_changed(self, index: int):
+        is_dovetail = (index == 1)
+        self.spin_dovetail_angle.setEnabled(is_dovetail)
+        self._on_params_changed()
+
     def _on_params_changed(self):
         w = self.spin_w.value()
         d = self.spin_d.value()
@@ -330,9 +349,12 @@ class BoxGeneratorDialog(QDialog):
         kerf = self.spin_kerf.value()
         style_idx = self.combo_style.currentIndex()
         style = "6-sided" if style_idx == 0 else ("open-top" if style_idx == 1 else "sliding-lid")
+        joint_type = "dovetail" if self.combo_joint_type.currentIndex() == 1 else "finger"
+        dovetail_angle = self.spin_dovetail_angle.value()
 
         self._current_panels = BoxEngine.generate_box(
-            width=w, depth=d, height=h, thickness=t, finger_width=finger, kerf=kerf, style=style
+            width=w, depth=d, height=h, thickness=t, finger_width=finger, kerf=kerf, style=style,
+            joint_type=joint_type, dovetail_angle=dovetail_angle
         )
         self.preview_widget.set_panels(self._current_panels, spacing=self.spin_spacing.value())
 

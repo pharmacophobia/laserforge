@@ -35,10 +35,12 @@ class BoxEngine:
         thickness: float,
         target_finger_len: float,
         is_male: bool,
-        kerf: float = 0.0
+        kerf: float = 0.0,
+        joint_type: str = "finger",
+        dovetail_angle: float = 10.0
     ) -> List[Tuple[float, float]]:
         """
-        Generates finger joint vertices along a straight edge from p_start to p_end.
+        Generates finger joint or dovetail joint vertices along a straight edge from p_start to p_end.
 
         Parameters:
             p_start: Edge start point (x, y)
@@ -49,6 +51,8 @@ class BoxEngine:
             target_finger_len: Desired width of each individual tab
             is_male: True if edge has protruding tabs, False if indented slots
             kerf: Kerf offset compensation in mm
+            joint_type: "finger" (standard 90° box joint) or "dovetail" (angled interlocking pins/tails)
+            dovetail_angle: Angle of dovetail slope in degrees (typically 7° - 15°)
         """
         if length <= 0 or target_finger_len <= 0:
             return [p_start, p_end]
@@ -68,9 +72,18 @@ class BoxEngine:
 
         pts = [p_start]
 
-        # Tabs alternate between 0 (flush/recessed) and 1 (protruding)
-        # Symmetrical: if is_male, segments 0, 2, 4... protrude; segments 1, 3... are flush
-        # If female: segments 0, 2, 4... are flush; segments 1, 3... recess inward (-normal)
+        # Dovetail flare delta: delta_x = thickness * tan(radians(dovetail_angle))
+        if joint_type == "dovetail":
+            rad_ang = math.radians(max(1.0, min(30.0, dovetail_angle)))
+            delta_x = thickness * math.tan(rad_ang)
+            # Prevent excessive flare that could invert or collide with adjacent tabs
+            max_delta = seg_len * 0.35
+            delta_x = min(delta_x, max_delta)
+        else:
+            delta_x = 0.0
+
+        k_half = kerf / 2.0
+
         for i in range(n):
             dist_start = i * seg_len
             dist_end = (i + 1) * seg_len
@@ -83,25 +96,27 @@ class BoxEngine:
 
             if is_male:
                 if is_tab_raised:
-                    # Raised tab: protrudes by thickness + kerf/2
-                    # Width expanded by kerf/2 at both ends
+                    # Raised male tab (tail):
+                    # Protrudes by thickness + kerf/2 outward (+normal)
+                    # For dovetail: flares outward by delta_x at the tip
                     t_h = thickness
-                    k_half = kerf / 2.0
-                    pt1 = (b_s[0] - dx * k_half + nx * t_h, b_s[1] - dy * k_half + ny * t_h)
-                    pt2 = (b_e[0] + dx * k_half + nx * t_h, b_e[1] + dy * k_half + ny * t_h)
-                    pts.extend([b_s, pt1, pt2, b_e])
+                    pt_base_s = (b_s[0] - dx * k_half, b_s[1] - dy * k_half)
+                    pt1 = (b_s[0] - dx * (k_half + delta_x) + nx * t_h, b_s[1] - dy * (k_half + delta_x) + ny * t_h)
+                    pt2 = (b_e[0] + dx * (k_half + delta_x) + nx * t_h, b_e[1] + dy * (k_half + delta_x) + ny * t_h)
+                    pt_base_e = (b_e[0] + dx * k_half, b_e[1] + dy * k_half)
+                    pts.extend([pt_base_s, pt1, pt2, pt_base_e])
                 else:
                     pts.append(b_e)
             else:
                 # Female slot: indented inward (-normal) by thickness
-                # Slot narrowed by kerf/2 for snug press fit
+                # For dovetail: expands inward by delta_x at the bottom
                 if is_tab_raised:
-                    # Recessed slot
                     t_h = -thickness
-                    k_half = kerf / 2.0
-                    pt1 = (b_s[0] + dx * k_half + nx * t_h, b_s[1] + dy * k_half + ny * t_h)
-                    pt2 = (b_e[0] - dx * k_half + nx * t_h, b_e[1] - dy * k_half + ny * t_h)
-                    pts.extend([b_s, pt1, pt2, b_e])
+                    pt_base_s = (b_s[0] + dx * k_half, b_s[1] + dy * k_half)
+                    pt1 = (b_s[0] - dx * (delta_x - k_half) + nx * t_h, b_s[1] - dy * (delta_x - k_half) + ny * t_h)
+                    pt2 = (b_e[0] + dx * (delta_x - k_half) + nx * t_h, b_e[1] + dy * (delta_x - k_half) + ny * t_h)
+                    pt_base_e = (b_e[0] - dx * k_half, b_e[1] - dy * k_half)
+                    pts.extend([pt_base_s, pt1, pt2, pt_base_e])
                 else:
                     pts.append(b_e)
 
@@ -115,10 +130,12 @@ class BoxEngine:
         thickness: float,
         target_finger_len: float,
         edge_styles: Dict[str, str],  # {"bottom": "male"|"female"|"flat", "right": ..., "top": ..., "left": ...}
-        kerf: float = 0.0
+        kerf: float = 0.0,
+        joint_type: str = "finger",
+        dovetail_angle: float = 10.0
     ) -> List[Tuple[float, float]]:
         """
-        Generates the 2D perimeter polyline of a rectangular panel with finger joints on its 4 edges.
+        Generates the 2D perimeter polyline of a rectangular panel with finger or dovetail joints on its 4 edges.
         Coordinates are relative to panel (0, 0) bottom-left.
         """
         # Corner coordinates:
@@ -140,7 +157,8 @@ class BoxEngine:
         else:
             e_pts = cls.generate_finger_edge(
                 p0, p1, normal=(0.0, -1.0), length=width, thickness=thickness,
-                target_finger_len=target_finger_len, is_male=(b_style == "male"), kerf=kerf
+                target_finger_len=target_finger_len, is_male=(b_style == "male"), kerf=kerf,
+                joint_type=joint_type, dovetail_angle=dovetail_angle
             )
             all_pts.extend(e_pts)
 
@@ -151,7 +169,8 @@ class BoxEngine:
         else:
             e_pts = cls.generate_finger_edge(
                 p1, p2, normal=(1.0, 0.0), length=height, thickness=thickness,
-                target_finger_len=target_finger_len, is_male=(r_style == "male"), kerf=kerf
+                target_finger_len=target_finger_len, is_male=(r_style == "male"), kerf=kerf,
+                joint_type=joint_type, dovetail_angle=dovetail_angle
             )
             all_pts.extend(e_pts[1:])
 
@@ -162,7 +181,8 @@ class BoxEngine:
         else:
             e_pts = cls.generate_finger_edge(
                 p2, p3, normal=(0.0, 1.0), length=width, thickness=thickness,
-                target_finger_len=target_finger_len, is_male=(t_style == "male"), kerf=kerf
+                target_finger_len=target_finger_len, is_male=(t_style == "male"), kerf=kerf,
+                joint_type=joint_type, dovetail_angle=dovetail_angle
             )
             all_pts.extend(e_pts[1:])
 
@@ -173,7 +193,8 @@ class BoxEngine:
         else:
             e_pts = cls.generate_finger_edge(
                 p3, p0, normal=(-1.0, 0.0), length=height, thickness=thickness,
-                target_finger_len=target_finger_len, is_male=(l_style == "male"), kerf=kerf
+                target_finger_len=target_finger_len, is_male=(l_style == "male"), kerf=kerf,
+                joint_type=joint_type, dovetail_angle=dovetail_angle
             )
             all_pts.extend(e_pts[1:])
 
@@ -200,7 +221,9 @@ class BoxEngine:
         kerf: float = 0.15,
         style: str = "6-sided",
         dividers_x: int = 0,
-        dividers_y: int = 0
+        dividers_y: int = 0,
+        joint_type: str = "finger",
+        dovetail_angle: float = 10.0
     ) -> List[BoxPanel]:
         """
         Generates all flat panels required to assemble the box.
@@ -221,7 +244,10 @@ class BoxEngine:
         # 1. BOTTOM PANEL: width x depth
         # Bottom receives tabs from Front, Back, Left, Right -> female on all 4 sides
         bot_edges = {"bottom": "female", "right": "female", "top": "female", "left": "female"}
-        bot_outline = cls.generate_panel_outline(width, depth, thickness, finger_width, bot_edges, kerf=kerf)
+        bot_outline = cls.generate_panel_outline(
+            width, depth, thickness, finger_width, bot_edges, kerf=kerf,
+            joint_type=joint_type, dovetail_angle=dovetail_angle
+        )
         panels.append(BoxPanel(name="Bottom", width=width, height=depth, outline=bot_outline, internal_cutouts=[]))
 
         # 2. FRONT PANEL: width x height
@@ -231,11 +257,17 @@ class BoxEngine:
         # Top: female if closed box, flat if open-top or sliding-lid
         front_top = "female" if (not is_open_top and not is_sliding_lid) else "flat"
         front_edges = {"bottom": "male", "right": "male", "top": front_top, "left": "male"}
-        front_outline = cls.generate_panel_outline(width, height, thickness, finger_width, front_edges, kerf=kerf)
+        front_outline = cls.generate_panel_outline(
+            width, height, thickness, finger_width, front_edges, kerf=kerf,
+            joint_type=joint_type, dovetail_angle=dovetail_angle
+        )
         panels.append(BoxPanel(name="Front", width=width, height=height, outline=front_outline, internal_cutouts=[]))
 
         # 3. BACK PANEL: width x height (same joint structure as Front)
-        back_outline = cls.generate_panel_outline(width, height, thickness, finger_width, front_edges, kerf=kerf)
+        back_outline = cls.generate_panel_outline(
+            width, height, thickness, finger_width, front_edges, kerf=kerf,
+            joint_type=joint_type, dovetail_angle=dovetail_angle
+        )
         panels.append(BoxPanel(name="Back", width=width, height=height, outline=back_outline, internal_cutouts=[]))
 
         # 4. LEFT PANEL: depth x height
@@ -245,7 +277,10 @@ class BoxEngine:
         # Top: female if closed, flat if open top
         side_top = "female" if (not is_open_top and not is_sliding_lid) else "flat"
         left_edges = {"bottom": "male", "right": "female", "top": side_top, "left": "female"}
-        left_outline = cls.generate_panel_outline(depth, height, thickness, finger_width, left_edges, kerf=kerf)
+        left_outline = cls.generate_panel_outline(
+            depth, height, thickness, finger_width, left_edges, kerf=kerf,
+            joint_type=joint_type, dovetail_angle=dovetail_angle
+        )
 
         left_cutouts = []
         if is_sliding_lid:
@@ -259,7 +294,10 @@ class BoxEngine:
         panels.append(BoxPanel(name="Left", width=depth, height=height, outline=left_outline, internal_cutouts=left_cutouts))
 
         # 5. RIGHT PANEL: depth x height (same joint structure as Left)
-        right_outline = cls.generate_panel_outline(depth, height, thickness, finger_width, left_edges, kerf=kerf)
+        right_outline = cls.generate_panel_outline(
+            depth, height, thickness, finger_width, left_edges, kerf=kerf,
+            joint_type=joint_type, dovetail_angle=dovetail_angle
+        )
         right_cutouts = []
         if is_sliding_lid:
             slot_y = height - 5.0 - thickness
@@ -292,7 +330,10 @@ class BoxEngine:
             else:
                 # Standard enclosed top: receives tabs from all 4 walls (female on all sides)
                 top_edges = {"bottom": "female", "right": "female", "top": "female", "left": "female"}
-                top_outline = cls.generate_panel_outline(width, depth, thickness, finger_width, top_edges, kerf=kerf)
+                top_outline = cls.generate_panel_outline(
+                    width, depth, thickness, finger_width, top_edges, kerf=kerf,
+                    joint_type=joint_type, dovetail_angle=dovetail_angle
+                )
                 panels.append(BoxPanel(name="Top", width=width, height=depth, outline=top_outline, internal_cutouts=[]))
 
         return panels
