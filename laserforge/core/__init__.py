@@ -23,4 +23,7 @@ __all__ = [
     "business_card_generator",
     "sdxl_turbo_engine",
     "image_cutout",
+    "kerf_engine",
+    "nesting_engine",
+    "rotary_engine",
 ]

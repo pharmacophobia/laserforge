@@ -64,6 +64,8 @@ from laserforge.core.dxf_exporter import DXFExporter
 from laserforge.core.svg_exporter import SVGExporter
 from laserforge.ui.job_estimator_dialog import JobEstimatorDialog
 from laserforge.ui.directional_hatch_dialog import DirectionalHatchDialog
+from laserforge.ui.nesting_dialog import NestingDialog
+from laserforge.ui.rotary_dialog import RotaryDialog
 from PyQt6.QtCore import QSettings
 IMPORT_QUEUE_DIR = os.path.expanduser("~/.laserforge/imported_queue")
 from laserforge.core.shape_generator import ShapeGenerator
@@ -201,6 +203,16 @@ class MainWindow(QMainWindow):
         self.act_directional_hatch.setToolTip("Fill unconnected vector shapes with directional lines (>= 15° neighbor contrast, center-to-edge convergence) (Ctrl+Shift+H)")
         self.act_directional_hatch.triggered.connect(self.open_directional_hatching)
 
+        self.act_nesting = QAction("2D Nesting Optimizer Studio...", self)
+        self.act_nesting.setShortcut("Ctrl+Shift+N")
+        self.act_nesting.setToolTip("Auto-pack shapes onto sheet material to maximize cutting area and eliminate scrap waste (Ctrl+Shift+N)")
+        self.act_nesting.triggered.connect(self.open_nesting_studio)
+
+        self.act_rotary = QAction("Rotary Axis Studio...", self)
+        self.act_rotary.setShortcut("Ctrl+Shift+R")
+        self.act_rotary.setToolTip("Configure Roller and Chuck rotary attachments for cylindrical laser engraving (Ctrl+Shift+R)")
+        self.act_rotary.triggered.connect(self.open_rotary_studio)
+
         self.act_snap_grid = QAction("Snap to Grid", self)
         self.act_snap_grid.setCheckable(True)
         self.act_snap_grid.setChecked(True)
@@ -302,8 +314,8 @@ class MainWindow(QMainWindow):
         self.act_templates_studio.triggered.connect(self.open_templates_studio)
 
         self.act_shapes_lib = QAction("Parametric Shapes Generator...", self)
-        self.act_shapes_lib.setShortcut("Ctrl+Shift+S")
-        self.act_shapes_lib.setToolTip("Generate regular polygons, stars, gears, hearts, slots, and rings")
+        self.act_shapes_lib.setShortcut("Ctrl+Alt+G")
+        self.act_shapes_lib.setToolTip("Generate regular polygons, stars, gears, hearts, slots, and rings (Ctrl+Alt+G)")
         self.act_shapes_lib.triggered.connect(lambda: self.open_shapes_library(0))
 
         self.act_offset_border = QAction("Offset / Cut Border...", self)
@@ -325,8 +337,8 @@ class MainWindow(QMainWindow):
         self.act_serial_gen.triggered.connect(self.open_serial_generator_dialog)
 
         self.act_barcode_studio = QAction("QR Code & Barcode Studio...", self)
-        self.act_barcode_studio.setShortcut("Ctrl+Q")
-        self.act_barcode_studio.setToolTip("Design custom 2D QR codes (URL, Wi-Fi, vCard) and 1D barcodes (Code 128, EAN, UPC)")
+        self.act_barcode_studio.setShortcut("Ctrl+Alt+Q")
+        self.act_barcode_studio.setToolTip("Design custom 2D QR codes (URL, Wi-Fi, vCard) and 1D barcodes (Ctrl+Alt+Q)")
         self.act_barcode_studio.triggered.connect(self.open_barcode_designer)
 
         self.act_sdxl_turbo = QAction("SDXL Turbo Generative Studio...", self)
@@ -358,7 +370,8 @@ class MainWindow(QMainWindow):
 
         # Alignment & Distribution Actions
         self.act_bed_center = QAction("Center on Laser Bed", self)
-        self.act_bed_center.setShortcut("Ctrl+Shift+C")
+        self.act_bed_center.setShortcut("Ctrl+Alt+C")
+        self.act_bed_center.setToolTip("Center selected objects on laser bed (Ctrl+Alt+C)")
         self.act_bed_center.triggered.connect(lambda: self.scene.align_selected("bed_center", self.settings.bed_width, self.settings.bed_height))
 
         self.act_center_in_parent = QAction("Center Inside Bounding Shape", self)
@@ -423,8 +436,8 @@ class MainWindow(QMainWindow):
         self.act_frame.triggered.connect(self.frame_job)
 
         self.act_burn_perimeter = QAction("🔥 Burn Alignment Perimeter...", self)
-        self.act_burn_perimeter.setShortcut("Ctrl+Shift+B")
-        self.act_burn_perimeter.setToolTip("Score or burn alignment perimeter on wasteboard or stock to position workpiece")
+        self.act_burn_perimeter.setShortcut("Ctrl+Alt+B")
+        self.act_burn_perimeter.setToolTip("Score or burn alignment perimeter on wasteboard or stock to position workpiece (Ctrl+Alt+B)")
         self.act_burn_perimeter.triggered.connect(lambda: self.open_burn_perimeter_tool())
 
         self.act_start_job = QAction("Start Laser Job", self)
@@ -509,6 +522,7 @@ class MainWindow(QMainWindow):
         menu_laser.addAction(self.act_stop_job)
         menu_laser.addSeparator()
         menu_laser.addAction(self.act_align_workpiece)
+        menu_laser.addAction(self.act_rotary)
         menu_laser.addAction(self.act_material_lib)
         menu_laser.addAction(self.act_test_matrix)
         menu_laser.addSeparator()
@@ -544,6 +558,8 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_trace_image)
         menu_tools.addAction(self.act_image_cutout)
         menu_tools.addAction(self.act_directional_hatch)
+        menu_tools.addAction(self.act_nesting)
+        menu_tools.addAction(self.act_rotary)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
         menu_tools.addAction(self.act_test_matrix)
@@ -930,6 +946,12 @@ class MainWindow(QMainWindow):
         act_cad_hatch.triggered.connect(self.open_directional_hatching)
         cad_tb.addAction(act_cad_hatch)
 
+        # 2D Nesting Optimizer Action
+        act_cad_nest = QAction(create_tool_icon("📦", fg_color="#00e676"), "2D Nesting Optimizer Studio (Ctrl+Shift+N)", self)
+        act_cad_nest.setToolTip("2D Nesting Optimizer: pack shapes onto sheet material to eliminate scrap waste (Ctrl+Shift+N)")
+        act_cad_nest.triggered.connect(self.open_nesting_studio)
+        cad_tb.addAction(act_cad_nest)
+
         # Job Cost & Time Estimator Action
         act_cad_est = QAction(create_tool_icon("⏱️", fg_color="#ffab00"), "Job Cost & Time Estimator (Ctrl+Shift+M)", self)
         act_cad_est.setToolTip("Pre-job calculation of cutting run time, sheet area, and cost quote (Ctrl+Shift+M)")
@@ -945,6 +967,12 @@ class MainWindow(QMainWindow):
         act_cad_align = QAction(create_tool_icon("🎯", fg_color="#ff4081"), "Align Workpiece (Ctrl+L)", self)
         act_cad_align.triggered.connect(self.open_alignment_assistant)
         cad_tb.addAction(act_cad_align)
+
+        # Rotary Axis Studio quick tool
+        act_cad_rotary = QAction(create_tool_icon("🔄", fg_color="#64b5f6"), "Rotary Axis Studio (Ctrl+Shift+R)", self)
+        act_cad_rotary.setToolTip("Configure Roller and Chuck rotary attachments for cylindrical laser engraving (Ctrl+Shift+R)")
+        act_cad_rotary.triggered.connect(self.open_rotary_studio)
+        cad_tb.addAction(act_cad_rotary)
 
         # Photo Studio quick tool
         act_cad_photo = QAction(create_tool_icon("📷", fg_color="#e040fb"), "Photo Engrave Studio (Ctrl+Shift+I)", self)
@@ -1878,6 +1906,71 @@ class MainWindow(QMainWindow):
                 f"Min separation: {dlg.result.min_diff_achieved:.1f}°",
                 5000
             )
+
+    def open_nesting_studio(self):
+        """
+        Opens the 2D Nesting Optimizer Studio.
+        Packs vector shapes efficiently into target sheet material boundaries,
+        supporting 90°/45° rotations, cavity/hole nesting, and margin clearances.
+        """
+        all_ents = self.scene.get_all_entities()
+        selected_ents = self.scene.get_selected_entities()
+        # Filter for vector shapes (exclude images)
+        all_vector_ents = [e for e in all_ents if not isinstance(e, ImageEntity)]
+        selected_vector_ents = [e for e in selected_ents if not isinstance(e, ImageEntity)]
+
+        if not all_vector_ents:
+            QMessageBox.information(
+                self, "2D Nesting Optimizer Studio",
+                "Please draw or import vector shapes onto the canvas before opening Nesting Studio."
+            )
+            return
+
+        dlg = NestingDialog(
+            entities=all_vector_ents,
+            selected_entities=selected_vector_ents,
+            settings=self.settings,
+            layer_manager=self.layer_manager,
+            parent=self
+        )
+        dlg.nesting_applied.connect(self._on_nesting_applied)
+        dlg.exec()
+
+    def _on_nesting_applied(self, updates):
+        """Applies nested coordinates and rotations back to canvas entities with full undo."""
+        if not updates:
+            return
+        if hasattr(self.scene, "push_undo_state"):
+            self.scene.push_undo_state()
+
+        all_ents = self.scene.get_all_entities()
+        ent_map = {e.id: e for e in all_ents}
+        for orig_ent, new_x, new_y, rot_deg in updates:
+            target = ent_map.get(orig_ent.id)
+            if target:
+                target.x = new_x
+                target.y = new_y
+                target.rotation = (target.rotation + rot_deg) % 360.0
+
+        self.scene._restore_entities(all_ents)
+        self.statusBar().showMessage(f"Applied 2D Nesting Optimization to {len(updates)} shapes.", 4000)
+
+    def open_rotary_studio(self):
+        """Opens the Rotary Axis Studio dialog for roller and chuck cylindrical engraving."""
+        dlg = RotaryDialog(
+            settings=self.settings,
+            serial_controller=self.serial_ctrl,
+            parent=self
+        )
+        dlg.rotary_settings_changed.connect(self._on_rotary_settings_changed)
+        dlg.exec()
+
+    def _on_rotary_settings_changed(self):
+        status = "ENABLED" if self.settings.rotary_enabled else "Disabled"
+        self.statusBar().showMessage(
+            f"Rotary Axis {status}: {self.settings.rotary_type} ({self.settings.rotary_mode}, ⌀ {self.settings.rotary_object_diameter:.1f} mm)",
+            5000
+        )
 
     def export_gcode(self):
 
