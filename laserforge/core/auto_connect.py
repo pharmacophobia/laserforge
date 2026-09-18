@@ -149,20 +149,6 @@ class PortDetector:
             ))
 
         ranked.sort(key=lambda x: x.score, reverse=True)
-
-        # Always include the Virtual GRBL Simulator port for test-driving
-        ranked.append(RankedPort(
-            device="VIRTUAL_GRBL",
-            description="LaserForge Virtual GRBL 1.1f Simulator",
-            hwid="VIRTUAL_SIMULATOR",
-            vid=0x0000,
-            pid=0x0000,
-            chip_info="In-Memory GRBL Simulator",
-            display_name="VIRTUAL_GRBL (Software Simulator)",
-            score=5,
-            is_usb=False
-        ))
-
         return ranked
 
 
@@ -176,8 +162,8 @@ def probe_port_for_grbl(
     Returns: (is_grbl, baud_rate, status_or_banner)
     Non-destructive: closes port before returning.
     """
-    if port.upper().startswith("VIRTUAL"):
-        return True, 115200, "Grbl 1.1f ['$' for help] (Virtual Simulator)"
+    if not port or port.upper().startswith("VIRTUAL"):
+        return False, None, ""
     for baud in baud_rates:
         ser = None
         try:
@@ -263,8 +249,11 @@ class AutoConnectWorker(QThread):
             self.probe_finished.emit(False, "No serial ports found")
             return
 
-        # If preferred port is specified, move it to the very front
-        if self.preferred_port:
+        # Exclude any virtual/simulated ports from auto-connect
+        ports = [p for p in ports if not p.device.upper().startswith("VIRTUAL")]
+
+        # If preferred port is specified, move it to the very front (skip virtual ports)
+        if self.preferred_port and not self.preferred_port.upper().startswith("VIRTUAL"):
             matching = [p for p in ports if p.device == self.preferred_port]
             non_matching = [p for p in ports if p.device != self.preferred_port]
             ports = matching + non_matching

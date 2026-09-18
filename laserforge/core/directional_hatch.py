@@ -32,6 +32,11 @@ import numpy as np
 from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString, GeometryCollection
 from shapely.ops import polygonize, unary_union
 import shapely.affinity
+try:
+    from shapely.validation import make_valid
+except ImportError:
+    def make_valid(geom):
+        return geom.buffer(0)
 
 from laserforge.core.models import LaserEntity, PathEntity
 from laserforge.core.geometry_boolean import entity_to_painter_path
@@ -98,8 +103,28 @@ class DirectionalHatchGenerator:
     and center-to-edge angular divergence modulation.
     """
 
-    @staticmethod
-    def extract_polygons(entities: List[LaserEntity]) -> List[VectorPolygon]:
+    @classmethod
+    def _add_valid_polys(cls, geom: Any, target_list: List[Polygon]):
+        """Recursively decomposes and validates Shapely geometry into valid Polygons."""
+        if geom is None or geom.is_empty:
+            return
+        if not geom.is_valid:
+            try:
+                geom = make_valid(geom)
+            except Exception:
+                try:
+                    geom = geom.buffer(0)
+                except Exception:
+                    return
+        if geom.geom_type == 'Polygon':
+            if geom.area > 1e-4:
+                target_list.append(geom)
+        elif hasattr(geom, 'geoms'):
+            for sub in geom.geoms:
+                cls._add_valid_polys(sub, target_list)
+
+    @classmethod
+    def extract_polygons(cls, entities: List[LaserEntity]) -> List[VectorPolygon]:
         """
         Extracts unconnected closed vector polygons from a list of LaserEntities.
         Converts entity geometries into world-space Shapely Polygons, correctly
@@ -117,14 +142,7 @@ class DirectionalHatchGenerator:
                             pts.append(pts[0])
                         try:
                             poly = Polygon(pts)
-                            if not poly.is_valid:
-                                poly = poly.buffer(0)
-                            if poly.geom_type == 'Polygon' and poly.area > 1e-4:
-                                raw_polygons.append(poly)
-                            elif poly.geom_type == 'MultiPolygon':
-                                for sub in poly.geoms:
-                                    if sub.area > 1e-4:
-                                        raw_polygons.append(sub)
+                            cls._add_valid_polys(poly, raw_polygons)
                         except Exception:
                             continue
                 continue
@@ -143,14 +161,7 @@ class DirectionalHatchGenerator:
                     pts.append(pts[0])
                 try:
                     poly = Polygon(pts)
-                    if not poly.is_valid:
-                        poly = poly.buffer(0)
-                    if poly.geom_type == 'Polygon' and poly.area > 1e-4:
-                        raw_polygons.append(poly)
-                    elif poly.geom_type == 'MultiPolygon':
-                        for sub in poly.geoms:
-                            if sub.area > 1e-4:
-                                raw_polygons.append(sub)
+                    cls._add_valid_polys(poly, raw_polygons)
                 except Exception:
                     continue
 
@@ -177,11 +188,10 @@ class DirectionalHatchGenerator:
 
             if holes_for_parent:
                 try:
-                    hole_coords = [list(h.exterior.coords) for h in holes_for_parent]
-                    cleaned_poly = Polygon(parent.exterior.coords, hole_coords)
-                    if not cleaned_poly.is_valid:
-                        cleaned_poly = cleaned_poly.buffer(0)
-                    final_polygons.append(cleaned_poly)
+                    cleaned_poly = parent
+                    for h in holes_for_parent:
+                        cleaned_poly = cleaned_poly.difference(h)
+                    cls._add_valid_polys(cleaned_poly, final_polygons)
                 except Exception:
                     final_polygons.append(parent)
             else:
@@ -190,12 +200,7 @@ class DirectionalHatchGenerator:
         # Decompose any MultiPolygons into distinct VectorPolygon objects
         flat_polys: List[Polygon] = []
         for p in final_polygons:
-            if p.geom_type == 'Polygon' and p.area > 1e-4:
-                flat_polys.append(p)
-            elif p.geom_type == 'MultiPolygon':
-                for sub in p.geoms:
-                    if sub.area > 1e-4:
-                        flat_polys.append(sub)
+            cls._add_valid_polys(p, flat_polys)
 
         if not flat_polys:
             return []
@@ -559,6 +564,9 @@ class DirectionalHatchGenerator:
                 dy_r = row_y - cy
                 orig_rx = cx + (dx_r * cos_a - dy_r * sin_a)
                 orig_ry = cy + (dx_r * sin_a + dy_r * cos_a)
+
+                if not (math.isfinite(orig_lx) and math.isfinite(orig_ly) and math.isfinite(orig_rx) and math.isfinite(orig_ry)):
+                    continue
 
                 pt1 = (float(orig_lx), float(orig_ly))
                 pt2 = (float(orig_rx), float(orig_ry))

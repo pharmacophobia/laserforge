@@ -461,6 +461,7 @@ class DirectionalHatchDialog(QDialog):
         self.combo_mode = QComboBox()
         self.combo_mode.addItem("Add to Canvas as New Paths", "new")
         self.combo_mode.addItem("Replace Selected Vectors", "replace")
+        self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
         grp_out_lay.addWidget(self.combo_mode, 2, 1)
 
         right_layout.addWidget(grp_out)
@@ -563,8 +564,8 @@ class DirectionalHatchDialog(QDialog):
             hatched_entities=res.hatched_entities
         )
 
-        # Update metrics
         n_polys = len(res.polygons)
+        self.btn_apply.setEnabled(n_polys > 0)
         self.lbl_stat_vectors.setText(f"Shapes Extracted: <b>{n_polys}</b> unconnected vectors")
         self.lbl_stat_lines.setText(f"Total Hatch Lines: <b>{res.total_line_count}</b> segments")
         self.lbl_stat_length.setText(f"Total Cut Path: <b>{res.total_hatch_length_mm:.1f} mm</b> ({res.total_hatch_length_mm/1000.0:.2f} m)")
@@ -585,3 +586,10 @@ class DirectionalHatchDialog(QDialog):
         self.lbl_stat_center_diff.setText(
             f"Center Neighbor Contrast: <b>{res.center_diff_achieved:.1f}°</b> (Divergence peak)"
         )
+
+    def _on_mode_changed(self):
+        self.output_mode = self.combo_mode.currentData() or "new"
+
+    def accept(self):
+        self.output_mode = self.combo_mode.currentData() or "new"
+        super().accept()

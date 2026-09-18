@@ -268,6 +268,75 @@ class TestDirectionalHatching(unittest.TestCase):
         dlg._toggle_color_mode(False)
         self.assertFalse(dlg.canvas.color_by_angle)
 
+    def test_directional_hatch_replace_mode_and_scene_removal(self):
+        """Verify output_mode == 'replace' properly removes original entities from LaserCanvasScene."""
+        from laserforge.ui.canvas_scene import LaserCanvasScene
+        from laserforge.core.layer_manager import LayerManager
+
+        lm = LayerManager()
+        scene = LaserCanvasScene(lm)
+
+        r1 = RectEntity(x=10.0, y=10.0, width=20.0, height=20.0)
+        r2 = RectEntity(x=50.0, y=10.0, width=20.0, height=20.0)
+        w1 = scene.add_entity(r1)
+        w2 = scene.add_entity(r2)
+
+        self.assertEqual(len(scene.get_all_entities()), 2)
+
+        # Test single remove_entity
+        removed = scene.remove_entity(r1)
+        self.assertTrue(removed)
+        self.assertEqual(len(scene.get_all_entities()), 1)
+
+        # Add r1 back and test batch remove_entities
+        scene.add_entity(r1)
+        self.assertEqual(len(scene.get_all_entities()), 2)
+        count = scene.remove_entities([r1, r2])
+        self.assertEqual(count, 2)
+        self.assertEqual(len(scene.get_all_entities()), 0)
+
+    def test_extract_polygons_robustness_with_degenerate_and_hole_geometries(self):
+        """Verify extraction on self-intersecting, degenerate, and donut shapes."""
+        # 1. Bow-tie / self-intersecting path
+        bowtie = PathEntity(
+            x=0.0, y=0.0,
+            contours=[[(0, 0), (20, 20), (20, 0), (0, 20), (0, 0)]]
+        )
+        # 2. Donut (outer square with inner hole)
+        donut = PathEntity(
+            x=50.0, y=0.0,
+            contours=[
+                [(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)],
+                [(10, 10), (20, 10), (20, 20), (10, 20), (10, 10)]
+            ]
+        )
+        # 3. Degenerate 2-point line
+        line = PathEntity(x=100.0, y=0.0, contours=[[(0, 0), (10, 10)]])
+
+        polys = DirectionalHatchGenerator.extract_polygons([bowtie, donut, line])
+        self.assertGreater(len(polys), 0)
+        for p in polys:
+            self.assertGreater(p.area, 0.0)
+            self.assertIsNotNone(p.shapely_polygon)
+
+    def test_virtual_laser_excluded_from_auto_detect_and_probe(self):
+        """Verify the virtual laser simulator is permanently removed from auto-detection and probe."""
+        from laserforge.core.auto_connect import PortDetector, probe_port_for_grbl
+
+        ranked = PortDetector.get_ranked_ports(include_dummy_tty=False)
+        ranked_devices = [p.device.upper() for p in ranked]
+        self.assertNotIn("VIRTUAL_GRBL", ranked_devices)
+
+        ranked_all = PortDetector.get_ranked_ports(include_dummy_tty=True)
+        ranked_all_devices = [p.device.upper() for p in ranked_all]
+        self.assertNotIn("VIRTUAL_GRBL", ranked_all_devices)
+
+        # Probing VIRTUAL_GRBL must return False (not GRBL)
+        is_grbl, baud, banner = probe_port_for_grbl("VIRTUAL_GRBL", timeout=0.05)
+        self.assertFalse(is_grbl)
+        self.assertIsNone(baud)
+        self.assertEqual(banner, "")
+
 
 if __name__ == "__main__":
     unittest.main()

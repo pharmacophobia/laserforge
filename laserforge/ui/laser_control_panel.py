@@ -461,10 +461,14 @@ class LaserControlPanel(QWidget):
 
     def refresh_ports(self):
         current_data = self.port_combo.currentData() or self.port_combo.currentText()
+        if current_data and current_data.upper().startswith("VIRTUAL"):
+            current_data = None
         self.port_combo.clear()
         ranked = self.serial_ctrl.get_ranked_ports(include_dummy_tty=False)
         if not ranked:
             ranked = self.serial_ctrl.get_ranked_ports(include_dummy_tty=True)
+
+        ranked = [p for p in ranked if not p.device.upper().startswith("VIRTUAL")]
 
         if not ranked:
             self.port_combo.addItem("No ports found", None)

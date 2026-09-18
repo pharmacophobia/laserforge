@@ -920,6 +920,34 @@ class LaserCanvasScene(QGraphicsScene):
         self.entity_modified.emit()
         return wrapper
 
+    def remove_entity(self, entity: LaserEntity) -> bool:
+        """Removes a single entity from the scene and emits entity_modified."""
+        target_id = getattr(entity, "id", None)
+        for item in list(self.items()):
+            if isinstance(item, LaserItemWrapper):
+                if item.entity is entity or (target_id is not None and getattr(item.entity, "id", None) == target_id):
+                    self.removeItem(item)
+                    self.entity_modified.emit()
+                    return True
+        return False
+
+    def remove_entities(self, entities: List[LaserEntity]) -> int:
+        """Removes multiple entities from the scene and emits entity_modified."""
+        if not entities:
+            return 0
+        target_ids = {getattr(e, "id", None) for e in entities if getattr(e, "id", None) is not None}
+        target_py_ids = {id(e) for e in entities}
+        removed_count = 0
+        for item in list(self.items()):
+            if isinstance(item, LaserItemWrapper):
+                ent = item.entity
+                if id(ent) in target_py_ids or (getattr(ent, "id", None) is not None and getattr(ent, "id", None) in target_ids):
+                    self.removeItem(item)
+                    removed_count += 1
+        if removed_count > 0:
+            self.entity_modified.emit()
+        return removed_count
+
     def get_all_entities(self) -> List[LaserEntity]:
         entities = []
         for item in self.items():

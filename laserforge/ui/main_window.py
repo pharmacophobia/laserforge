@@ -144,8 +144,11 @@ class MainWindow(QMainWindow):
         self._init_auto_import_watcher()
 
         # Automated laser connection on startup if enabled
+        if self.settings.last_connected_port and self.settings.last_connected_port.upper().startswith("VIRTUAL"):
+            self.settings.last_connected_port = ""
         if self.settings.auto_connect:
-            QTimer.singleShot(400, lambda: self.serial_ctrl.start_auto_connect(self.settings.last_connected_port))
+            last_port = self.settings.last_connected_port if (self.settings.last_connected_port and not self.settings.last_connected_port.upper().startswith("VIRTUAL")) else None
+            QTimer.singleShot(400, lambda: self.serial_ctrl.start_auto_connect(last_port))
 
         # Licensing & 30-Day Free Trial Engine
         from laserforge.core.license_engine import LicenseEngine
@@ -541,7 +544,9 @@ class MainWindow(QMainWindow):
         self.act_auto_connect = QAction("Auto-Detect & Connect Laser", self)
         self.act_auto_connect.setShortcut("F3")
         self.act_auto_connect.setToolTip("Scan serial ports and automatically handshake with GRBL laser (F3)")
-        self.act_auto_connect.triggered.connect(lambda: self.serial_ctrl.start_auto_connect(self.settings.last_connected_port))
+        self.act_auto_connect.triggered.connect(lambda: self.serial_ctrl.start_auto_connect(
+            self.settings.last_connected_port if (self.settings.last_connected_port and not self.settings.last_connected_port.upper().startswith("VIRTUAL")) else None
+        ))
 
         self.act_preview = QAction("Preview Toolpaths (Simulation)...", self)
         self.act_preview.setShortcut("Alt+P")
@@ -1407,7 +1412,8 @@ class MainWindow(QMainWindow):
         self.scene.update_laser_position(x, y, state, self.serial_ctrl.is_connected)
 
     def _on_laser_connected(self, port: str):
-        self.settings.last_connected_port = port
+        if port and not port.upper().startswith("VIRTUAL"):
+            self.settings.last_connected_port = port
         self.status_machine.setText(f"Laser: Connected ({port})")
         self.status_machine.setStyleSheet("font-weight: bold; color: #66bb6a;")
         self.statusBar().showMessage(f"Laser connected on {port} (GRBL Ready)", 4000)
@@ -2490,25 +2496,33 @@ class MainWindow(QMainWindow):
         )
 
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result and dlg.result.hatched_entities:
-            if hasattr(self.scene, "push_undo_state"):
-                self.scene.push_undo_state()
+            try:
+                if hasattr(self.scene, "push_undo_state"):
+                    self.scene.push_undo_state()
 
-            if dlg.output_mode == "replace":
-                for ent in target_entities:
-                    self.scene.remove_entity(ent)
+                if dlg.output_mode == "replace":
+                    if hasattr(self.scene, "remove_entities"):
+                        self.scene.remove_entities(target_entities)
+                    else:
+                        for ent in target_entities:
+                            self.scene.remove_entity(ent)
 
-            self.scene.clearSelection()
-            for ent in dlg.result.hatched_entities:
-                wrapper = self.scene.add_entity(ent)
-                if wrapper:
-                    wrapper.setSelected(True)
+                self.scene.clearSelection()
+                for ent in dlg.result.hatched_entities:
+                    wrapper = self.scene.add_entity(ent)
+                    if wrapper:
+                        wrapper.setSelected(True)
 
-            self.statusBar().showMessage(
-                f"Successfully generated directional hatching for {len(dlg.result.polygons)} shapes "
-                f"({dlg.result.total_line_count} cut lines, {dlg.result.total_hatch_length_mm:.1f} mm)! "
-                f"Min separation: {dlg.result.min_diff_achieved:.1f}°",
-                5000
-            )
+                self.statusBar().showMessage(
+                    f"Successfully generated directional hatching for {len(dlg.result.polygons)} shapes "
+                    f"({dlg.result.total_line_count} cut lines, {dlg.result.total_hatch_length_mm:.1f} mm)! "
+                    f"Min separation: {dlg.result.min_diff_achieved:.1f}°",
+                    5000
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger("laserforge").exception("Error applying directional hatching: %s", e)
+                QMessageBox.warning(self, "Directional Hatching Error", f"Could not apply hatching to canvas:\n{e}")
 
     def open_nesting_studio(self):
         """

@@ -392,6 +392,8 @@ class SerialController(QObject):
             self.auto_connect_worker.wait(timeout=1000)
 
         target_pref = preferred_port or self.port_name
+        if target_pref and target_pref.upper().startswith("VIRTUAL"):
+            target_pref = None
         self.auto_connect_worker = AutoConnectWorker(preferred_port=target_pref, parent=self)
         self.auto_connect_worker.probe_started.connect(self.auto_connect_started.emit)
         self.auto_connect_worker.probe_progress.connect(self.auto_connect_progress.emit)
