@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QLineEdit
 )
 from PyQt6.QtCore import Qt, QSize, QPointF, QTimer
-from PyQt6.QtGui import QAction, QIcon, QKeySequence, QColor, QPixmap, QImage, QPainter, QFont, QPen, QFontMetricsF
+from PyQt6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QColor, QPixmap, QImage, QPainter, QFont, QPen, QFontMetricsF
 
 
 from laserforge.config import MachineSettings, LAYER_PALETTE
@@ -33,8 +33,11 @@ from laserforge.core.gcode_generator import GCodeGenerator
 from laserforge.core.project_io import ProjectIO
 
 from laserforge.ui.canvas_scene import (
-    LaserCanvasScene, LaserItemWrapper, TOOL_SELECT, TOOL_RECT, TOOL_CIRCLE, TOOL_LINE, TOOL_TEXT
+    LaserCanvasScene, LaserItemWrapper, TOOL_SELECT, TOOL_RECT, TOOL_CIRCLE, TOOL_LINE, TOOL_TEXT,
+    TOOL_NODE_EDIT, TOOL_TRIM
 )
+from laserforge.ui.common_line_dialog import CommonLineDialog
+from laserforge.ui.variable_text_dialog import VariableTextDialog
 from laserforge.ui.canvas_view import LaserCanvasWidget
 from laserforge.ui.cuts_panel import CutsPanel
 from laserforge.ui.laser_control_panel import LaserControlPanel
@@ -312,6 +315,20 @@ class MainWindow(QMainWindow):
         self.act_add_to_art_library.setShortcut("Ctrl+Shift+L")
         self.act_add_to_art_library.setToolTip("Save selected vector shapes to the active Art Library (Ctrl+Shift+L)")
         self.act_add_to_art_library.triggered.connect(self.add_selection_to_art_library)
+
+        self.act_common_line = QAction("Common Line Cutting Studio...", self)
+        self.act_common_line.setShortcut("Ctrl+Alt+O")
+        self.act_common_line.setToolTip("Detect and eliminate coincident/touching cut lines between adjacent shapes (Ctrl+Alt+O)")
+        self.act_common_line.triggered.connect(self.open_common_line_studio)
+
+        self.act_variable_text = QAction("Variable Text & CSV Batch Merge...", self)
+        self.act_variable_text.setShortcut("Ctrl+Alt+V")
+        self.act_variable_text.setToolTip("Batch merge CSV/spreadsheet data into text template fields (Ctrl+Alt+V)")
+        self.act_variable_text.triggered.connect(self.open_variable_text_studio)
+
+        self.act_convert_to_path = QAction("Convert to Editable Vector Path", self)
+        self.act_convert_to_path.setToolTip("Convert selected primitive rectangles, circles, or lines into vector paths for node editing")
+        self.act_convert_to_path.triggered.connect(self.convert_selected_to_path)
 
         self.act_snap_grid = QAction("Snap to Grid", self)
         self.act_snap_grid.setCheckable(True)
@@ -625,6 +642,7 @@ class MainWindow(QMainWindow):
         menu_edit.addAction(self.act_xor)
         menu_edit.addSeparator()
         menu_edit.addAction(self.act_add_to_art_library)
+        menu_edit.addAction(self.act_convert_to_path)
 
         # Laser Menu
         menu_laser = menubar.addMenu("&Laser")
@@ -666,6 +684,8 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_shapes_lib)
         menu_tools.addAction(self.act_offset_border)
         menu_tools.addAction(self.act_grid_array)
+        menu_tools.addAction(self.act_common_line)
+        menu_tools.addAction(self.act_variable_text)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_curved_text)
         menu_tools.addAction(self.act_serial_gen)
@@ -717,6 +737,7 @@ class MainWindow(QMainWindow):
         menu_arrange = menubar.addMenu("&Arrange")
         menu_arrange.addAction(self.act_bed_center)
         menu_arrange.addAction(self.act_center_in_parent)
+        menu_arrange.addAction(self.act_common_line)
         menu_arrange.addSeparator()
         menu_arrange.addAction(self.act_align_left)
         menu_arrange.addAction(self.act_align_center_x)
@@ -1057,14 +1078,17 @@ class MainWindow(QMainWindow):
         cad_tb.setIconSize(QSize(30, 30))
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, cad_tb)
 
-        tool_group = QButtonGroup(self)
-        tool_group.setExclusive(True)
+        self.cad_tool_actions: Dict[str, QAction] = {}
+        action_group = QActionGroup(self)
+        action_group.setExclusive(True)
 
         tools = [
             ("Select (S)", TOOL_SELECT, "↖", "#00e5ff"),
+            ("Node Edit (N)", TOOL_NODE_EDIT, "☩", "#ff4081"),
+            ("Trim Scissor (X)", TOOL_TRIM, "✂", "#ff9100"),
             ("Rectangle (R)", TOOL_RECT, "▭", "#69f0ae"),
             ("Circle (C)", TOOL_CIRCLE, "◯", "#ffd740"),
-            ("Line (L)", TOOL_LINE, "╱", "#ff4081"),
+            ("Line (L)", TOOL_LINE, "╱", "#00e676"),
             ("Text (T)", TOOL_TEXT, "A", "#e040fb"),
         ]
 
@@ -1074,7 +1098,11 @@ class MainWindow(QMainWindow):
             if tool_id == TOOL_SELECT:
                 action.setChecked(True)
             action.triggered.connect(lambda checked, tid=tool_id: self.scene.set_active_tool(tid))
+            action_group.addAction(action)
             cad_tb.addAction(action)
+            self.cad_tool_actions[tool_id] = action
+
+        self.scene.tool_changed.connect(self._on_scene_tool_changed)
 
         cad_tb.addSeparator()
 
@@ -3740,6 +3768,80 @@ class MainWindow(QMainWindow):
 
         dlg.serials_generated.connect(_on_serials_gen)
         dlg.exec()
+
+    def _on_scene_tool_changed(self, tool_id: str):
+        if hasattr(self, "cad_tool_actions") and tool_id in self.cad_tool_actions:
+            self.cad_tool_actions[tool_id].setChecked(True)
+
+    def convert_selected_to_path(self):
+        """Converts selected primitive shapes into editable vector paths."""
+        converted = self.scene.convert_selected_to_path_entities()
+        if converted:
+            self.statusBar().showMessage(f"Converted {len(converted)} shape(s) to editable vector paths", 4000)
+        else:
+            self.statusBar().showMessage("No convertible shapes selected", 3000)
+
+    def open_common_line_studio(self):
+        """Opens the Common Line Cutting Studio to merge shared seams."""
+        selected = self.scene.get_selected_entities()
+        target_entities = selected if len(selected) >= 2 else self.scene.get_all_entities()
+        vector_ents = [e for e in target_entities if isinstance(e, (RectEntity, PathEntity, LineEntity, CircleEntity))]
+        if len(vector_ents) < 2:
+            QMessageBox.information(
+                self, "Common Line Cutting",
+                "Common Line Cutting requires at least 2 adjacent or touching vector shapes on the canvas."
+            )
+            return
+        dlg = CommonLineDialog(vector_ents, cut_speed_mm_min=1000.0, parent=self)
+        dlg.paths_optimized.connect(self._on_common_lines_optimized)
+        dlg.exec()
+
+    def _on_common_lines_optimized(self, path_entities: list, replace_existing: bool):
+        """Replaces original shapes with optimized common line cut paths."""
+        self.scene.push_undo_state()
+        if replace_existing:
+            selected = [it for it in self.scene.selectedItems() if isinstance(it, LaserItemWrapper)]
+            if len(selected) >= 2:
+                for it in selected:
+                    self.scene.removeItem(it)
+            else:
+                self.scene.clear_entities()
+        self.scene.clearSelection()
+        for pe in path_entities:
+            wrapper = self.scene.add_entity(pe)
+            wrapper.setSelected(True)
+        self.scene.entity_modified.emit()
+        self.statusBar().showMessage(f"Common Line Cutting: Generated {len(path_entities)} optimized cutting paths", 5000)
+
+    def open_variable_text_studio(self):
+        """Opens the Variable Text & Batch CSV Production Merge Studio."""
+        selected = self.scene.get_selected_entities()
+        template_entities = selected if selected else self.scene.get_all_entities()
+        if not template_entities:
+            QMessageBox.information(
+                self, "Variable Text Merge",
+                "Please create or select template design elements containing placeholders "
+                "(e.g., %NAME%, %TITLE%, %SERIAL:04d%, %DATE%) on the canvas first."
+            )
+            return
+        dlg = VariableTextDialog(
+            template_entities=template_entities,
+            bed_width=self.scene.bed_width,
+            bed_height=self.scene.bed_height,
+            parent=self
+        )
+        dlg.batch_generated.connect(self._on_variable_text_batch_generated)
+        dlg.exec()
+
+    def _on_variable_text_batch_generated(self, generated_entities: list):
+        """Adds batch generated variable text items to the canvas."""
+        self.scene.push_undo_state()
+        self.scene.clearSelection()
+        for ent in generated_entities:
+            wrapper = self.scene.add_entity(ent)
+            wrapper.setSelected(True)
+        self.scene.entity_modified.emit()
+        self.statusBar().showMessage(f"Batch Merge: Generated {len(generated_entities)} production parts across bed", 5000)
 
     def closeEvent(self, event):
         """Clean up background timers, watchers, and serial threads on exit."""

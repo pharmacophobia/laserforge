@@ -22,6 +22,8 @@ from laserforge.core.models import (
 from laserforge.core.layer_manager import LayerManager
 
 TOOL_SELECT = "select"
+TOOL_NODE_EDIT = "node_edit"
+TOOL_TRIM = "trim"
 TOOL_RECT = "rect"
 TOOL_CIRCLE = "circle"
 TOOL_LINE = "line"
@@ -155,6 +157,9 @@ class LaserItemWrapper(QGraphicsItem):
         self._resize_start_scene_pos: QPointF = QPointF()
         self._initial_rect: QRectF = QRectF()
         self._initial_params: Dict[str, Any] = {}
+        self._selected_node: Optional[Tuple[int, int]] = None
+        self._dragging_node: Optional[Tuple[int, int]] = None
+        self._node_drag_start_pos: QPointF = QPointF()
 
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
@@ -233,6 +238,21 @@ class LaserItemWrapper(QGraphicsItem):
             "R": QPointF(r.right(), r.center().y()),
         }
 
+    def get_node_at_local(self, pos: QPointF, tolerance: float = 5.0) -> Optional[Tuple[int, int]]:
+        """Finds (contour_idx, node_idx) of vertex closest to local pos within tolerance mm."""
+        if not isinstance(self.entity, PathEntity) or not self.entity.contours:
+            return None
+        lx, ly = pos.x(), pos.y()
+        best_match = None
+        min_d = tolerance
+        for c_idx, contour in enumerate(self.entity.contours):
+            for n_idx, (px, py) in enumerate(contour):
+                d = math.hypot(lx - px, ly - py)
+                if d < min_d:
+                    min_d = d
+                    best_match = (c_idx, n_idx)
+        return best_match
+
     def get_handle_at(self, pos: QPointF) -> Optional[str]:
         handles = self.get_handle_positions()
         threshold = 5.0  # mm in local coords
@@ -264,6 +284,20 @@ class LaserItemWrapper(QGraphicsItem):
             return Qt.CursorShape.SizeHorCursor
 
     def hoverMoveEvent(self, event: QGraphicsSceneHoverEvent):
+        sc = self.scene()
+        active_tool = getattr(sc, "active_tool", None) if sc else None
+        if active_tool == TOOL_TRIM:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            event.accept()
+            return
+        if active_tool == TOOL_NODE_EDIT and isinstance(self.entity, PathEntity):
+            if self.get_node_at_local(event.pos(), tolerance=5.0) is not None:
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            event.accept()
+            return
+
         if self.isSelected():
             h = self.get_handle_at(event.pos())
             if h:
@@ -303,6 +337,39 @@ class LaserItemWrapper(QGraphicsItem):
             self._initial_params = {}
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
+        sc = self.scene()
+        active_tool = getattr(sc, "active_tool", None) if sc else None
+
+        if active_tool == TOOL_TRIM:
+            event.ignore()
+            return
+
+        if active_tool == TOOL_NODE_EDIT:
+            if not isinstance(self.entity, PathEntity):
+                if sc and hasattr(sc, "convert_item_to_path"):
+                    sc.convert_item_to_path(self)
+                event.accept()
+                return
+
+            if event.button() == Qt.MouseButton.LeftButton:
+                hit = self.get_node_at_local(event.pos(), tolerance=5.0)
+                if hit is not None:
+                    self._dragging_node = hit
+                    self._selected_node = hit
+                    self._node_drag_start_pos = event.pos()
+                    if sc and hasattr(sc, "push_undo_state"):
+                        sc.push_undo_state()
+                    self.update()
+                    event.accept()
+                    return
+                else:
+                    self._dragging_node = None
+                    self._selected_node = None
+                    self.setSelected(True)
+                    self.update()
+                    event.accept()
+                    return
+
         if event.button() == Qt.MouseButton.LeftButton and self.isSelected():
             handle = self.get_handle_at(event.pos())
             if handle:
@@ -316,6 +383,22 @@ class LaserItemWrapper(QGraphicsItem):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
+        if getattr(self, "_dragging_node", None) is not None and isinstance(self.entity, PathEntity):
+            c_idx, n_idx = self._dragging_node
+            if 0 <= c_idx < len(self.entity.contours):
+                contour = self.entity.contours[c_idx]
+                if 0 <= n_idx < len(contour):
+                    contour[n_idx] = (round(event.pos().x(), 4), round(event.pos().y(), 4))
+                    self.entity.invalidate_bounds()
+                    self.prepareGeometryChange()
+                    self._cached_rect = None
+                    self._cached_path = None
+                    self.update()
+                    if self.scene() and hasattr(self.scene(), "entity_modified"):
+                        self.scene().entity_modified.emit()
+                    event.accept()
+                    return
+
         if getattr(self, "_resizing_handle", None):
             handle = self._resizing_handle
             scene_delta = event.scenePos() - self._resize_start_scene_pos
@@ -459,6 +542,17 @@ class LaserItemWrapper(QGraphicsItem):
         return super().itemChange(change, value)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if getattr(self, "_dragging_node", None) is not None:
+            self._dragging_node = None
+            self.prepareGeometryChange()
+            self._cached_rect = None
+            self._cached_path = None
+            self.update()
+            if self.scene() and hasattr(self.scene(), "entity_modified"):
+                self.scene().entity_modified.emit()
+            event.accept()
+            return
+
         if getattr(self, "_resizing_handle", None):
             self._resizing_handle = None
             self.setCursor(Qt.CursorShape.SizeAllCursor if self.isSelected() else Qt.CursorShape.ArrowCursor)
@@ -473,6 +567,26 @@ class LaserItemWrapper(QGraphicsItem):
             self.scene().entity_modified.emit()
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent):
+        sc = self.scene()
+        active_tool = getattr(sc, "active_tool", None) if sc else None
+        if active_tool == TOOL_NODE_EDIT and isinstance(self.entity, PathEntity):
+            from laserforge.core.node_editor import NodeEditorEngine
+            wx = self.entity.x + event.pos().x()
+            wy = self.entity.y + event.pos().y()
+            inserted = NodeEditorEngine.insert_node_near(self.entity, wx, wy, max_dist=6.0)
+            if inserted is not None:
+                if sc and hasattr(sc, "push_undo_state"):
+                    sc.push_undo_state()
+                self._selected_node = inserted
+                self.prepareGeometryChange()
+                self._cached_rect = None
+                self._cached_path = None
+                self.update()
+                if sc and hasattr(sc, "entity_modified"):
+                    sc.entity_modified.emit()
+                event.accept()
+                return
+
         if event.button() == Qt.MouseButton.LeftButton and isinstance(self.entity, TextEntity):
             sc = self.scene()
             parent_w = sc.views()[0] if sc and sc.views() else None
@@ -611,24 +725,44 @@ class LaserItemWrapper(QGraphicsItem):
 
         # Draw selection box and resize handles if selected
         if self.isSelected():
-            painter.setPen(QPen(QColor("#00d4ff"), 1.2, Qt.PenStyle.DashLine))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            sel_rect = rect.adjusted(-1, -1, 1, 1)
-            painter.drawRect(sel_rect)
+            sc = self.scene()
+            active_tool = getattr(sc, "active_tool", None) if sc else None
 
-            # Draw 8 resize handles
-            handle_color = QColor("#00d4ff")
-            painter.setPen(QPen(QColor("#ffffff"), 1))
-            painter.setBrush(QBrush(handle_color))
-            handles = self.get_handle_positions()
-            for h_id, pt in handles.items():
-                painter.drawRect(QRectF(pt.x() - 2.5, pt.y() - 2.5, 5, 5))
+            if active_tool == TOOL_NODE_EDIT and isinstance(self.entity, PathEntity):
+                # Render interactive vertex node handles on path contours
+                sel_node = getattr(self, "_selected_node", None)
+                for c_idx, contour in enumerate(self.entity.contours):
+                    for n_idx, (nx, ny) in enumerate(contour):
+                        is_sel = (sel_node == (c_idx, n_idx))
+                        node_size = 6.0
+                        rect_node = QRectF(nx - node_size / 2.0, ny - node_size / 2.0, node_size, node_size)
+                        if is_sel:
+                            painter.setPen(QPen(QColor("#ffffff"), 1.5))
+                            painter.setBrush(QBrush(QColor("#00e5ff")))  # Neon Cyan active node
+                        else:
+                            painter.setPen(QPen(QColor("#ffffff"), 1.0))
+                            painter.setBrush(QBrush(QColor("#ff007f")))  # Vivid Magenta node
+                        painter.drawRect(rect_node)
+            else:
+                painter.setPen(QPen(QColor("#00d4ff"), 1.2, Qt.PenStyle.DashLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                sel_rect = rect.adjusted(-1, -1, 1, 1)
+                painter.drawRect(sel_rect)
+
+                # Draw 8 resize handles
+                handle_color = QColor("#00d4ff")
+                painter.setPen(QPen(QColor("#ffffff"), 1))
+                painter.setBrush(QBrush(handle_color))
+                handles = self.get_handle_positions()
+                for h_id, pt in handles.items():
+                    painter.drawRect(QRectF(pt.x() - 2.5, pt.y() - 2.5, 5, 5))
 
 
 class LaserCanvasScene(QGraphicsScene):
     selection_changed = pyqtSignal()
     entity_modified = pyqtSignal()
     status_message = pyqtSignal(str)
+    tool_changed = pyqtSignal(str)
 
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
@@ -694,8 +828,49 @@ class LaserCanvasScene(QGraphicsScene):
         self.update()
 
     def set_active_tool(self, tool: str):
+        prev = self.active_tool
         self.active_tool = tool
-        self.clearSelection()
+        if tool == TOOL_NODE_EDIT:
+            self.convert_selected_to_path_entities()
+        elif prev == TOOL_NODE_EDIT:
+            for item in self.selectedItems():
+                if isinstance(item, LaserItemWrapper):
+                    item._selected_node = None
+                    item._dragging_node = None
+                    item.update()
+        elif tool in (TOOL_RECT, TOOL_CIRCLE, TOOL_LINE, TOOL_TEXT):
+            self.clearSelection()
+        self.update()
+        self.tool_changed.emit(tool)
+
+    def convert_item_to_path(self, item: LaserItemWrapper) -> Optional[LaserItemWrapper]:
+        """Converts a primitive entity wrapper into an editable PathEntity wrapper in place."""
+        if isinstance(item.entity, PathEntity):
+            return item
+        from laserforge.core.node_editor import NodeEditorEngine
+        new_path_ent = NodeEditorEngine.entity_to_path_entity(item.entity)
+        was_selected = item.isSelected()
+        self.removeItem(item)
+        new_wrapper = self.add_entity(new_path_ent)
+        if was_selected:
+            new_wrapper.setSelected(True)
+        self.entity_modified.emit()
+        return new_wrapper
+
+    def convert_selected_to_path_entities(self) -> List[LaserItemWrapper]:
+        """Converts all currently selected primitive entities to editable PathEntities."""
+        converted = []
+        selected_items = [i for i in self.selectedItems() if isinstance(i, LaserItemWrapper)]
+        if any(not isinstance(i.entity, PathEntity) for i in selected_items):
+            self.push_undo_state()
+            for item in selected_items:
+                if not isinstance(item.entity, PathEntity):
+                    nw = self.convert_item_to_path(item)
+                    if nw:
+                        converted.append(nw)
+                else:
+                    converted.append(item)
+        return converted
 
     def add_guide(self, orientation: str, pos_mm: float):
         """Adds horizontal or vertical alignment guide line at specified millimeter position."""
@@ -863,6 +1038,27 @@ class LaserCanvasScene(QGraphicsScene):
         return True
 
     def delete_selected(self):
+        if self.active_tool == TOOL_NODE_EDIT:
+            from laserforge.core.node_editor import NodeEditorEngine
+            node_deleted = False
+            for item in self.selectedItems():
+                if isinstance(item, LaserItemWrapper) and isinstance(item.entity, PathEntity):
+                    if getattr(item, "_selected_node", None) is not None:
+                        c_idx, n_idx = item._selected_node
+                        self.push_undo_state()
+                        NodeEditorEngine.delete_node(item.entity, c_idx, n_idx)
+                        item._selected_node = None
+                        item.prepareGeometryChange()
+                        item._cached_rect = None
+                        item._cached_path = None
+                        item.update()
+                        self.entity_modified.emit()
+                        self.status_message.emit("Deleted vector vertex")
+                        node_deleted = True
+                        break
+            if node_deleted:
+                return
+
         items_to_del = [item for item in self.selectedItems() if isinstance(item, LaserItemWrapper)]
         if not items_to_del:
             return
@@ -870,6 +1066,42 @@ class LaserCanvasScene(QGraphicsScene):
         for item in items_to_del:
             self.removeItem(item)
         self.entity_modified.emit()
+
+    def keyPressEvent(self, event):
+        if self.active_tool == TOOL_NODE_EDIT:
+            from laserforge.core.node_editor import NodeEditorEngine
+            for item in self.selectedItems():
+                if isinstance(item, LaserItemWrapper) and isinstance(item.entity, PathEntity):
+                    if getattr(item, "_selected_node", None) is not None:
+                        c_idx, n_idx = item._selected_node
+                        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace, Qt.Key.Key_D):
+                            self.delete_selected()
+                            event.accept()
+                            return
+                        elif event.key() == Qt.Key.Key_S:
+                            self.push_undo_state()
+                            NodeEditorEngine.smooth_node(item.entity, c_idx, n_idx)
+                            item.prepareGeometryChange()
+                            item._cached_rect = None
+                            item._cached_path = None
+                            item.update()
+                            self.entity_modified.emit()
+                            self.status_message.emit("Smoothed vector vertex")
+                            event.accept()
+                            return
+                        elif event.key() == Qt.Key.Key_B:
+                            self.push_undo_state()
+                            NodeEditorEngine.break_path_at_node(item.entity, c_idx, n_idx)
+                            item._selected_node = None
+                            item.prepareGeometryChange()
+                            item._cached_rect = None
+                            item._cached_path = None
+                            item.update()
+                            self.entity_modified.emit()
+                            self.status_message.emit("Split / broke path at vertex")
+                            event.accept()
+                            return
+        super().keyPressEvent(event)
 
     def duplicate_selected(self):
         selected = self.get_selected_entities()
@@ -1097,13 +1329,63 @@ class LaserCanvasScene(QGraphicsScene):
     def _on_selection_changed(self):
         self.selection_changed.emit()
 
-    # --- Mouse Event CAD Drawing Tools ---
+    def _handle_trim_scissor_click(self, click_x: float, click_y: float):
+        """Interactively snips the vector segment closest to the click coordinate."""
+        from laserforge.core.node_editor import NodeEditorEngine, dist_to_segment
+        wrappers = [it for it in self.items() if isinstance(it, LaserItemWrapper)]
+        best_wrapper = None
+        min_dist = 6.0
+
+        for w in wrappers:
+            pe = NodeEditorEngine.entity_to_path_entity(w.entity)
+            for c in pe.contours:
+                count = len(c) if pe.closed else (len(c) - 1)
+                for i in range(count):
+                    p1 = (pe.x + c[i][0], pe.y + c[i][1])
+                    p2 = (pe.x + c[(i + 1) % len(c)][0], pe.y + c[(i + 1) % len(c)][1])
+                    d, _, _ = dist_to_segment((click_x, click_y), p1, p2)
+                    if d < min_dist:
+                        min_dist = d
+                        best_wrapper = w
+
+        if best_wrapper is not None:
+            target_ent = NodeEditorEngine.entity_to_path_entity(best_wrapper.entity)
+            all_entities = self.get_all_entities()
+            trimmed = NodeEditorEngine.trim_segment_at_point(
+                target_ent, all_entities, click_x, click_y, max_click_dist=min_dist + 2.0
+            )
+            if trimmed is not None:
+                self.push_undo_state()
+                self.removeItem(best_wrapper)
+                if trimmed.contours:
+                    new_w = self.add_entity(trimmed)
+                    new_w.setSelected(True)
+                self.entity_modified.emit()
+                self.status_message.emit("✂ Trimmed segment at vector intersection")
+            else:
+                self.status_message.emit("No intersection segment found to trim at click location")
+        else:
+            self.status_message.emit("Click directly on a line or curve intersecting another path to trim")
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.scenePos()
             sx = self.snap_value(pos.x())
             sy = self.snap_value(pos.y())
+
+            if self.active_tool == TOOL_TRIM:
+                self._handle_trim_scissor_click(pos.x(), pos.y())
+                event.accept()
+                return
+
+            if self.active_tool == TOOL_NODE_EDIT:
+                item = self.itemAt(pos, QTransform())
+                while item and not isinstance(item, LaserItemWrapper):
+                    item = item.parentItem()
+                if item and isinstance(item, LaserItemWrapper) and not isinstance(item.entity, PathEntity):
+                    self.convert_item_to_path(item)
+                    event.accept()
+                    return
 
             if self.active_tool == TOOL_RECT:
                 self._drawing = True

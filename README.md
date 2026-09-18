@@ -121,6 +121,18 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - **Multi-Factor Filtering**: Live instant keyword search, category dropdown, and tag filter chips.
   - **Built-In Standard Hardware Library**: Ships pre-populated with precision M3, M4, and M5 screw clearance holes (with counterbore rings), wall keyhole hanging slots, zip-tie pass-throughs, keychain/earring loop tabs, sliding box finger notches, and 90° corner L-fiducials.
   - **Library Management**: Create, open, export, share, and reload `.lflib` component packages.
+- **Common Line Cutting & Coincident Edge De-duplication Studio (`Ctrl+Alt+O`)**:
+  - Automatically identifies collinear, overlapping, and touching edge segments across arrays, tiled parts, and nested cutting sheets.
+  - Slices shared edges once instead of twice, eliminating edge scorch, double-burning, and saving 30% to 50% in laser run time.
+  - Interactive studio dialog featuring configurable tolerance, live cutting distance / time savings telemetry, visual comparison canvas, and 1-click replacement onto the workbed.
+- **Variable Text & Batch CSV / TSV Production Merge Studio (`Ctrl+Alt+V`)**:
+  - Direct integration with spreadsheet datasets (CSV, TSV) for automated production runs of personalized name tags, asset serial labels, and badges.
+  - Intelligent delimiter auto-detection and dynamic placeholder evaluation: `%NAME%`, `%ROLE%`, formatted serial counters (`%SERIAL:04d%`), `%DATE%`, `%TIME%`, and `%ROW%`.
+  - Automated grid array layout with dial-in X/Y spacing, bed margin boundaries, sheet fit telemetry, and instant batch generation.
+- **Interactive Vector Node Editing & Trim Scissor Tool (`N`, `✂ X`)**:
+  - **Vertex-Level CAD Manipulation**: Select, move, insert, delete, smooth, and split/break path vertices directly on the CAD canvas.
+  - **Trim Scissor Tool**: Interactive snipping tool that detects vector intersections across multiple shapes and trims away clicked line segments up to intersections (LightBurn Scissor tool equivalent).
+  - **Primitive Conversion**: 1-click conversion from basic geometric rectangles, circles, and lines into editable multi-vertex vector paths.
 - **Calibrated Preset Exchange & Project Bundle (`.lfpak`) Packager (`Ctrl+Shift+P`)**:
   - Full portable bundle archiving (`.lfpak`) bundling vector artwork (`project.lfg`), calibrated materials library (`materials.json`), machine hardware configurations (`machine_settings.json`), and parametric templates.
   - **Cryptographic Tamper Protection**: Generates and verifies SHA256 checksums across all bundled assets to ensure integrity and prevent corrupted imports.
@@ -226,6 +238,8 @@ python3 -m laserforge.main
 | **Add Selection to Art Library** | `Ctrl + Shift + L` |
 | **Holding Tabs & Bridges Studio** | `Ctrl + Alt + T` |
 | **Print & Cut (2-Point Registration)** | `Ctrl + Alt + P` |
+| **Common Line Cutting Studio** | `Ctrl + Alt + O` |
+| **Variable Text & CSV Batch Merge** | `Ctrl + Alt + V` |
 | **Export G-Code** | `Ctrl + E` |
 | **Export Canvas to SVG** | `Ctrl + Shift + E` |
 | **Auto Cutout to SVG** | `Ctrl + Shift + C` |
@@ -236,6 +250,8 @@ python3 -m laserforge.main
 | **Single-Line Stroke Text** | `Ctrl + Shift + F` |
 | **Job Cost & Time Estimator** | `Ctrl + Shift + M` |
 | **Select Tool** | `S` |
+| **Node Edit Tool** | `N` |
+| **Trim Scissor Tool** | `X` |
 | **Rectangle Tool** | `R` |
 | **Circle Tool** | `C` |
 | **Line Tool** | `L` |
@@ -253,7 +269,9 @@ python3 -m laserforge.main
 | **Parametric Shapes Generator** | `Ctrl + Alt + G` |
 | **Select All** | `Ctrl + A` |
 | **Duplicate Selected** | `Ctrl + D` |
-| **Delete Selected** | `Delete` |
+| **Delete Selected / Delete Vertex** | `Delete` |
+| **Smooth Vertex** | `S (in Node Edit)` |
+| **Split / Break Path at Vertex** | `B (in Node Edit)` |
 | **Zoom to Fit Bed** | `Ctrl + 0` |
 | **Toolpath Preview** | `Alt + P` |
 | **Frame Bounding Box** | `Ctrl + F` |
@@ -269,7 +287,7 @@ python3 -m laserforge.main
 cd /home/k/LaserForge
 python3 -m unittest discover tests
 ```
-All automated test suites (186+ unit tests) verify:
+All automated test suites (262+ unit tests) verify:
 - Geometric entity definitions and boundary math
 - Multi-layer parameter configuration
 - Floyd-Steinberg and Atkinson dithering
