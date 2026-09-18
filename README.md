@@ -113,6 +113,14 @@ LaserForge is a full-featured desktop laser engraving and cutting suite built na
   - Parametric 2D grid generator varying Speed (rows) vs Power (columns) across configurable steps.
   - Dual modes (perimeter cutting, internal vector hatching, or both) with per-entity speed and power overrides.
   - Burns single-line Hershey stroke numeric labels for each row/column and includes an optional perimeter drop-out cutout frame.
+- **Dockable Reusable Art & Component Library Studio (`.lflib`) (`Alt+A`, `Ctrl+Shift+L`)**:
+  - LightBurn-style dockable visual asset manager for reusable vector components, hardware mounting holes, and cutouts.
+  - Tabified behind Cuts / Layers in the top-right dock for seamless one-click switching.
+  - **Drag-and-Drop Canvas Insertion**: Drag any component directly from the library panel onto the 2D canvas at exact drop coordinates.
+  - **One-Click Selection Saving (`Ctrl+Shift+L`)**: Save any canvas selection directly into the active library with automatic vector bounding box normalization and high-resolution antialiased thumbnail rendering.
+  - **Multi-Factor Filtering**: Live instant keyword search, category dropdown, and tag filter chips.
+  - **Built-In Standard Hardware Library**: Ships pre-populated with precision M3, M4, and M5 screw clearance holes (with counterbore rings), wall keyhole hanging slots, zip-tie pass-throughs, keychain/earring loop tabs, sliding box finger notches, and 90° corner L-fiducials.
+  - **Library Management**: Create, open, export, share, and reload `.lflib` component packages.
 - **Calibrated Preset Exchange & Project Bundle (`.lfpak`) Packager (`Ctrl+Shift+P`)**:
   - Full portable bundle archiving (`.lfpak`) bundling vector artwork (`project.lfg`), calibrated materials library (`materials.json`), machine hardware configurations (`machine_settings.json`), and parametric templates.
   - **Cryptographic Tamper Protection**: Generates and verifies SHA256 checksums across all bundled assets to ensure integrity and prevent corrupted imports.
@@ -214,6 +222,8 @@ python3 -m laserforge.main
 | **Import SVG Vector** | `Ctrl + I` |
 | **Import AutoCAD DXF** | `Ctrl + Alt + D` |
 | **Import LightBurn (.lbrn, .lbrn2)** | `Ctrl + Alt + L` |
+| **Art & Component Library** | `Alt + A` |
+| **Add Selection to Art Library** | `Ctrl + Shift + L` |
 | **Holding Tabs & Bridges Studio** | `Ctrl + Alt + T` |
 | **Print & Cut (2-Point Registration)** | `Ctrl + Alt + P` |
 | **Export G-Code** | `Ctrl + E` |

@@ -200,7 +200,16 @@ class ImageTracer:
             if threshold is None:
                 thresh_val, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                 threshold = int(thresh_val)
-            thresh_type = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV
+            # Auto-detect if image has dark background (e.g. sketch on black background)
+            is_dark_bg = False
+            if mode == "sketch" and gray.size > 4:
+                corners = [gray[0, 0], gray[0, -1], gray[-1, 0], gray[-1, -1]]
+                is_dark_bg = (float(np.mean(corners)) < 128.0)
+
+            if is_dark_bg:
+                thresh_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+            else:
+                thresh_type = cv2.THRESH_BINARY if invert else cv2.THRESH_BINARY_INV
             _, binary = cv2.threshold(gray, threshold, 255, thresh_type)
 
         return binary

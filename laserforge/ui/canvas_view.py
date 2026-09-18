@@ -108,9 +108,12 @@ class RulerWidget(QWidget):
 
 class LaserCanvasView(QGraphicsView):
     cursor_moved_mm = pyqtSignal(float, float)
+    art_item_dropped = pyqtSignal(str, float, float)
+    file_dropped = pyqtSignal(str, float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAcceptDrops(True)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)
@@ -418,6 +421,9 @@ class LaserCanvasView(QGraphicsView):
 
             act_flip_v = menu.addAction("↕ Flip Vertically (V)")
             act_flip_v.triggered.connect(lambda: getattr(self.scene(), "flip_selected_vertical", lambda: None)())
+
+            act_add_art = menu.addAction("📦 Add Selection to Art Library (Ctrl+Shift+L)...")
+            act_add_art.triggered.connect(lambda: getattr(self.window(), "add_selection_to_art_library", lambda: None)())
             menu.addSeparator()
 
         act_dup = menu.addAction("Duplicate (Ctrl+D)")
@@ -431,6 +437,38 @@ class LaserCanvasView(QGraphicsView):
         act_fit.triggered.connect(self.zoom_to_fit)
 
         menu.exec(event.globalPos())
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-laserforge-artitem") or event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-laserforge-artitem") or event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        pos_px = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        scene_pos = self.mapToScene(pos_px)
+        x_mm = float(scene_pos.x())
+        y_mm = float(scene_pos.y())
+
+        if event.mimeData().hasFormat("application/x-laserforge-artitem"):
+            item_id = bytes(event.mimeData().data("application/x-laserforge-artitem")).decode("utf-8")
+            self.art_item_dropped.emit(item_id, x_mm, y_mm)
+            event.acceptProposedAction()
+        elif event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                fpath = url.toLocalFile()
+                if fpath:
+                    self.file_dropped.emit(fpath, x_mm, y_mm)
+                    event.acceptProposedAction()
+                    break
+        else:
+            super().dropEvent(event)
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
         """Draws the dark workspace, workbed boundary, and millimeter grid lines."""

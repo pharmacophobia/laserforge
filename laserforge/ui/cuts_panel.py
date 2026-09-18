@@ -376,3 +376,7 @@ class CutsPanel(QWidget):
             self.layers_updated.emit()
         except Exception:
             pass
+
+    def update_table(self):
+        """Alias for refresh_table."""
+        self.refresh_table()

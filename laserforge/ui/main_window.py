@@ -73,6 +73,8 @@ from laserforge.core.shape_generator import ShapeGenerator
 from laserforge.core.font_tools import FontTools
 from laserforge.core.business_card_generator import BusinessCardGenerator, generate_qr_contours
 from laserforge.core.materials_database import MaterialProfile
+from laserforge.core.art_library import ArtLibraryManager, ArtItem
+from laserforge.ui.art_library_panel import ArtLibraryPanel
 
 
 
@@ -300,6 +302,16 @@ class MainWindow(QMainWindow):
         self.act_alignment_marks_studio = QAction("Alignment & Registration Marks Studio...", self)
         self.act_alignment_marks_studio.setToolTip("Studio for Corner 90° L-Marks and Center '+' Cross registration marks")
         self.act_alignment_marks_studio.triggered.connect(lambda: self.open_alignment_marks_studio())
+
+        self.act_art_library = QAction("Art & Component Library...", self)
+        self.act_art_library.setShortcut("Alt+A")
+        self.act_art_library.setToolTip("Open the reusable art and component library dock panel (Alt+A)")
+        self.act_art_library.triggered.connect(self.show_art_library_dock)
+
+        self.act_add_to_art_library = QAction("Add Selection to Art Library...", self)
+        self.act_add_to_art_library.setShortcut("Ctrl+Shift+L")
+        self.act_add_to_art_library.setToolTip("Save selected vector shapes to the active Art Library (Ctrl+Shift+L)")
+        self.act_add_to_art_library.triggered.connect(self.add_selection_to_art_library)
 
         self.act_snap_grid = QAction("Snap to Grid", self)
         self.act_snap_grid.setCheckable(True)
@@ -611,6 +623,8 @@ class MainWindow(QMainWindow):
         menu_edit.addAction(self.act_subtract)
         menu_edit.addAction(self.act_intersect)
         menu_edit.addAction(self.act_xor)
+        menu_edit.addSeparator()
+        menu_edit.addAction(self.act_add_to_art_library)
 
         # Laser Menu
         menu_laser = menubar.addMenu("&Laser")
@@ -677,6 +691,7 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_ruida_studio)
         menu_tools.addAction(self.act_web_pendant)
         menu_tools.addAction(self.act_bundle_packager)
+        menu_tools.addAction(self.act_art_library)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
         menu_tools.addAction(self.act_test_matrix)
@@ -695,6 +710,8 @@ class MainWindow(QMainWindow):
         menu_view.addAction(self.act_snap_grid)
         menu_view.addAction(self.act_toggle_guides)
         menu_view.addAction(self.act_clear_guides)
+        menu_view.addSeparator()
+        self.menu_view_docks = menu_view.addMenu("📁 Docks & Panels")
 
         # Arrange & Design Aids Menu
         menu_arrange = menubar.addMenu("&Arrange")
@@ -1207,14 +1224,32 @@ class MainWindow(QMainWindow):
     def _create_dock_panels(self):
         # 1. Cuts / Layers Dock (Right Top)
         cuts_dock = QDockWidget("Cuts / Layers", self)
+        cuts_dock.setObjectName("CutsLayersDock")
         cuts_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
         self.cuts_panel = CutsPanel(self.layer_manager, self)
         cuts_dock.setWidget(self.cuts_panel)
+        self.cuts_dock = cuts_dock
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, cuts_dock)
+
+        # 1b. Art & Component Library Dock (Tabified with Cuts / Layers)
+        art_dock = QDockWidget("Art & Component Library", self)
+        art_dock.setObjectName("ArtLibraryDock")
+        art_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.art_library_manager = ArtLibraryManager()
+        self.art_library_panel = ArtLibraryPanel(self.art_library_manager, self)
+        self.art_library_panel.insert_item_requested.connect(self.insert_art_item_on_canvas)
+        self.art_library_panel.selection_add_requested.connect(self.add_selection_to_art_library)
+        art_dock.setWidget(self.art_library_panel)
+        self.art_dock = art_dock
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, art_dock)
+        self.tabifyDockWidget(cuts_dock, art_dock)
+        cuts_dock.raise_()
 
         # 2. Bottom-Right Multi-Tab Dock: Laser, Console, Properties
         right_tab_dock = QDockWidget("Laser & Machine Operations", self)
+        right_tab_dock.setObjectName("LaserOperationsDock")
         right_tab_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.right_tab_dock = right_tab_dock
 
         tab_widget = QTabWidget()
         self.laser_panel = LaserControlPanel(self.serial_ctrl, parent=self, settings=self.settings)
@@ -1236,6 +1271,11 @@ class MainWindow(QMainWindow):
 
         right_tab_dock.setWidget(tab_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, right_tab_dock)
+
+        if hasattr(self, "menu_view_docks") and self.menu_view_docks:
+            self.menu_view_docks.addAction(cuts_dock.toggleViewAction())
+            self.menu_view_docks.addAction(art_dock.toggleViewAction())
+            self.menu_view_docks.addAction(right_tab_dock.toggleViewAction())
 
     def _create_bottom_palette_dock(self):
         """Creates the signature bottom LightBurn quick color swatch palette."""
@@ -1296,6 +1336,8 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         # Cursor tracking
         self.canvas_widget.view.cursor_moved_mm.connect(self._on_cursor_moved)
+        self.canvas_widget.view.art_item_dropped.connect(self._on_art_item_dropped)
+        self.canvas_widget.view.file_dropped.connect(self._on_file_dropped)
 
         # Scene changes
         self.scene.entity_modified.connect(self._on_entities_changed)
@@ -1725,6 +1767,88 @@ class MainWindow(QMainWindow):
         self.canvas_widget.view.set_bed_size(self.settings.bed_width, self.settings.bed_height)
         self.canvas_widget.view.zoom_to_fit()
         self.statusBar().showMessage("Applied bundled machine settings and bed size.", 4000)
+
+    # -------------------------------------------------------------
+    # Art & Component Library Integration
+    # -------------------------------------------------------------
+    def show_art_library_dock(self):
+        """Displays and brings the Art & Component Library dock to front."""
+        self.art_dock.show()
+        self.art_dock.raise_()
+        self.art_dock.activateWindow()
+
+    def add_selection_to_art_library(self):
+        """Pops up the dialog to save selected canvas shapes to the active art library."""
+        selected_wrappers = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
+        if not selected_wrappers:
+            QMessageBox.information(
+                self, "No Selection", "Please select one or more shapes on the canvas to add to the Art Library."
+            )
+            return
+
+        selected_entities = [w.entity for w in selected_wrappers]
+        self.show_art_library_dock()
+        self.art_library_panel.add_entities_to_active_library(selected_entities)
+
+    def insert_art_item_on_canvas(
+        self,
+        art_item: ArtItem,
+        target_x: Optional[float] = None,
+        target_y: Optional[float] = None
+    ):
+        """Instantiates an ArtItem onto the canvas at target coordinates or bed center."""
+        if not art_item:
+            return
+
+        if target_x is None:
+            target_x = getattr(self.settings, "bed_width", 400.0) / 2.0
+        if target_y is None:
+            target_y = getattr(self.settings, "bed_height", 400.0) / 2.0
+
+        entities = art_item.instantiate_entities(target_x=target_x, target_y=target_y, center=True)
+        if not entities:
+            return
+
+        # Snapshot for undo
+        if hasattr(self.scene, "push_undo_state"):
+            self.scene.push_undo_state()
+
+        self.scene.clearSelection()
+        for ent in entities:
+            wrapper = self.scene.add_entity(ent)
+            if wrapper:
+                wrapper.setSelected(True)
+
+        self.cuts_panel.update_table()
+        self.statusBar().showMessage(
+            f"Inserted '{art_item.name}' ({len(entities)} shapes) onto canvas", 3000
+        )
+
+    def _on_art_item_dropped(self, item_id: str, x_mm: float, y_mm: float):
+        """Handles drag-and-drop insertion of an ArtItem onto the canvas at specific coordinates."""
+        active_lib = self.art_library_manager.get_active_library()
+        if active_lib:
+            art_item = active_lib.get_item(item_id)
+            if art_item:
+                self.insert_art_item_on_canvas(art_item, target_x=x_mm, target_y=y_mm)
+
+    def _on_file_dropped(self, filepath: str, x_mm: float, y_mm: float):
+        """Handles dropping vector or image files onto the canvas."""
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in (".svg", ".dxf", ".lbrn", ".lbrn2", ".laserproj"):
+            if ext == ".svg":
+                self.import_svg_file(filepath)
+            elif ext == ".dxf":
+                self.import_dxf_file(filepath)
+            elif ext in (".lbrn", ".lbrn2"):
+                self.import_lbrn_file(filepath)
+            elif ext == ".laserproj":
+                self.load_project(filepath)
+        elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+            if hasattr(self, "import_image_file"):
+                self.import_image_file(filepath)
+            else:
+                self.import_image(filepath)
 
     def import_svg(self):
         path, _ = QFileDialog.getOpenFileName(
