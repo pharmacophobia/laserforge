@@ -3,7 +3,7 @@ LaserForge Configuration and Default Parameters.
 Stores default workbed geometry, layer palettes, laser cut profiles, and application settings.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List
 
 # Default Machine Workbed Geometry
@@ -129,4 +129,35 @@ class MachineSettings:
     rotary_steps_per_rev: float = 3200.0  # Steps per 360 degree revolution of rotary motor
     rotary_original_y_steps: float = 80.0 # Original Y-axis steps/mm ($101) to restore
     rotary_invert_dir: bool = False       # Invert rotation direction
+
+    # Z-Probe & Auto-Focus
+    z_probe_cmd: str = "G38.2"
+    z_probe_feed_rate: float = 120.0
+    z_probe_max_travel: float = 40.0
+    z_probe_retract: float = 3.0
+    z_probe_plate_thickness: float = 15.0
+    z_probe_focal_offset: float = 0.0
+    z_probe_auto_zero: bool = True
+
+    # Audio Alerts & Workshop Chimes
+    audio_chime_enabled: bool = True
+    audio_chime_volume: float = 0.8
+
+    # Custom G-Code Quick Macros
+    custom_macros: List[Dict[str, str]] = field(default_factory=lambda: [
+        {"name": "Home All", "gcode": "$H", "color": "#0099ff"},
+        {"name": "Air Assist On", "gcode": "M8", "color": "#00cc66"},
+        {"name": "Air Assist Off", "gcode": "M9", "color": "#757575"},
+        {"name": "Go to Origin", "gcode": "G90 G0 X0 Y0", "color": "#ff9900"},
+        {"name": "Park Rear", "gcode": "G90 G0 X0 Y400", "color": "#9966ff"},
+        {"name": "Set Work Zero", "gcode": "G10 L20 P1 X0 Y0 Z0", "color": "#e91e63"},
+    ])
+
+    # Fisheye Camera Settings
+    camera_fisheye_enabled: bool = False
+    camera_lens_fov: float = 150.0
+    camera_fisheye_k1: float = -0.12
+    camera_fisheye_k2: float = 0.03
+    camera_fisheye_k3: float = 0.0
+    camera_fisheye_k4: float = 0.0
 

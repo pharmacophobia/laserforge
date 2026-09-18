@@ -34,10 +34,13 @@ from laserforge.core.project_io import ProjectIO
 
 from laserforge.ui.canvas_scene import (
     LaserCanvasScene, LaserItemWrapper, TOOL_SELECT, TOOL_RECT, TOOL_CIRCLE, TOOL_LINE, TOOL_TEXT,
-    TOOL_NODE_EDIT, TOOL_TRIM
+    TOOL_NODE_EDIT, TOOL_TRIM, TOOL_MEASURE
 )
 from laserforge.ui.common_line_dialog import CommonLineDialog
 from laserforge.ui.variable_text_dialog import VariableTextDialog
+from laserforge.ui.z_probe_dialog import ZProbeStudioDialog
+from laserforge.ui.surface_wrap_dialog import SurfaceWrapStudioDialog
+from laserforge.core.audio_alerts import AudioChimeEngine
 from laserforge.ui.canvas_view import LaserCanvasWidget
 from laserforge.ui.cuts_panel import CutsPanel
 from laserforge.ui.laser_control_panel import LaserControlPanel
@@ -332,6 +335,14 @@ class MainWindow(QMainWindow):
         self.act_convert_to_path = QAction("Convert to Editable Vector Path", self)
         self.act_convert_to_path.setToolTip("Convert selected primitive rectangles, circles, or lines into vector paths for node editing")
         self.act_convert_to_path.triggered.connect(self.convert_selected_to_path)
+
+        self.act_z_probe = QAction("Auto-Focus & Z-Touch Plate Studio (G38.2)...", self)
+        self.act_z_probe.setToolTip("Automated touch plate focal calibration cycle and WCS Z-zeroing")
+        self.act_z_probe.triggered.connect(self.open_z_probe_studio)
+
+        self.act_surface_wrap = QAction("3D Curved Surface Wrapping Studio...", self)
+        self.act_surface_wrap.setToolTip("Project 2D vector artwork onto cylindrical, spherical, and inclined non-planar surfaces")
+        self.act_surface_wrap.triggered.connect(self.open_surface_wrap_studio)
 
         self.act_snap_grid = QAction("Snap to Grid", self)
         self.act_snap_grid.setCheckable(True)
@@ -717,6 +728,8 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.act_web_pendant)
         menu_tools.addAction(self.act_bundle_packager)
         menu_tools.addAction(self.act_art_library)
+        menu_tools.addAction(self.act_z_probe)
+        menu_tools.addAction(self.act_surface_wrap)
         menu_tools.addSeparator()
         menu_tools.addAction(self.act_material_lib)
         menu_tools.addAction(self.act_test_matrix)
@@ -1091,6 +1104,7 @@ class MainWindow(QMainWindow):
             ("Select (S)", TOOL_SELECT, "↖", "#00e5ff"),
             ("Node Edit (N)", TOOL_NODE_EDIT, "☩", "#ff4081"),
             ("Trim Scissor (X)", TOOL_TRIM, "✂", "#ff9100"),
+            ("Measure Caliper (M)", TOOL_MEASURE, "📐", "#ffd600"),
             ("Rectangle (R)", TOOL_RECT, "▭", "#69f0ae"),
             ("Circle (C)", TOOL_CIRCLE, "◯", "#ffd740"),
             ("Line (L)", TOOL_LINE, "╱", "#00e676"),
@@ -2580,6 +2594,22 @@ class MainWindow(QMainWindow):
             parent=self
         )
         dlg.rotary_settings_changed.connect(self._on_rotary_settings_changed)
+        dlg.exec()
+
+    def open_z_probe_studio(self):
+        """Opens the Auto-Focus & Touch Plate Probing Studio (G38.2)."""
+        dlg = ZProbeStudioDialog(
+            serial_ctrl=self.serial_ctrl,
+            settings=self.settings,
+            parent=self
+        )
+        dlg.exec()
+
+    def open_surface_wrap_studio(self):
+        """Opens the 3D Curved Surface Wrapping Studio."""
+        selected = self.scene.get_selected_entities()
+        target = selected if selected else self.scene.get_all_entities()
+        dlg = SurfaceWrapStudioDialog(entities=target, parent=self)
         dlg.exec()
 
     def _on_rotary_settings_changed(self):

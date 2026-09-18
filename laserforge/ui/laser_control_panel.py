@@ -9,12 +9,13 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QPushButton, QComboBox, QRadioButton, QButtonGroup,
     QProgressBar, QGroupBox, QSpinBox, QDoubleSpinBox,
-    QFrame, QCheckBox, QScrollArea
+    QFrame, QCheckBox, QScrollArea, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QIcon
 
 from laserforge.core.serial_controller import SerialController
+from laserforge.core.audio_alerts import AudioChimeEngine
 
 
 class JogButton(QPushButton):
@@ -431,6 +432,32 @@ class LaserControlPanel(QWidget):
 
         main_layout.addWidget(job_group)
 
+        # Quick G-Code Macros
+        macro_group = QGroupBox("Quick G-Code Macros")
+        macro_layout = QGridLayout(macro_group)
+        macro_layout.setContentsMargins(4, 4, 4, 4)
+        macro_layout.setSpacing(4)
+
+        macros = [
+            ("Home ($H)", "$H", "#0288d1"),
+            ("Air On", "M8", "#388e3c"),
+            ("Air Off", "M9", "#616161"),
+            ("Origin", "G90 G0 X0 Y0", "#f57c00"),
+            ("Park Rear", "G90 G0 X0 Y400", "#7b1fa2"),
+            ("Zero WCS", "G10 L20 P1 X0 Y0 Z0", "#c2185b"),
+        ]
+
+        for idx, (m_name, m_code, m_col) in enumerate(macros):
+            row = idx // 2
+            col = idx % 2
+            btn_m = QPushButton(m_name)
+            btn_m.setToolTip(f"Send G-code: {m_code}")
+            btn_m.setStyleSheet(f"font-size: 9px; padding: 3px; font-weight: bold; background-color: {m_col}; color: white; border-radius: 3px;")
+            btn_m.clicked.connect(lambda checked=False, code=m_code: self._send_macro(code))
+            macro_layout.addWidget(btn_m, row, col)
+
+        main_layout.addWidget(macro_group)
+
         self.btn_settings = QPushButton("⚙  Machine & Laser Settings...")
         self.btn_settings.setToolTip("Open comprehensive Machine, Laser Kinematics, Overscan, and GRBL configuration")
         self.btn_settings.setStyleSheet("font-weight: bold; padding: 3px; font-size: 10px;")
@@ -674,6 +701,14 @@ class LaserControlPanel(QWidget):
             self.progress_label.setStyleSheet("color: #ef5350; font-size: 10px; font-weight: bold;")
             if "ALARM" in msg or "alarm" in msg:
                 self.btn_unlock.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold; border: 1px solid #ff8a80;")
+            AudioChimeEngine.play_chime("alarm")
         else:
             self.progress_label.setStyleSheet("color: #81c784; font-size: 10px; font-weight: bold;")
             self.btn_unlock.setStyleSheet("")
+            AudioChimeEngine.play_chime("job_complete")
+
+    def _send_macro(self, gcode: str):
+        if self.serial_ctrl and self.serial_ctrl.is_connected:
+            self.serial_ctrl.send_command(gcode)
+        else:
+            QMessageBox.information(self, "Quick Macro", "Laser is not connected. Please connect before sending macros.")

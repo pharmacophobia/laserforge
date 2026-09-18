@@ -49,6 +49,7 @@ class CameraCalibrationData:
     fine_rotation_deg: float = 0.0
     overlay_opacity: float = 0.55
     fiducial_inset_mm: float = 40.0
+    is_fisheye: bool = False
 
     def is_lens_calibrated(self) -> bool:
         if self.camera_matrix is None or self.distortion_coeffs is None:
@@ -341,12 +342,27 @@ class CameraEngine:
 
     def undistort_frame(self, frame: np.ndarray) -> np.ndarray:
         """
-        Corrects lens barrel/pincushion distortion using calibrated camera matrix K and D.
+        Corrects lens barrel/pincushion distortion using calibrated camera matrix K and D,
+        with support for ultra-wide fisheye lens models (cv2.fisheye).
         """
         if not HAS_CV2 or not self.calibration.is_lens_calibrated():
             return frame
 
         try:
+            if getattr(self.calibration, "is_fisheye", False):
+                from laserforge.core.fisheye_camera import FisheyeRectifier, FisheyeCalibrationData
+                if not hasattr(self, "_fisheye_rectifier"):
+                    k = self.calibration.camera_matrix
+                    d = self.calibration.distortion_coeffs
+                    cal = FisheyeCalibrationData(
+                        fx=float(k[0, 0]), fy=float(k[1, 1]),
+                        cx=float(k[0, 2]), cy=float(k[1, 2]),
+                        k1=float(d[0]) if len(d) > 0 else -0.12,
+                        k2=float(d[1]) if len(d) > 1 else 0.03
+                    )
+                    self._fisheye_rectifier = FisheyeRectifier(cal)
+                return self._fisheye_rectifier.undistort(frame)
+
             return cv2.undistort(
                 frame,
                 self.calibration.camera_matrix,

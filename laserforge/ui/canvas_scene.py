@@ -13,7 +13,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QGraphicsScene, QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
     QGraphicsLineItem, QGraphicsPathItem, QGraphicsTextItem, QGraphicsPixmapItem,
-    QGraphicsSceneMouseEvent, QGraphicsSceneHoverEvent, QInputDialog
+    QGraphicsSceneMouseEvent, QGraphicsSceneHoverEvent, QInputDialog,
+    QGraphicsSimpleTextItem, QGraphicsItemGroup
 )
 
 from laserforge.core.models import (
@@ -24,6 +25,7 @@ from laserforge.core.layer_manager import LayerManager
 TOOL_SELECT = "select"
 TOOL_NODE_EDIT = "node_edit"
 TOOL_TRIM = "trim"
+TOOL_MEASURE = "measure"
 TOOL_RECT = "rect"
 TOOL_CIRCLE = "circle"
 TOOL_LINE = "line"
@@ -799,7 +801,85 @@ class LaserCanvasScene(QGraphicsScene):
         self.laser_reticle = LaserReticleItem()
         self.addItem(self.laser_reticle)
 
+        # Interactive Caliper & Measurement Tool State
+        self._measure_p1: Optional[QPointF] = None
+        self._measure_p2: Optional[QPointF] = None
+        self._measure_group: Optional[QGraphicsItemGroup] = None
+
         self.selectionChanged.connect(self._on_selection_changed)
+
+    def _clear_measure_display(self):
+        """Removes the caliper measurement overlay from the canvas."""
+        if self._measure_group and self._measure_group.scene() == self:
+            self.removeItem(self._measure_group)
+        self._measure_group = None
+        self.update()
+
+    def _update_measure_display(self):
+        """Constructs and draws the dynamic dimension measurement overlay on the canvas."""
+        if not self._measure_p1 or not self._measure_p2:
+            return
+        p1 = self._measure_p1
+        p2 = self._measure_p2
+        dx = p2.x() - p1.x()
+        dy = p2.y() - p1.y()
+        dist = math.hypot(dx, dy)
+        angle = math.degrees(math.atan2(dy, dx))
+
+        self.status_message.emit(
+            f"📐 Caliper: {dist:.2f} mm | ΔX: {abs(dx):.2f} mm, ΔY: {abs(dy):.2f} mm | Angle: {angle:.1f}°"
+        )
+
+        self._clear_measure_display()
+        grp = QGraphicsItemGroup()
+        grp.setZValue(9999)
+
+        pen = QPen(QColor("#FFD600"), 1.5, Qt.PenStyle.SolidLine)
+        pen.setCosmetic(True)
+
+        # Dimension line
+        line = QGraphicsLineItem(QLineF(p1, p2))
+        line.setPen(pen)
+        grp.addToGroup(line)
+
+        # End ticks
+        tick_len = 4.0
+        if dist > 1e-3:
+            nx = -dy / dist * tick_len
+            ny = dx / dist * tick_len
+            t1 = QGraphicsLineItem(QLineF(p1.x() - nx, p1.y() - ny, p1.x() + nx, p1.y() + ny))
+            t2 = QGraphicsLineItem(QLineF(p2.x() - nx, p2.y() - ny, p2.x() + nx, p2.y() + ny))
+            t1.setPen(pen)
+            t2.setPen(pen)
+            grp.addToGroup(t1)
+            grp.addToGroup(t2)
+
+        # Badge text
+        mid_x = (p1.x() + p2.x()) / 2.0
+        mid_y = (p1.y() + p2.y()) / 2.0
+        lbl = QGraphicsSimpleTextItem(f" {dist:.2f} mm ")
+        font = QFont("sans-serif", 9, QFont.Weight.Bold)
+        lbl.setFont(font)
+        lbl.setBrush(QBrush(QColor("#000000")))
+
+        # Text background badge
+        text_rect = lbl.boundingRect()
+        bg_rect = QGraphicsRectItem(QRectF(
+            mid_x - text_rect.width() / 2 - 2,
+            mid_y - text_rect.height() / 2 - 1,
+            text_rect.width() + 4,
+            text_rect.height() + 2
+        ))
+        bg_rect.setBrush(QBrush(QColor("#FFD600")))
+        bg_rect.setPen(QPen(QColor("#000000"), 1))
+        lbl.setPos(mid_x - text_rect.width() / 2, mid_y - text_rect.height() / 2)
+
+        grp.addToGroup(bg_rect)
+        grp.addToGroup(lbl)
+
+        self.addItem(grp)
+        self._measure_group = grp
+        self.update()
 
     def update_laser_position(self, x: float, y: float, state: str = "Idle", connected: bool = True):
         """Updates the physical laser head crosshair on the CAD canvas."""
@@ -830,6 +910,8 @@ class LaserCanvasScene(QGraphicsScene):
     def set_active_tool(self, tool: str):
         prev = self.active_tool
         self.active_tool = tool
+        if prev == TOOL_MEASURE and tool != TOOL_MEASURE:
+            self._clear_measure_display()
         if tool == TOOL_NODE_EDIT:
             self.convert_selected_to_path_entities()
         elif prev == TOOL_NODE_EDIT:
@@ -1096,6 +1178,15 @@ class LaserCanvasScene(QGraphicsScene):
         self.entity_modified.emit()
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.active_tool == TOOL_MEASURE:
+                self._clear_measure_display()
+                self._measure_p1 = None
+                self._measure_p2 = None
+                self.set_active_tool(TOOL_SELECT)
+                event.accept()
+                return
+
         if self.active_tool == TOOL_NODE_EDIT:
             from laserforge.core.node_editor import NodeEditorEngine
             for item in self.selectedItems():
@@ -1401,6 +1492,13 @@ class LaserCanvasScene(QGraphicsScene):
             sx = self.snap_value(pos.x())
             sy = self.snap_value(pos.y())
 
+            if self.active_tool == TOOL_MEASURE:
+                self._measure_p1 = QPointF(sx, sy)
+                self._measure_p2 = QPointF(sx, sy)
+                self._update_measure_display()
+                event.accept()
+                return
+
             if self.active_tool == TOOL_TRIM:
                 self._handle_trim_scissor_click(pos.x(), pos.y())
                 event.accept()
@@ -1478,6 +1576,15 @@ class LaserCanvasScene(QGraphicsScene):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
+        if self.active_tool == TOOL_MEASURE and self._measure_p1:
+            pos = event.scenePos()
+            cur_x = self.snap_value(pos.x())
+            cur_y = self.snap_value(pos.y())
+            self._measure_p2 = QPointF(cur_x, cur_y)
+            self._update_measure_display()
+            event.accept()
+            return
+
         if self._drawing and self._temp_item:
             pos = event.scenePos()
             cur_x = self.snap_value(pos.x())
@@ -1514,6 +1621,15 @@ class LaserCanvasScene(QGraphicsScene):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if self.active_tool == TOOL_MEASURE and self._measure_p1:
+            pos = event.scenePos()
+            cur_x = self.snap_value(pos.x())
+            cur_y = self.snap_value(pos.y())
+            self._measure_p2 = QPointF(cur_x, cur_y)
+            self._update_measure_display()
+            event.accept()
+            return
+
         if self._drawing and self._temp_item:
             self._drawing = False
             pos = event.scenePos()
