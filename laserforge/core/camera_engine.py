@@ -50,6 +50,7 @@ class CameraCalibrationData:
     overlay_opacity: float = 0.55
     fiducial_inset_mm: float = 40.0
     is_fisheye: bool = False
+    homography_resolution: Tuple[int, int] = (1920, 1080)
 
     def is_lens_calibrated(self) -> bool:
         if self.camera_matrix is None or self.distortion_coeffs is None:
@@ -110,6 +111,7 @@ class CameraCalibrationData:
         self.fine_rotation_deg = 0.0
         self.overlay_opacity = 0.55
         self.fiducial_inset_mm = 40.0
+        self.homography_resolution = (1920, 1080)
 
     @staticmethod
     def get_default_bed_fiducials(bed_w_mm: float, bed_h_mm: float, inset_mm: float = 40.0) -> List[Tuple[float, float]]:
@@ -143,7 +145,8 @@ class CameraCalibrationData:
             "fine_scale_y": self.fine_scale_y,
             "fine_rotation_deg": self.fine_rotation_deg,
             "overlay_opacity": self.overlay_opacity,
-            "fiducial_inset_mm": self.fiducial_inset_mm
+            "fiducial_inset_mm": self.fiducial_inset_mm,
+            "homography_resolution": list(self.homography_resolution)
         }
 
     @classmethod
@@ -172,7 +175,8 @@ class CameraCalibrationData:
             fine_scale_y=d.get("fine_scale_y", 1.0),
             fine_rotation_deg=d.get("fine_rotation_deg", 0.0),
             overlay_opacity=d.get("overlay_opacity", 0.55),
-            fiducial_inset_mm=d.get("fiducial_inset_mm", 40.0)
+            fiducial_inset_mm=d.get("fiducial_inset_mm", 40.0),
+            homography_resolution=tuple(d.get("homography_resolution", (1920, 1080)))
         )
         obj.sanitize()
         return obj
@@ -206,8 +210,139 @@ class CameraEngine:
         self.cap: Optional[Any] = None
         self.is_mock: bool = (self.calibration.device_index == -1)
         self._mock_frame_counter: int = 0
+        self.live_laser_pos: Optional[Tuple[float, float]] = None
+        self.live_laser_state: str = "Idle"
+        self.show_live_reticle: bool = True
         if self.is_mock and not self.calibration.is_bed_aligned():
             self.compute_simulated_homography(self.calibration.bed_width_mm, self.calibration.bed_height_mm)
+
+    def set_live_laser_position(self, x_mm: float, y_mm: float, state: str = "Idle"):
+        """Updates the physical laser head position in mm for real-time vision reticle tracking."""
+        self.live_laser_pos = (float(x_mm), float(y_mm))
+        self.live_laser_state = state
+
+    def laser_to_camera(self, x_mm: float, y_mm: float) -> Optional[Tuple[float, float]]:
+        """
+        Converts physical laser bed coordinates (X, Y) in mm into camera sensor pixel coordinates (u, v).
+        Uses inverse perspective homography matrix H^-1.
+        """
+        if not HAS_CV2 or not self.calibration.is_bed_aligned():
+            return None
+        H = self.calibration.homography_matrix
+        if H is None:
+            return None
+        try:
+            H_inv = np.linalg.inv(H)
+            scale = self.calibration.scale_px_per_mm
+            ortho_pt = np.array([x_mm * scale, y_mm * scale, 1.0], dtype=np.float64)
+            cam_pt = H_inv @ ortho_pt
+            if abs(cam_pt[2]) < 1e-9:
+                return None
+            return (float(cam_pt[0] / cam_pt[2]), float(cam_pt[1] / cam_pt[2]))
+        except Exception:
+            return None
+
+    def camera_to_laser(self, u: float, v: float) -> Optional[Tuple[float, float]]:
+        """
+        Converts camera sensor pixel coordinates (u, v) into physical laser bed coordinates (X, Y) in mm.
+        Uses perspective homography matrix H.
+        """
+        if not HAS_CV2 or not self.calibration.is_bed_aligned():
+            return None
+        H = self.calibration.homography_matrix
+        if H is None:
+            return None
+        try:
+            scale = self.calibration.scale_px_per_mm
+            cam_pt = np.array([u, v, 1.0], dtype=np.float64)
+            ortho_pt = H @ cam_pt
+            if abs(ortho_pt[2]) < 1e-9:
+                return None
+            return (float((ortho_pt[0] / ortho_pt[2]) / scale), float((ortho_pt[1] / ortho_pt[2]) / scale))
+        except Exception:
+            return None
+
+    def draw_laser_reticle_on_frame(
+        self,
+        frame: np.ndarray,
+        laser_pos_mm: Optional[Tuple[float, float]] = None,
+        state: Optional[str] = None
+    ) -> np.ndarray:
+        """
+        Draws a high-visibility real-time laser head reticle and telemetry badge
+        on the camera video frame at the predicted camera sensor position.
+        """
+        if not HAS_CV2 or frame is None:
+            return frame
+
+        pos = laser_pos_mm or self.live_laser_pos
+        if pos is None:
+            return frame
+
+        st = state or self.live_laser_state or "Idle"
+        cam_pt = self.laser_to_camera(pos[0], pos[1])
+        if cam_pt is None:
+            if self.is_mock:
+                h_f, w_f = frame.shape[:2]
+                cx, cy = w_f // 2, h_f // 2
+                bed_w = int(w_f * 0.70)
+                bed_h = int(h_f * 0.70)
+                norm_x = min(1.0, max(0.0, pos[0] / max(1.0, self.calibration.bed_width_mm)))
+                norm_y = min(1.0, max(0.0, pos[1] / max(1.0, self.calibration.bed_height_mm)))
+                cam_pt = (
+                    (cx - bed_w // 2) + norm_x * bed_w,
+                    (cy - bed_h // 2) + norm_y * bed_h
+                )
+            else:
+                return frame
+
+        out = frame.copy()
+        u, v = int(round(cam_pt[0])), int(round(cam_pt[1]))
+        h_frame, w_frame = out.shape[:2]
+        if not (-50 <= u <= w_frame + 50 and -50 <= v <= h_frame + 50):
+            return out
+
+        state_colors = {
+            "Run": (68, 23, 255),       # Bright Red
+            "Hold": (0, 145, 255),      # Orange
+            "Jog": (255, 229, 0),       # Cyan
+            "Alarm": (0, 0, 213),       # Deep Red
+            "Idle": (118, 230, 0),      # Bright Green
+        }
+        color = state_colors.get(st, (118, 230, 0))
+
+        # Target rings
+        cv2.circle(out, (u, v), 12, color, 2, cv2.LINE_AA)
+        cv2.circle(out, (u, v), 24, color, 1, cv2.LINE_AA)
+        cv2.circle(out, (u, v), 3, color, -1, cv2.LINE_AA)
+
+        # Crosshairs with center aperture gap
+        reticle_len = 32
+        gap = 5
+        cv2.line(out, (u - reticle_len, v), (u - gap, v), color, 2, cv2.LINE_AA)
+        cv2.line(out, (u + gap, v), (u + reticle_len, v), color, 2, cv2.LINE_AA)
+        cv2.line(out, (u, v - reticle_len), (u, v - gap), color, 2, cv2.LINE_AA)
+        cv2.line(out, (u, v + gap), (u, v + reticle_len), color, 2, cv2.LINE_AA)
+
+        # Floating HUD Badge
+        hud_text_pos = f"X:{pos[0]:.1f} Y:{pos[1]:.1f}"
+        hud_text_st = f"[{st}]"
+        badge_x = min(w_frame - 150, max(10, u + 18))
+        badge_y = min(h_frame - 35, max(25, v - 12))
+
+        bg_p1 = (badge_x - 3, badge_y - 18)
+        bg_p2 = (badge_x + 130, badge_y + 14)
+        overlay = out.copy()
+        cv2.rectangle(overlay, bg_p1, bg_p2, (20, 20, 24), -1)
+        cv2.rectangle(overlay, bg_p1, bg_p2, color, 1)
+        cv2.addWeighted(overlay, 0.80, out, 0.20, 0, out)
+
+        cv2.putText(out, hud_text_pos, (badge_x + 4, badge_y - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
+        cv2.putText(out, hud_text_st, (badge_x + 4, badge_y + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
+
+        return out
 
     @staticmethod
     def list_available_cameras() -> List[Dict[str, Any]]:
@@ -314,31 +449,35 @@ class CameraEngine:
                 pass
             self.cap = None
 
-    def capture_frame(self, draw_guides: bool = False) -> Optional[np.ndarray]:
+    def capture_frame(self, draw_guides: bool = False, draw_laser_reticle: bool = False) -> Optional[np.ndarray]:
         """
-        Captures raw camera frame (BGR uint8).
+        Captures raw camera frame (BGR uint8) with optional alignment guides and real-time laser reticle tracking.
         """
         if self.is_mock:
-            return self._generate_synthetic_camera_frame(draw_guides=draw_guides)
+            frame = self._generate_synthetic_camera_frame(draw_guides=draw_guides)
+        else:
+            # Auto-open camera if not currently open but a valid physical device is configured
+            if self.cap is None and self.calibration.device_index >= 0 and HAS_CV2:
+                self.open_camera(self.calibration.device_index, *self.calibration.resolution)
 
-        # Auto-open camera if not currently open but a valid physical device is configured
-        if self.cap is None and self.calibration.device_index >= 0 and HAS_CV2:
-            self.open_camera(self.calibration.device_index, *self.calibration.resolution)
+            if self.cap is None or not self.cap.isOpened():
+                frame = self._generate_synthetic_camera_frame(draw_guides=draw_guides)
+            else:
+                try:
+                    # Drain stale buffer frames on V4L2 devices to ensure a fresh image
+                    for _ in range(2):
+                        self.cap.grab()
+                    ret, frame = self.cap.read()
+                    if not ret or frame is None:
+                        frame = self._generate_synthetic_camera_frame(draw_guides=draw_guides)
+                except Exception as e:
+                    print(f"Error capturing camera frame: {e}")
+                    frame = self._generate_synthetic_camera_frame(draw_guides=draw_guides)
 
-        if self.cap is None or not self.cap.isOpened():
-            return self._generate_synthetic_camera_frame(draw_guides=draw_guides)
+        if frame is not None and (draw_laser_reticle or (self.show_live_reticle and self.live_laser_pos is not None)):
+            frame = self.draw_laser_reticle_on_frame(frame)
 
-        try:
-            # Drain stale buffer frames on V4L2 devices to ensure a fresh image
-            for _ in range(2):
-                self.cap.grab()
-            ret, frame = self.cap.read()
-            if not ret or frame is None:
-                return self._generate_synthetic_camera_frame(draw_guides=draw_guides)
-            return frame
-        except Exception as e:
-            print(f"Error capturing camera frame: {e}")
-            return self._generate_synthetic_camera_frame(draw_guides=draw_guides)
+        return frame
 
     def undistort_frame(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -392,7 +531,12 @@ class CameraEngine:
         try:
             if self.calibration.is_bed_aligned():
                 H = self.calibration.homography_matrix
-                warped = cv2.warpPerspective(undist, H, (out_w, out_h))
+                homo_w, homo_h = getattr(self.calibration, "homography_resolution", (1920, 1080))
+                if (undist.shape[1], undist.shape[0]) != (homo_w, homo_h) and homo_w > 0 and homo_h > 0:
+                    undist_for_warp = cv2.resize(undist, (homo_w, homo_h), interpolation=cv2.INTER_LINEAR)
+                else:
+                    undist_for_warp = undist
+                warped = cv2.warpPerspective(undist_for_warp, H, (out_w, out_h))
             else:
                 # Fallback resize if not yet homography-calibrated
                 warped = cv2.resize(undist, (out_w, out_h))
@@ -497,6 +641,7 @@ class CameraEngine:
             self.calibration.homography_matrix = H
             self.calibration.camera_fiducials = camera_pts
             self.calibration.bed_fiducials_mm = bed_pts_mm
+            self.calibration.homography_resolution = tuple(self.calibration.resolution)
             self.calibration.save_to_file()
             return True
         except Exception as e:

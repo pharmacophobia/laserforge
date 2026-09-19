@@ -122,7 +122,14 @@ class PathOptimizer:
                     poly_a = item_a["path"]
                     test_cx = (ax1 + ax2) / 2.0
                     test_cy = (ay1 + ay2) / 2.0
-                    if point_in_polygon(test_cx, test_cy, poly_b) or point_in_polygon(poly_a[0][0], poly_a[0][1], poly_b):
+                    # Multi-point containment: sample centroid + up to 6 perimeter points
+                    sample_pts = [(test_cx, test_cy)]
+                    step = max(1, len(poly_a) // 6)
+                    for si in range(0, min(len(poly_a), 36), step):
+                        sample_pts.append(poly_a[si])
+                    sample_pts = sample_pts[:7]  # cap at 7
+                    inside_count = sum(1 for sx, sy in sample_pts if point_in_polygon(sx, sy, poly_b))
+                    if inside_count > len(sample_pts) // 2:  # majority rule
                         item_a["depth"] += 1
 
         # Sort by depth descending (cut deepest inner items first)

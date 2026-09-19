@@ -344,7 +344,7 @@ class PrintAndCutDialog(QDialog):
 
     def _poll_telemetry(self):
         if self.serial and getattr(self.serial, "is_connected", False):
-            pos = getattr(self.serial, "work_pos", (0.0, 0.0, 0.0))
+            pos = getattr(self.serial, "wpos", [0.0, 0.0, 0.0])
             self.laser_pos = (pos[0], pos[1])
             self._update_visual()
 

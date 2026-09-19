@@ -220,6 +220,8 @@ class WebPendantServer:
             self.httpd = http.server.ThreadingHTTPServer((self.host, self.port), PendantRequestHandler)
             self.server_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
             self.server_thread.start()
+            from laserforge.core.worker_lifecycle import get_lifecycle_manager
+            get_lifecycle_manager().register('web_pendant_server', self.server_thread, stop_fn=self.stop)
             self.is_running = True
             return True
         except Exception as e:

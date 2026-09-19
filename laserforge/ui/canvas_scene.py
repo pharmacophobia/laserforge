@@ -72,9 +72,17 @@ class LaserReticleItem(QGraphicsItem):
     def boundingRect(self) -> QRectF:
         return QRectF(-25.0, -25.0, 90.0, 50.0)
 
-    def update_position(self, x: float, y: float, state: str = "Idle", connected: bool = True):
-        self.laser_x = x
-        self.laser_y = y
+    def update_position(
+        self,
+        x: float,
+        y: float,
+        state: str = "Idle",
+        connected: bool = True,
+        mach_x: Optional[float] = None,
+        mach_y: Optional[float] = None
+    ):
+        self.laser_x = x if mach_x is None else mach_x
+        self.laser_y = y if mach_y is None else mach_y
         self.machine_state = state
         self.is_connected = connected
         self.setPos(x, y)
@@ -777,6 +785,7 @@ class LaserCanvasScene(QGraphicsScene):
         self.show_guides = True
         self.bed_width = 400.0
         self.bed_height = 400.0
+        self.origin_corner = "Bottom-Left"
 
         # Drawing state
         self._drawing = False
@@ -795,6 +804,13 @@ class LaserCanvasScene(QGraphicsScene):
         self._camera_overlay_item.setVisible(False)
         self._camera_overlay_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self._camera_overlay_item.setEnabled(False)
+        self._camera_overlay_bed_w: float = 400.0
+        self._camera_overlay_bed_h: float = 400.0
+        self._camera_overlay_offset_x: float = 0.0
+        self._camera_overlay_offset_y: float = 0.0
+        self._camera_overlay_scale_x: float = 1.0
+        self._camera_overlay_scale_y: float = 1.0
+        self._camera_overlay_rotation: float = 0.0
         self.addItem(self._camera_overlay_item)
 
         # Real-time Laser Head Position Reticle
@@ -807,6 +823,16 @@ class LaserCanvasScene(QGraphicsScene):
         self._measure_group: Optional[QGraphicsItemGroup] = None
 
         self.selectionChanged.connect(self._on_selection_changed)
+
+    def set_bed_size(self, w: float, h: float, origin_corner: Optional[str] = None):
+        """Updates workbed dimensions and origin corner for reticle and coordinate mapping."""
+        self.bed_width = float(w)
+        self.bed_height = float(h)
+        if origin_corner:
+            self.origin_corner = origin_corner
+        self._camera_overlay_bed_w = float(w)
+        self._camera_overlay_bed_h = float(h)
+        self._apply_camera_overlay_transform()
 
     def _clear_measure_display(self):
         """Removes the caliper measurement overlay from the canvas."""
@@ -882,22 +908,84 @@ class LaserCanvasScene(QGraphicsScene):
         self.update()
 
     def update_laser_position(self, x: float, y: float, state: str = "Idle", connected: bool = True):
-        """Updates the physical laser head crosshair on the CAD canvas."""
-        self.laser_reticle.update_position(x, y, state, connected)
+        """Updates the physical laser head crosshair on the CAD canvas, mapping machine coords to scene space."""
+        origin = getattr(self, "origin_corner", "Bottom-Left")
+        bw = getattr(self, "bed_width", 400.0)
+        bh = getattr(self, "bed_height", 400.0)
+        scene_x = (bw - x) if "Right" in origin else x
+        scene_y = (bh - y) if "Bottom" in origin else y
+        self.laser_reticle.update_position(scene_x, scene_y, state, connected, mach_x=x, mach_y=y)
 
-    def set_camera_overlay_pixmap(self, pixmap: QPixmap, bed_width: float, bed_height: float):
-        """Sets the rectified top-down orthophoto onto the laser bed at exact millimeter scale."""
+    def _apply_camera_overlay_transform(self):
+        pixmap = self._camera_overlay_item.pixmap()
+        if pixmap.isNull():
+            return
+        pw = float(pixmap.width())
+        ph = float(pixmap.height())
+        bw = max(1.0, self._camera_overlay_bed_w)
+        bh = max(1.0, self._camera_overlay_bed_h)
+        base_sx = bw / max(1.0, pw)
+        base_sy = bh / max(1.0, ph)
+
+        cx = bw / 2.0
+        cy = bh / 2.0
+
+        t = QTransform()
+        t.translate(cx + self._camera_overlay_offset_x, cy + self._camera_overlay_offset_y)
+        t.rotate(self._camera_overlay_rotation)
+        t.scale(base_sx * self._camera_overlay_scale_x, base_sy * self._camera_overlay_scale_y)
+        t.translate(-pw / 2.0, -ph / 2.0)
+
+        self._camera_overlay_item.setTransform(t)
+        self._camera_overlay_item.setPos(0.0, 0.0)
+        self.update()
+
+    def set_camera_overlay_pixmap(
+        self,
+        pixmap: QPixmap,
+        bed_width: float,
+        bed_height: float,
+        offset_x: float = 0.0,
+        offset_y: float = 0.0,
+        fine_scale_x: float = 1.0,
+        fine_scale_y: float = 1.0,
+        fine_rotation_deg: float = 0.0,
+        opacity: Optional[float] = None
+    ):
+        """Sets the rectified top-down orthophoto onto the laser bed at exact millimeter scale with fine-tune adjustments."""
         if pixmap.isNull():
             return
         self._camera_overlay_item.setPixmap(pixmap)
-        scale_x = max(1.0, bed_width) / max(1.0, float(pixmap.width()))
-        scale_y = max(1.0, bed_height) / max(1.0, float(pixmap.height()))
-        t = QTransform()
-        t.scale(scale_x, scale_y)
-        self._camera_overlay_item.setTransform(t)
-        self._camera_overlay_item.setPos(0.0, 0.0)
+        self._camera_overlay_bed_w = bed_width
+        self._camera_overlay_bed_h = bed_height
+        self._camera_overlay_offset_x = offset_x
+        self._camera_overlay_offset_y = offset_y
+        self._camera_overlay_scale_x = fine_scale_x
+        self._camera_overlay_scale_y = fine_scale_y
+        self._camera_overlay_rotation = fine_rotation_deg
+        if opacity is not None:
+            self._camera_overlay_item.setOpacity(max(0.0, min(1.0, opacity)))
+        self._apply_camera_overlay_transform()
         self._camera_overlay_item.setVisible(True)
-        self.update()
+
+    def update_camera_overlay_transform(
+        self,
+        offset_x: float = 0.0,
+        offset_y: float = 0.0,
+        fine_scale_x: float = 1.0,
+        fine_scale_y: float = 1.0,
+        fine_rotation_deg: float = 0.0,
+        opacity: Optional[float] = None
+    ):
+        """Live updates fine-tune position, scale, and rotation of the current camera bed overlay."""
+        self._camera_overlay_offset_x = offset_x
+        self._camera_overlay_offset_y = offset_y
+        self._camera_overlay_scale_x = fine_scale_x
+        self._camera_overlay_scale_y = fine_scale_y
+        self._camera_overlay_rotation = fine_rotation_deg
+        if opacity is not None:
+            self._camera_overlay_item.setOpacity(max(0.0, min(1.0, opacity)))
+        self._apply_camera_overlay_transform()
 
     def set_camera_overlay_visible(self, visible: bool):
         self._camera_overlay_item.setVisible(visible)

@@ -161,3 +161,12 @@ class MachineSettings:
     camera_fisheye_k3: float = 0.0
     camera_fisheye_k4: float = 0.0
 
+    # Job Timing & Delays
+    pass_delay_sec: float = 0.0
+
+    # Beta Telemetry & Feedback
+    telemetry_enabled: bool = True
+    feedback_webhook_url: str = ""
+    developer_contact_email: str = "creator@laserforge.org"
+
+

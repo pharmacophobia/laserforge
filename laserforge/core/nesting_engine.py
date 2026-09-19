@@ -47,6 +47,36 @@ class NestingResult:
     execution_time_ms: float = 0.0
 
 
+
+class _SpatialGrid:
+    """Grid-based spatial hash for fast bounding-box overlap queries."""
+    def __init__(self, cell_size: float = 25.0):
+        self.cell_size = cell_size
+        self._grid: dict = {}  # (gx, gy) -> list of item indices
+
+    def _cells(self, x1, y1, x2, y2):
+        gx1 = int(x1 // self.cell_size)
+        gy1 = int(y1 // self.cell_size)
+        gx2 = int(x2 // self.cell_size)
+        gy2 = int(y2 // self.cell_size)
+        for gx in range(gx1, gx2 + 1):
+            for gy in range(gy1, gy2 + 1):
+                yield (gx, gy)
+
+    def insert(self, idx: int, x1: float, y1: float, x2: float, y2: float):
+        for cell in self._cells(x1, y1, x2, y2):
+            self._grid.setdefault(cell, []).append(idx)
+
+    def query(self, x1: float, y1: float, x2: float, y2: float) -> set:
+        result = set()
+        for cell in self._cells(x1, y1, x2, y2):
+            result.update(self._grid.get(cell, []))
+        return result
+
+    def clear(self):
+        self._grid.clear()
+
+
 class NestingEngine:
     """
     2D geometric packing and layout optimizer for sheet materials.
@@ -170,6 +200,7 @@ class NestingEngine:
 
         # List of (placed_buffered_poly, NestItem)
         placed_geoms: List[Tuple[Polygon, NestItem]] = []
+        spatial_grid = _SpatialGrid(cell_size=25.0)
 
         # List of available internal hole polygons: [(hole_poly, parent_item)]
         available_holes: List[Tuple[Polygon, NestItem]] = []
@@ -201,9 +232,10 @@ class NestingEngine:
                         if hole_poly.contains(shifted_buf):
                             # Check no overlap with existing placed items
                             collides = False
-                            for p_geom, _ in placed_geoms:
+                            sb = shifted_buf.bounds
+                            for idx in spatial_grid.query(sb[0], sb[1], sb[2], sb[3]):
+                                p_geom, _ = placed_geoms[idx]
                                 pb = p_geom.bounds
-                                sb = shifted_buf.bounds
                                 if not (sb[0] > pb[2] or sb[2] < pb[0] or sb[1] > pb[3] or sb[3] < pb[1]):
                                     if shifted_buf.intersects(p_geom):
                                         collides = True
@@ -214,6 +246,8 @@ class NestingEngine:
                                 item.rotation_deg = rot
                                 item.nested_in_hole = True
                                 placed_items.append(item)
+                                b = shifted.bounds
+                                spatial_grid.insert(len(placed_geoms), b[0], b[1], b[2], b[3])
                                 placed_geoms.append((shifted, item))
                                 placed = True
                                 break
@@ -270,10 +304,10 @@ class NestingEngine:
 
                     # Collision detection against all placed shapes
                     collides = False
-                    for p_geom, _ in placed_geoms:
-                        # Fast AABB rejection
+                    sb_bounds = shifted_buf.bounds
+                    for idx in spatial_grid.query(sb_bounds[0], sb_bounds[1], sb_bounds[2], sb_bounds[3]):
+                        p_geom, _ = placed_geoms[idx]
                         pb_bounds = p_geom.bounds
-                        sb_bounds = shifted_buf.bounds
                         if (sb_bounds[0] > pb_bounds[2] or sb_bounds[2] < pb_bounds[0] or
                             sb_bounds[1] > pb_bounds[3] or sb_bounds[3] < pb_bounds[1]):
                             continue
@@ -292,6 +326,8 @@ class NestingEngine:
                 item.placed_y = item.orig_y + dy
                 item.rotation_deg = rot
                 placed_items.append(item)
+                b = shifted.bounds
+                spatial_grid.insert(len(placed_geoms), b[0], b[1], b[2], b[3])
                 placed_geoms.append((shifted, item))
 
                 # Collect internal holes from this item for future cavity nesting

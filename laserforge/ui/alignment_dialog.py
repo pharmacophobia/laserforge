@@ -836,8 +836,8 @@ class LaserAlignmentDialog(QDialog):
     def _on_jog_stop_clicked(self):
         """Cancels jogging / sends soft hold."""
         if self.serial_ctrl.is_connected:
-            self.serial_ctrl.send_command("!")  # GRBL feed hold
-            QTimer.singleShot(200, lambda: self.serial_ctrl.send_command("~"))  # Resume
+            self.serial_ctrl.send_realtime(ord('!'))  # GRBL feed hold — real-time byte, no \n
+            QTimer.singleShot(200, lambda: self.serial_ctrl.send_realtime(ord('~')))  # Resume
 
     def _goto_target_xy(self):
         """Dispatches motor directly to numeric Target X and Y."""
@@ -877,12 +877,14 @@ class LaserAlignmentDialog(QDialog):
         pct = self.slider_pwr.value() / 10.0
         s_val = max(1, int(round((pct / 100.0) * 1000)))
 
-        gcode_cmds = [
+        # Send each G-code command as a separate line — send_command() sends one line
+        # at a time (GRBL only reads to the first \n, so multi-line blobs break silently).
+        for cmd in [
             "G90",
             f"G0 X{target_x:.3f} Y{target_y:.3f} F{self.jog_speed:.0f}",
-            f"M3 G1 S{s_val} F1"
-        ]
-        self.serial_ctrl.send_command("\n".join(gcode_cmds))
+            f"M3 G1 S{s_val} F1",
+        ]:
+            self.serial_ctrl.send_command(cmd)
         self.btn_fire_toggle.setChecked(True)
         self.btn_fire_toggle.setText("Laser Dot OFF")
         self.btn_fire_toggle.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
@@ -904,9 +906,11 @@ class LaserAlignmentDialog(QDialog):
             f"G0 X{self.pt1[0]:.3f} Y{self.pt1[1]:.3f} F{self.jog_speed:.0f}",
             f"M3 G1 S{s_val} F1200",
             f"G1 X{self.pt2[0]:.3f} Y{self.pt2[1]:.3f} F1200",
-            "M5 S0", "G0"
+            "M5 S0", "G0",
         ]
-        self.serial_ctrl.send_command("\n".join(cmds))
+        # Use start_job() so each command is streamed individually with proper GRBL ack
+        # flow-control — send_command() with "\n".join() only executes the first line.
+        self.serial_ctrl.start_job("\n".join(cmds))
 
     # ==========================================
     # KEYBOARD JOGGING NAVIGATION
@@ -1197,8 +1201,44 @@ class LaserAlignmentDialog(QDialog):
             )
             if res == QMessageBox.StandardButton.Yes:
                 self.serial_ctrl.go_to_pos(self.pt1[0], self.pt1[1], self.jog_speed)
-                QTimer.singleShot(500, lambda: self.serial_ctrl.set_zero(True, True, False))
-                QMessageBox.information(self, "Work Zero", f"Work Zero (0,0) set at Left Corner ({self.pt1[0]:.2f}, {self.pt1[1]:.2f})!")
+
+                # Wait for GRBL to report Idle before zeroing — a fixed 500ms timer is
+                # a race condition when the head is far away or jog speed is low.
+                pt1_snapshot = self.pt1[:]
+
+                def _on_status_for_zero(status_dict: dict):
+                    if status_dict.get("state", "").lower() == "idle":
+                        # Disconnect immediately — one-shot behaviour
+                        try:
+                            self.serial_ctrl.status_updated.disconnect(_on_status_for_zero)
+                        except RuntimeError:
+                            pass
+                        safety_timer.stop()
+                        self.serial_ctrl.set_zero(True, True, False)
+                        QMessageBox.information(
+                            self, "Work Zero",
+                            f"Work Zero (0,0) set at Left Corner ({pt1_snapshot[0]:.2f}, {pt1_snapshot[1]:.2f})!"
+                        )
+
+                def _on_zero_timeout():
+                    """Safety fallback: set zero anyway after 30 s if Idle never fires."""
+                    try:
+                        self.serial_ctrl.status_updated.disconnect(_on_status_for_zero)
+                    except RuntimeError:
+                        pass
+                    self.serial_ctrl.set_zero(True, True, False)
+                    QMessageBox.information(
+                        self, "Work Zero",
+                        f"Work Zero (0,0) set at Left Corner ({pt1_snapshot[0]:.2f}, {pt1_snapshot[1]:.2f}) (timeout fallback)."
+                    )
+
+                safety_timer = QTimer(self)
+                safety_timer.setSingleShot(True)
+                safety_timer.setInterval(30_000)
+                safety_timer.timeout.connect(_on_zero_timeout)
+                safety_timer.start()
+
+                self.serial_ctrl.status_updated.connect(_on_status_for_zero)
                 return
 
         self.serial_ctrl.set_zero(True, True, False)

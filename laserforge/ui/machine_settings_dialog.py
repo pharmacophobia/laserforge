@@ -115,6 +115,17 @@ class MachineSettingsDialog(QDialog):
         layout = QVBoxLayout(widget)
         layout.setSpacing(12)
 
+        # Popular Machine Profiles
+        from laserforge.ui.workbed_setup_dialog import MACHINE_PRESETS
+        preset_group = QGroupBox("Popular Machine Profiles")
+        preset_layout = QVBoxLayout(preset_group)
+        self.combo_presets = QComboBox()
+        for p in MACHINE_PRESETS:
+            self.combo_presets.addItem(p["name"], p)
+        self.combo_presets.currentIndexChanged.connect(self._on_machine_preset_selected)
+        preset_layout.addWidget(self.combo_presets)
+        layout.addWidget(preset_group)
+
         # Dimensions Box
         geom_group = QGroupBox("Workbed Dimensions")
         geom_grid = QGridLayout(geom_group)
@@ -135,6 +146,12 @@ class MachineSettingsDialog(QDialog):
         self.origin_combo = QComboBox()
         self.origin_combo.addItems(["Bottom-Left", "Top-Left", "Bottom-Right", "Top-Right"])
         geom_grid.addWidget(self.origin_combo, 2, 1)
+
+        self.btn_wizard = QPushButton("⚡ Launch Workbed Setup & Calibration Wizard...")
+        self.btn_wizard.setStyleSheet("background-color: #005577; color: #00e5ff; font-weight: bold; padding: 6px;")
+        self.btn_wizard.setToolTip("Open the interactive Workbed Setup Studio with machine presets, GRBL EEPROM auto-detection, and travel verification.")
+        self.btn_wizard.clicked.connect(self._launch_workbed_wizard)
+        geom_grid.addWidget(self.btn_wizard, 3, 0, 1, 2)
 
         layout.addWidget(geom_group)
 
@@ -197,6 +214,16 @@ class MachineSettingsDialog(QDialog):
 
         layout.addStretch(1)
         return widget
+
+    def _launch_workbed_wizard(self):
+        from laserforge.ui.workbed_setup_dialog import WorkbedSetupDialog
+        dlg = WorkbedSetupDialog(self.settings, serial_ctrl=self.serial_ctrl, parent=self)
+        if dlg.exec() == WorkbedSetupDialog.DialogCode.Accepted:
+            self.width_spin.setValue(self.settings.bed_width)
+            self.height_spin.setValue(self.settings.bed_height)
+            idx = self.origin_combo.findText(self.settings.origin_corner)
+            if idx >= 0:
+                self.origin_combo.setCurrentIndex(idx)
 
     # -------------------------------------------------------------
     # Tab 2: Laser Firing & Timing
@@ -1121,4 +1148,16 @@ class MachineSettingsDialog(QDialog):
         self.serial_ctrl.set_grbl_setting(key, val)
         self.param_key_edit.clear()
         self.param_val_edit.clear()
+
+    def _on_machine_preset_selected(self, index: int):
+        data = self.combo_presets.currentData()
+        if not data or index == 0:
+            return
+        self.width_spin.setValue(data["width"])
+        self.height_spin.setValue(data["height"])
+        idx = self.origin_combo.findText(data["origin"])
+        if idx >= 0:
+            self.origin_combo.setCurrentIndex(idx)
+        if "rapid" in data and hasattr(self, "rapid_spin"):
+            self.rapid_spin.setValue(data["rapid"])
 

@@ -60,13 +60,22 @@ class RulerWidget(QWidget):
             if scale < 0.3: step = 100
             if scale > 4.0: step = 5
 
+            origin = getattr(self.view, "origin_corner", "Bottom-Left")
+            if getattr(self.view, "settings", None):
+                origin = getattr(self.view.settings, "origin_corner", origin)
+            is_right_origin = "Right" in origin
+            bed_w = getattr(self.view, "bed_width", 400.0)
+            if getattr(self.view, "settings", None):
+                bed_w = getattr(self.view.settings, "bed_width", bed_w)
+
             for mm in range(min_mm, max_mm + step, step):
                 view_x = int(self.view.mapFromScene(QPointF(mm, 0)).x())
                 if 0 <= view_x <= self.width():
                     painter.setPen(pen_major)
                     painter.drawLine(view_x, self.height() - 8, view_x, self.height())
                     painter.setPen(QColor("#8c8ca8"))
-                    painter.drawText(view_x + 2, self.height() - 10, str(mm))
+                    disp_val = int(round(bed_w - mm)) if is_right_origin else mm
+                    painter.drawText(view_x + 2, self.height() - 10, str(disp_val))
 
             # Cursor marker
             cur_x = int(self.view.mapFromScene(QPointF(self.cursor_pos_mm, 0)).x())
@@ -88,6 +97,14 @@ class RulerWidget(QWidget):
             if scale < 0.3: step = 100
             if scale > 4.0: step = 5
 
+            origin = getattr(self.view, "origin_corner", "Bottom-Left")
+            if getattr(self.view, "settings", None):
+                origin = getattr(self.view.settings, "origin_corner", origin)
+            is_bottom_origin = "Bottom" in origin
+            bed_h = getattr(self.view, "bed_height", 400.0)
+            if getattr(self.view, "settings", None):
+                bed_h = getattr(self.view.settings, "bed_height", bed_h)
+
             for mm in range(min_mm, max_mm + step, step):
                 view_y = int(self.view.mapFromScene(QPointF(0, mm)).y())
                 if 0 <= view_y <= self.height():
@@ -97,7 +114,8 @@ class RulerWidget(QWidget):
                     painter.translate(self.width() - 10, view_y - 2)
                     painter.rotate(-90)
                     painter.setPen(QColor("#8c8ca8"))
-                    painter.drawText(0, 0, str(mm))
+                    disp_val = int(round(bed_h - mm)) if is_bottom_origin else mm
+                    painter.drawText(0, 0, str(disp_val))
                     painter.restore()
 
             cur_y = int(self.view.mapFromScene(QPointF(0, self.cursor_pos_mm)).y())
@@ -130,6 +148,8 @@ class LaserCanvasView(QGraphicsView):
         # Workbed config (mm)
         self.bed_width = 400.0
         self.bed_height = 400.0
+        self.origin_corner = "Bottom-Left"
+        self.settings = None
 
         # Rulers
         self.top_ruler = RulerWidget(Qt.Orientation.Horizontal, self)
@@ -167,11 +187,23 @@ class LaserCanvasView(QGraphicsView):
             self.setViewport(QWidget())
             self.opengl_enabled = False
 
-    def set_bed_size(self, w: float, h: float):
-        self.bed_width = w
-        self.bed_height = h
+    def set_bed_size(self, w: float, h: float, origin_corner: Optional[str] = None):
+        self.bed_width = float(w)
+        self.bed_height = float(h)
+        if origin_corner:
+            self.origin_corner = origin_corner
+        elif self.settings:
+            self.origin_corner = getattr(self.settings, "origin_corner", "Bottom-Left")
+        if self.scene() and hasattr(self.scene(), "set_bed_size"):
+            self.scene().set_bed_size(w, h, self.origin_corner)
+        elif self.scene():
+            self.scene().bed_width = float(w)
+            self.scene().bed_height = float(h)
+            self.scene().origin_corner = self.origin_corner
         self.scene().setSceneRect(-50, -50, w + 100, h + 100)
         self.update()
+        self.top_ruler.update()
+        self.left_ruler.update()
 
     def zoom_to_fit(self):
         """Fits the entire laser workbed into the view with margin."""
@@ -230,7 +262,14 @@ class LaserCanvasView(QGraphicsView):
 
     def mouseMoveEvent(self, event: QMouseEvent):
         scene_pt = self.mapToScene(event.position().toPoint())
-        self.cursor_moved_mm.emit(scene_pt.x(), scene_pt.y())
+        origin = getattr(self, "origin_corner", "Bottom-Left")
+        if self.settings:
+            origin = getattr(self.settings, "origin_corner", origin)
+
+        disp_x = (self.bed_width - scene_pt.x()) if "Right" in origin else scene_pt.x()
+        disp_y = (self.bed_height - scene_pt.y()) if "Bottom" in origin else scene_pt.y()
+
+        self.cursor_moved_mm.emit(disp_x, disp_y)
         self.top_ruler.update_cursor_pos(scene_pt.x())
         self.left_ruler.update_cursor_pos(scene_pt.y())
 
@@ -516,12 +555,48 @@ class LaserCanvasView(QGraphicsView):
             painter.drawLine(QPointF(0, y), QPointF(self.bed_width, y))
 
         # Laser Origin indicator marker (0, 0)
-        painter.setPen(QPen(QColor("#ff2a44"), 2))
-        painter.drawLine(QPointF(0, 0), QPointF(20, 0)) # X-axis
-        painter.setPen(QPen(QColor("#00e676"), 2))
-        painter.drawLine(QPointF(0, 0), QPointF(0, 20)) # Y-axis
-        painter.setPen(QPen(QColor("#ffffff"), 1))
-        painter.drawEllipse(QPointF(0, 0), 3, 3)
+        origin = getattr(self, "origin_corner", "Bottom-Left")
+        if self.settings:
+            origin = getattr(self.settings, "origin_corner", origin)
+
+        if origin == "Bottom-Left":
+            orig_pt = QPointF(0, self.bed_height)
+            x_end = QPointF(24, self.bed_height)
+            y_end = QPointF(0, self.bed_height - 24)
+            lbl_pos = QPointF(6, self.bed_height - 6)
+        elif origin == "Top-Left":
+            orig_pt = QPointF(0, 0)
+            x_end = QPointF(24, 0)
+            y_end = QPointF(0, 24)
+            lbl_pos = QPointF(6, 16)
+        elif origin == "Bottom-Right":
+            orig_pt = QPointF(self.bed_width, self.bed_height)
+            x_end = QPointF(self.bed_width - 24, self.bed_height)
+            y_end = QPointF(self.bed_width, self.bed_height - 24)
+            lbl_pos = QPointF(self.bed_width - 70, self.bed_height - 6)
+        else:  # Top-Right
+            orig_pt = QPointF(self.bed_width, 0)
+            x_end = QPointF(self.bed_width - 24, 0)
+            y_end = QPointF(self.bed_width, 24)
+            lbl_pos = QPointF(self.bed_width - 70, 16)
+
+        # Draw axis lines
+        painter.setPen(QPen(QColor("#ff3355"), 2.2))
+        painter.drawLine(orig_pt, x_end)  # +X axis (Red)
+        painter.setPen(QPen(QColor("#00e676"), 2.2))
+        painter.drawLine(orig_pt, y_end)  # +Y axis (Green)
+
+        # Draw glowing origin beacon
+        painter.setPen(QPen(QColor("#00e5ff"), 1.8))
+        painter.setBrush(QBrush(QColor(0, 229, 255, 70)))
+        painter.drawEllipse(orig_pt, 7, 7)
+        painter.setBrush(QBrush(QColor("#00ff88")))
+        painter.drawEllipse(orig_pt, 3, 3)
+
+        # Origin text badge
+        painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        painter.setPen(QPen(QColor("#00ff88"), 1))
+        painter.drawText(lbl_pos, "ORIGIN (0,0)")
 
 
 class LaserCanvasWidget(QWidget):

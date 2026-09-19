@@ -53,58 +53,66 @@ def corner_preserving_smooth(
     """
     Subdivides and smooths organic curves while preserving sharp corners (turning angle >= threshold).
     pts: Nx2 numpy array representing a closed polygon.
+    Optimized: Fast vectorized NumPy Chaikin subdivision, hypot-based norms, and pre-computed cosine threshold.
     """
-    p = np.array(pts, dtype=np.float64)
-    if len(p) <= 3:
+    p = np.asarray(pts, dtype=np.float64)
+    if len(p) <= 3 or iterations <= 0:
         return p
 
-    if np.allclose(p[0], p[-1]):
+    if abs(p[0, 0] - p[-1, 0]) < 1e-4 and abs(p[0, 1] - p[-1, 1]) < 1e-4:
         p = p[:-1]
 
     n = len(p)
     if n <= 3:
-        return np.vstack([p, p[0]])
+        return np.vstack([p, p[:1]])
 
-    # Detect hard corners based on turning angle
-    v_in = p - np.roll(p, 1, axis=0)
-    v_out = np.roll(p, -1, axis=0) - p
-    norm_in = np.linalg.norm(v_in, axis=1, keepdims=True)
-    norm_out = np.linalg.norm(v_out, axis=1, keepdims=True)
+    cos_thresh = math.cos(math.radians(corner_angle_thresh_deg))
+
+    # Detect hard corners using fast vector differences and hypot (turning angle >= threshold <=> cos(dot) <= cos_thresh)
+    v_in = p - np.vstack([p[-1:], p[:-1]])
+    v_out = np.vstack([p[1:], p[:1]]) - p
+    norm_in = np.hypot(v_in[:, 0], v_in[:, 1])
+    norm_out = np.hypot(v_out[:, 0], v_out[:, 1])
     norm_in[norm_in == 0] = 1.0
     norm_out[norm_out == 0] = 1.0
 
-    dot = np.sum((v_in / norm_in) * (v_out / norm_out), axis=1)
-    dot = np.clip(dot, -1.0, 1.0)
-    angles_deg = np.degrees(np.arccos(dot))
-    hard_corners = (angles_deg >= corner_angle_thresh_deg)
+    dot = np.clip((v_in[:, 0] * v_out[:, 0] + v_in[:, 1] * v_out[:, 1]) / (norm_in * norm_out), -1.0, 1.0)
+    hard_corners = (dot <= cos_thresh)
 
     for _ in range(iterations):
-        new_pts = []
         m = len(p)
-        for i in range(m):
-            if hard_corners[i]:
-                new_pts.append(p[i])
-            else:
-                prev_pt = p[(i - 1) % m]
-                curr_pt = p[i]
-                next_pt = p[(i + 1) % m]
-                # Chaikin cut
-                q = 0.25 * prev_pt + 0.75 * curr_pt
-                r = 0.75 * curr_pt + 0.25 * next_pt
-                new_pts.extend([q, r])
+        prev_p = np.vstack([p[-1:], p[:-1]])
+        next_p = np.vstack([p[1:], p[:1]])
+        q = 0.25 * prev_p + 0.75 * p
+        r = 0.75 * p + 0.25 * next_p
 
-        p = np.array(new_pts, dtype=np.float64)
+        if not np.any(hard_corners):
+            # Pure vectorized Chaikin interleave
+            res = np.empty((m * 2, 2), dtype=p.dtype)
+            res[0::2] = q
+            res[1::2] = r
+            p = res
+        else:
+            out = []
+            for i in range(m):
+                if hard_corners[i]:
+                    out.append(p[i])
+                else:
+                    out.append(q[i])
+                    out.append(r[i])
+            p = np.array(out, dtype=p.dtype)
+
         if len(p) > n:
-            v_in = p - np.roll(p, 1, axis=0)
-            v_out = np.roll(p, -1, axis=0) - p
-            norm_in = np.linalg.norm(v_in, axis=1, keepdims=True)
-            norm_out = np.linalg.norm(v_out, axis=1, keepdims=True)
+            v_in = p - np.vstack([p[-1:], p[:-1]])
+            v_out = np.vstack([p[1:], p[:1]]) - p
+            norm_in = np.hypot(v_in[:, 0], v_in[:, 1])
+            norm_out = np.hypot(v_out[:, 0], v_out[:, 1])
             norm_in[norm_in == 0] = 1.0
             norm_out[norm_out == 0] = 1.0
-            dot = np.clip(np.sum((v_in / norm_in) * (v_out / norm_out), axis=1), -1.0, 1.0)
-            hard_corners = (np.degrees(np.arccos(dot)) >= corner_angle_thresh_deg)
+            dot = np.clip((v_in[:, 0] * v_out[:, 0] + v_in[:, 1] * v_out[:, 1]) / (norm_in * norm_out), -1.0, 1.0)
+            hard_corners = (dot <= cos_thresh)
 
-    return np.vstack([p, p[0]])
+    return np.vstack([p, p[:1]])
 
 
 class ImageTracer:
@@ -146,16 +154,16 @@ class ImageTracer:
         else:
             gray = np.array(img.convert("L"), dtype=np.uint8)
 
-        # 2. Bilateral / edge-preserving denoising
+        # 2. Bilateral / edge-preserving denoising (clamped d to prevent quadratic stalling)
         if blur_radius > 0.1:
-            k = max(3, int(blur_radius * 2) | 1)
+            k = min(9, max(3, int(blur_radius * 2) | 1))
             gray = cv2.bilateralFilter(gray, d=k, sigmaColor=40, sigmaSpace=k)
 
-        # 3. Contrast & Brightness adjustment (-100 to +100)
+        # 3. Contrast & Brightness adjustment (-100 to +100) via fast C++ SIMD cv2.convertScaleAbs
         if contrast != 0.0 or brightness != 0.0:
             alpha = max(0.0, (contrast + 100.0) / 100.0)
             beta = brightness * 1.28
-            gray = np.clip(alpha * gray.astype(np.float32) + beta, 0, 255).astype(np.uint8)
+            gray = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
 
         # 4. CLAHE (Contrast Limited Adaptive Histogram Equalization)
         if clahe:
@@ -266,10 +274,15 @@ class ImageTracer:
 
         img_h, img_w = binary.shape[:2]
         mode_ret = cv2.RETR_EXTERNAL if ignore_holes else cv2.RETR_TREE
-        contours, hierarchy = cv2.findContours(binary, mode_ret, cv2.CHAIN_APPROX_NONE)
+        contours, hierarchy = cv2.findContours(binary, mode_ret, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours or hierarchy is None:
             return []
+
+        scale_vec = np.array([scale_x, scale_y], dtype=np.float64)
+        offset_vec = np.array([offset_x, offset_y], dtype=np.float64)
+        epsilon = max(0.1, smoothness * 0.75)
+        border_thresh = 0.98 * (img_w * img_h)
 
         processed_contours = []
         for c in contours:
@@ -280,11 +293,10 @@ class ImageTracer:
             # Ignore full-image border frame if requested
             if ignore_border:
                 bx, by, bw, bh = cv2.boundingRect(c)
-                if (abs(bx) <= 2 and abs(by) <= 2 and abs(bw - img_w) <= 4 and abs(bh - img_h) <= 4) or area >= 0.98 * (img_w * img_h):
+                if (abs(bx) <= 2 and abs(by) <= 2 and abs(bw - img_w) <= 4 and abs(bh - img_h) <= 4) or area >= border_thresh:
                     continue
 
             # Subpixel polygon simplification via Ramer-Douglas-Peucker
-            epsilon = max(0.1, smoothness * 0.75)
             approx = cv2.approxPolyDP(c, epsilon, closed=True)
             if len(approx) < 3:
                 continue
@@ -299,15 +311,12 @@ class ImageTracer:
                     iterations=smooth_iterations
                 )
 
-            # Scale to mm / destination coordinates and offset
-            scaled_poly = [
-                (offset_x + float(p[0]) * scale_x, offset_y + float(p[1]) * scale_y)
-                for p in pts
-            ]
-            if scaled_poly[0] != scaled_poly[-1]:
-                scaled_poly.append(scaled_poly[0])
+            # Vectorized scale to mm / destination coordinates and offset
+            scaled = (pts * scale_vec + offset_vec).tolist()
+            if scaled[0] != scaled[-1]:
+                scaled.append(scaled[0])
 
-            processed_contours.append(scaled_poly)
+            processed_contours.append(scaled)
 
         return processed_contours
 

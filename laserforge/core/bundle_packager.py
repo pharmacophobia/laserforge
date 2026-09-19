@@ -11,7 +11,7 @@ import os
 import time
 import hashlib
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, UTC
 
 from laserforge.core.models import LaserEntity
 from laserforge.core.layer_manager import LayerManager
@@ -61,7 +61,7 @@ class BundlePackager:
         manifest = BundleManifest(
             bundle_name=bundle_name,
             author=author or "LaserForge Maker",
-            created_at=datetime.utcnow().isoformat() + "Z",
+            created_at=datetime.now(UTC).isoformat() + "Z",
             format_version="1.0",
             app_version="2.5.0",
             notes=notes,

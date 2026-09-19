@@ -366,6 +366,21 @@ class SerialController(QObject):
         self.lock = threading.Lock()
         self.ack_queue: queue.Queue = queue.Queue()
 
+    @property
+    def current_wpos(self) -> List[float]:
+        """Returns copy of current work position coordinates [X, Y, Z]."""
+        return list(self.wpos)
+
+    @property
+    def current_mpos(self) -> List[float]:
+        """Returns copy of current machine position coordinates [X, Y, Z]."""
+        return list(self.mpos)
+
+    @property
+    def is_alarm(self) -> bool:
+        """Returns True if the machine state is currently in ALARM."""
+        return "alarm" in str(self.machine_state).lower()
+
     @staticmethod
     def list_available_ports(include_dummy_tty: bool = False) -> List[str]:
         """Returns sorted list of connected serial port devices with laser candidates first."""
@@ -521,6 +536,20 @@ class SerialController(QObject):
                 self.log_received.emit("tx", clean_cmd)
             except Exception as e:
                 self.log_received.emit("err", f"Send error: {e}")
+
+    def send_realtime(self, byte: int):
+        """Sends a single real-time GRBL command byte (!, ~, ?, 0x18, etc.).
+        These are special single-byte commands that MUST NOT have a \\n terminator —
+        GRBL processes them immediately outside the normal line-based command queue.
+        """
+        if not self.is_connected or not self.serial_port:
+            return
+        with self.lock:
+            try:
+                self.serial_port.write(bytes([byte]))
+                self.log_received.emit("tx", f"<RT:0x{byte:02X}>")
+            except Exception as e:
+                self.log_received.emit("err", f"Realtime send error: {e}")
 
     def jog(self, dx: float, dy: float, dz: float, feed: float):
         """Executes a safe GRBL jog command."""

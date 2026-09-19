@@ -143,6 +143,8 @@ class PathEntity(LaserEntity):
     # List of contours, where each contour is a list of (x, y) points relative to (x, y)
     contours: List[List[Tuple[float, float]]] = field(default_factory=list)
     closed: bool = True
+    anchor_x: Optional[float] = None  # Explicit rotation pivot X in world coords (None = use geometric centroid)
+    anchor_y: Optional[float] = None  # Explicit rotation pivot Y in world coords (None = use geometric centroid)
     _cached_local_bounds: Optional[Tuple[float, float, float, float]] = field(default=None, repr=False, compare=False)
 
     def get_local_bounds(self) -> Tuple[float, float, float, float]:

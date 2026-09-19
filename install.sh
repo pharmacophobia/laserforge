@@ -65,3 +65,14 @@ echo " Installation Complete! 🚀"
 echo " You can now launch LaserForge from your Application Menu"
 echo " or directly from your Desktop."
 echo "========================================="
+
+# 6. Optional Interactive Tutorial Onboarding
+if [ -t 0 ]; then
+    echo ""
+    read -r -p "Would you like to launch LaserForge with the Interactive Tutorial now? [Y/n] " launch_tut
+    launch_tut=${launch_tut:-Y}
+    if [[ "$launch_tut" =~ ^[Yy]$ ]]; then
+        echo "--> Launching LaserForge Interactive Tutorial..."
+        "${SCRIPT_DIR}/run.sh" --tutorial &
+    fi
+fi

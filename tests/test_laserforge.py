@@ -525,25 +525,34 @@ class TestLaserForgeCore(unittest.TestCase):
         self.assertTrue(any("$J=G91" in c and "X0.050" in c for c in sent_commands))
 
         # Test Motor Dispatch to Left Corner
+        # After fix: _target_point() sends G90, G0 X..., M3 S... as 3 separate commands
         sent_commands.clear()
         dlg._drive_to_pt1()
-        self.assertTrue(any("G90" in c and "X25.500" in c for c in sent_commands))
+        self.assertTrue(any("G90" == c.strip() for c in sent_commands),
+                        "G90 must be sent as its own command")
+        self.assertTrue(any("X25.500" in c for c in sent_commands),
+                        "G0 move to X25.500 must be sent")
 
         # Test Motor Dispatch to Right Corner
         sent_commands.clear()
         dlg._drive_to_pt2()
-        self.assertTrue(any("G90" in c and "X105.500" in c for c in sent_commands))
+        self.assertTrue(any("X105.500" in c for c in sent_commands),
+                        "G0 move to X105.500 must be sent")
 
         # Test Motor Dispatch to Midpoint
         sent_commands.clear()
         dlg._drive_to_midpoint()
-        self.assertTrue(any("G90" in c and "X65.500" in c for c in sent_commands))
+        self.assertTrue(any("X65.500" in c for c in sent_commands),
+                        "G0 move to midpoint X65.500 must be sent")
 
-        # Test Trace Aligned Edge
+        # Test Trace Aligned Edge — now uses start_job() so send_command is NOT called
+        # Instead, mock start_job to capture the multi-line gcode block
+        started_jobs = []
+        serial_ctrl.start_job = lambda gcode: started_jobs.append(gcode)
         sent_commands.clear()
         dlg._trace_aligned_edge()
-        self.assertTrue(len(sent_commands) > 0)
-        self.assertIn("G1", sent_commands[0])
+        self.assertTrue(len(started_jobs) > 0, "_trace_aligned_edge must call start_job()")
+        self.assertIn("G1", started_jobs[0])
 
         # Test keyboard jog event
         sent_commands.clear()
@@ -2086,6 +2095,109 @@ class TestCameraVisionEngine(unittest.TestCase):
         self.assertIsNotNone(ortho)
         self.assertEqual(len(ortho.shape), 3)
         self.assertEqual(ortho.shape[2], 3)
+
+    def test_camera_alignment_fine_tuning_and_loupe(self):
+        """Verify camera alignment fine-tuning, canvas overlay transform, and zoom loupe."""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QPixmap, QImage, QColor
+        from laserforge.core.camera_engine import CameraEngine, CameraCalibrationData
+        from laserforge.core.layer_manager import LayerManager
+        from laserforge.ui.canvas_scene import LaserCanvasScene
+        from laserforge.ui.camera_calibration_wizard import CameraCalibrationWizardDialog, CameraFineTuneDialog
+        import numpy as np
+
+        _app = QApplication.instance() or QApplication(["test", "-platform", "offscreen"])
+
+        calib = CameraCalibrationData(
+            bed_width_mm=400.0,
+            bed_height_mm=400.0,
+            offset_x_mm=2.5,
+            offset_y_mm=-1.5,
+            fine_scale_x=1.02,
+            fine_scale_y=0.98,
+            fine_rotation_deg=0.75,
+            overlay_opacity=0.65
+        )
+        engine = CameraEngine(calibration=calib)
+        lm = LayerManager()
+        scene = LaserCanvasScene(lm)
+
+        img = QImage(600, 600, QImage.Format.Format_RGB32)
+        img.fill(QColor(80, 120, 160))
+        pix = QPixmap.fromImage(img)
+
+        # Apply overlay with fine-tuning
+        scene.set_camera_overlay_pixmap(
+            pix, 400.0, 400.0,
+            offset_x=calib.offset_x_mm,
+            offset_y=calib.offset_y_mm,
+            fine_scale_x=calib.fine_scale_x,
+            fine_scale_y=calib.fine_scale_y,
+            fine_rotation_deg=calib.fine_rotation_deg,
+            opacity=calib.overlay_opacity
+        )
+        self.assertTrue(scene._camera_overlay_item.isVisible())
+        self.assertAlmostEqual(scene._camera_overlay_item.opacity(), 0.65, places=2)
+
+        # Test live update
+        scene.update_camera_overlay_transform(offset_x=5.0, offset_y=3.0, fine_rotation_deg=-1.0)
+        self.assertEqual(scene._camera_overlay_offset_x, 5.0)
+        self.assertEqual(scene._camera_overlay_offset_y, 3.0)
+        self.assertEqual(scene._camera_overlay_rotation, -1.0)
+
+        # Test CameraFineTuneDialog
+        from laserforge.config import MachineSettings
+        settings = MachineSettings()
+        fine_dlg = CameraFineTuneDialog(engine, scene, settings)
+        self.assertEqual(fine_dlg.spin_x.value(), 2.5)
+        self.assertEqual(fine_dlg.spin_y.value(), -1.5)
+        fine_dlg.spin_x.setValue(10.0)
+        self.assertEqual(scene._camera_overlay_offset_x, 10.0)
+        fine_dlg.close()
+
+        # Test CameraCalibrationWizardDialog step navigation & loupe
+        wiz = CameraCalibrationWizardDialog(engine, 400.0, 400.0)
+        wiz._on_next() # To Step 2
+        self.assertEqual(wiz.stack.currentIndex(), 1)
+        wiz._on_next() # To Step 3
+        self.assertEqual(wiz.stack.currentIndex(), 2)
+
+        # Interactive picker test
+        raw_frame = np.full((1080, 1920, 3), 100, dtype=np.uint8)
+        wiz.point_picker.set_raw_frame(raw_frame)
+        self.assertTrue(wiz.point_picker.show_loupe)
+
+        # Pick 4 points
+        wiz.point_picker.set_points([(200.0, 200.0), (1700.0, 200.0), (1700.0, 900.0), (200.0, 900.0)])
+        wiz._on_next() # To Step 4
+        self.assertEqual(wiz.stack.currentIndex(), 3)
+        self.assertTrue(engine.calibration.is_bed_aligned())
+        wiz.close()
+
+    def test_camera_homography_resolution_scaling(self):
+        """Verify CameraEngine safely handles resolution mismatches between frame and homography."""
+        from laserforge.core.camera_engine import CameraEngine, CameraCalibrationData
+        import numpy as np
+
+        calib = CameraCalibrationData(
+            resolution=(1920, 1080),
+            homography_resolution=(1920, 1080),
+            bed_width_mm=400.0,
+            bed_height_mm=400.0,
+            scale_px_per_mm=2.0
+        )
+        engine = CameraEngine(calibration=calib)
+        cam_pts = [(200.0, 100.0), (1700.0, 100.0), (1700.0, 950.0), (200.0, 950.0)]
+        bed_pts = [(20.0, 20.0), (380.0, 20.0), (380.0, 380.0), (20.0, 380.0)]
+        ok = engine.compute_bed_homography(cam_pts, bed_pts)
+        self.assertTrue(ok)
+        self.assertEqual(engine.calibration.homography_resolution, (1920, 1080))
+
+        # Now pass a frame captured at 1280x720 (resolution mismatch)
+        frame_720p = np.full((720, 1280, 3), 120, dtype=np.uint8)
+        ortho = engine.rectify_bed_image(frame_720p)
+        self.assertIsNotNone(ortho)
+        self.assertEqual(ortho.shape, (800, 800, 3)) # 400mm * 2.0 scale = 800px
 
 
 if __name__ == "__main__":

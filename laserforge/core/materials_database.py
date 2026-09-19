@@ -31,6 +31,24 @@ class MaterialProfile:
     air_assist: bool = False
     description: str = ""
     target_3w_laser: bool = True
+    laser_type: str = "Diode (450nm)"
+    laser_wattage: float = 3.0
+    thickness_mm: float = 0.0
+    author: str = "LaserForge Community"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MaterialProfile":
+        valid_keys = {
+            "id", "name", "category", "operation", "mode", "speed",
+            "power_pct", "passes", "line_interval", "pass_delay_sec",
+            "air_assist", "description", "target_3w_laser",
+            "laser_type", "laser_wattage", "thickness_mm", "author"
+        }
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered)
 
 
 # Pre-calibrated material database specifically optimized for 3W diode lasers (450nm)
@@ -199,7 +217,7 @@ class MaterialDatabase:
             try:
                 with open(MATERIALS_CONFIG_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                custom_profiles = [MaterialProfile(**item) for item in data]
+                custom_profiles = [MaterialProfile.from_dict(item) if isinstance(item, dict) else item for item in data]
                 # Merge or replace existing IDs
                 existing_ids = {m.id for m in self.materials}
                 for cp in custom_profiles:

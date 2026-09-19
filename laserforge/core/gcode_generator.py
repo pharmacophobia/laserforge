@@ -7,6 +7,8 @@ Computes estimated job execution times and exports toolpath vectors for the visu
 from typing import List, Dict, Tuple, Any, Optional
 import math
 import os
+import sys
+import traceback
 from dataclasses import dataclass
 from PIL import Image
 
@@ -49,13 +51,13 @@ class GCodeGenerator:
         self.layer_manager = layer_manager
 
     def _laser_on_cmd(self, power: int) -> str:
-        mode = getattr(self.settings, "laser_mode", "M4")
+        mode = self.settings.laser_mode
         if mode == "M106":
             return f"M106 S{power}"
         return f"{mode} S{power}"
 
     def _laser_off_cmd(self) -> str:
-        mode = getattr(self.settings, "laser_mode", "M4")
+        mode = self.settings.laser_mode
         if mode == "M106":
             return "M107"
         return "M5"
@@ -94,8 +96,16 @@ class GCodeGenerator:
 
         elif isinstance(entity, PathEntity):
             rot_rad = math.radians(entity.rotation)
-            b = entity.get_bounds()
-            cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+            if getattr(entity, 'anchor_x', None) is not None and getattr(entity, 'anchor_y', None) is not None:
+                cx, cy = entity.anchor_x, entity.anchor_y
+            else:
+                all_pts_flat = [pt for c in entity.contours for pt in c]
+                if all_pts_flat:
+                    cx = entity.x + sum(p[0] for p in all_pts_flat) / len(all_pts_flat)
+                    cy = entity.y + sum(p[1] for p in all_pts_flat) / len(all_pts_flat)
+                else:
+                    b = entity.get_bounds()
+                    cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
             for c in entity.contours:
                 if len(c) > 1:
                     world_c = []
@@ -139,7 +149,8 @@ class GCodeGenerator:
                 if not found_poly:
                     x, y, w, h = entity.x, entity.y, entity.width, entity.height
                     paths.append([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)])
-            except Exception:
+            except Exception as e:
+                print(f'[LaserForge WARNING] Text outline extraction failed for entity {entity.id!r}: {e}. Falling back to bounding box.', file=sys.stderr)
                 x, y, w, h = entity.x, entity.y, entity.width, entity.height
                 paths.append([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)])
 
@@ -254,10 +265,10 @@ class GCodeGenerator:
             gcode_lines.append(f"G0 Z0 F{self.settings.rapid_speed:.0f} ; Safe Z")
 
         # Rotary Axis Telemetry Header
-        if getattr(self.settings, "rotary_enabled", False):
-            rot_type = getattr(self.settings, "rotary_type", "Roller")
-            rot_mode = getattr(self.settings, "rotary_mode", "Software Scaling")
-            rot_diam = getattr(self.settings, "rotary_object_diameter", 65.0)
+        if self.settings.rotary_enabled:
+            rot_type = self.settings.rotary_type
+            rot_mode = self.settings.rotary_mode
+            rot_diam = self.settings.rotary_object_diameter
             circ = RotaryEngine.compute_circumference(rot_diam)
             rot_scale = RotaryEngine.calculate_software_scale_factor(self.settings) if rot_mode == "Software Scaling" else 1.0
             gcode_lines.append(f"; --- Rotary Axis Active: {rot_type} ({rot_mode}) ---")
@@ -266,7 +277,7 @@ class GCodeGenerator:
                 gcode_lines.append(f"; Software Y-Scaling Factor: {rot_scale:.5f}")
 
         # Custom Start G-Code
-        start_script = getattr(self.settings, "custom_start_gcode", "").strip()
+        start_script = self.settings.custom_start_gcode.strip()
         if start_script:
             gcode_lines.append("; --- Custom Start G-Code ---")
             for line in start_script.splitlines():
@@ -292,7 +303,7 @@ class GCodeGenerator:
             gcode_lines.append(f"\n; --- Layer {layer.name} ({layer.color}) Mode: {layer.mode} ---")
             if layer.air_assist:
                 gcode_lines.append(f"{self.settings.air_assist_cmd} ; Air Assist ON")
-                pre_delay = getattr(self.settings, "air_assist_pre_delay_sec", 0.0)
+                pre_delay = self.settings.air_assist_pre_delay_sec
                 if pre_delay > 0.0:
                     gcode_lines.append(f"G4 P{pre_delay:.1f} ; Air Assist Pre-delay")
 
@@ -322,13 +333,13 @@ class GCodeGenerator:
                         continue
                     try:
                         pil_img = Image.open(source_img_path)
-                        if getattr(img_ent, "is_mirrored_h", False) or getattr(self.settings, "software_mirror_x", False):
+                        if getattr(img_ent, "is_mirrored_h", False) or self.settings.software_mirror_x:
                             pil_img = pil_img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-                        if getattr(img_ent, "is_mirrored_v", False) or getattr(self.settings, "software_mirror_y", False):
+                        if getattr(img_ent, "is_mirrored_v", False) or self.settings.software_mirror_y:
                             pil_img = pil_img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
 
-                        eff_origin_x = (self.settings.bed_width - (img_ent.x + img_ent.width)) if getattr(self.settings, "software_mirror_x", False) else img_ent.x
-                        eff_origin_y = (self.settings.bed_height - (img_ent.y + img_ent.height)) if getattr(self.settings, "software_mirror_y", False) else img_ent.y
+                        eff_origin_x = (self.settings.bed_width - (img_ent.x + img_ent.width)) if self.settings.software_mirror_x else img_ent.x
+                        eff_origin_y = (self.settings.bed_height - (img_ent.y + img_ent.height)) if self.settings.software_mirror_y else img_ent.y
 
                         raster_arr = RasterProcessor.process_image(
                             pil_img,
@@ -349,8 +360,8 @@ class GCodeGenerator:
                             halftone_angle_deg=getattr(img_ent, "halftone_angle_deg", 45.0)
                         )
 
-                        flood_fill_en = getattr(self.settings, "flood_fill_enabled", True)
-                        flood_fill_sep = getattr(self.settings, "flood_fill_separation_mm", 12.0)
+                        flood_fill_en = self.settings.flood_fill_enabled
+                        flood_fill_sep = self.settings.flood_fill_separation_mm
 
                         if flood_fill_en:
                             islands = RasterProcessor.extract_raster_islands(
@@ -384,30 +395,30 @@ class GCodeGenerator:
                                 "height_mm": img_ent.height
                             }]
 
-                        custom_ws_speed = getattr(self.settings, "raster_fast_whitespace_speed", 0.0)
+                        custom_ws_speed = self.settings.raster_fast_whitespace_speed
                         rapid_speed = custom_ws_speed if custom_ws_speed > 100.0 else self.settings.rapid_speed
                         rapid_inv = 60.0 / rapid_speed
                         feed_inv = 60.0 / feed
                         p_scale = (layer.power_max / 100.0) * max_s
-                        overscan_en = getattr(self.settings, "overscan_enabled", False)
-                        overscan_mode = getattr(self.settings, "overscan_mode", "Acceleration")
-                        ov_pct = getattr(self.settings, "overscan_pct", 2.5)
-                        ov_fixed = getattr(self.settings, "overscan_mm", 2.0)
-                        ov_mult = getattr(self.settings, "overscan_accel_multiplier", 1.2)
-                        accel_x = getattr(self.settings, "x_accel", 1000.0)
-                        bed_w = getattr(self.settings, "bed_width", 400.0)
+                        overscan_en = self.settings.overscan_enabled
+                        overscan_mode = self.settings.overscan_mode
+                        ov_pct = self.settings.overscan_pct
+                        ov_fixed = self.settings.overscan_mm
+                        ov_mult = self.settings.overscan_accel_multiplier
+                        accel_x = self.settings.x_accel
+                        bed_w = self.settings.bed_width
 
-                        ws_skip_en = getattr(self.settings, "white_space_skip_enabled", True)
-                        ws_threshold = getattr(self.settings, "white_space_skip_threshold_mm", 5.0)
+                        ws_skip_en = self.settings.white_space_skip_enabled
+                        ws_threshold = self.settings.white_space_skip_threshold_mm
 
-                        fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
+                        fire_dwell = self.settings.laser_fire_delay_ms
                         fire_cmd = f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell" if fire_dwell > 0.0 else ""
-                        off_dwell = getattr(self.settings, "laser_off_delay_ms", 0.0)
+                        off_dwell = self.settings.laser_off_delay_ms
                         off_cmd = f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell" if off_dwell > 0.0 else ""
 
                         is_m106 = (laser_cmd == "M106")
-                        inline_s = getattr(self.settings, "use_inline_power", True) and not is_m106
-                        continuous_streaming = getattr(self.settings, "continuous_inline_streaming", True) and inline_s
+                        inline_s = self.settings.use_inline_power and not is_m106
+                        continuous_streaming = self.settings.continuous_inline_streaming and inline_s
 
                         for island_idx, island in enumerate(ordered_islands):
                             scanlines = RasterProcessor.generate_raster_scanlines(
@@ -573,6 +584,8 @@ class GCodeGenerator:
                                 gcode_lines.append("M5 S0 ; Continuous Raster Turbo Mode OFF")
 
                     except Exception as e:
+                        print(f'[LaserForge ERROR] Image processing failed for entity {img_ent.id}: {e}', file=sys.stderr)
+                        traceback.print_exc()
                         gcode_lines.append(f"; Error processing image {img_ent.id}: {e}")
 
                 # 2. VECTOR PATHS (Line, Fill, Fill + Line, Text Modes)
@@ -587,9 +600,9 @@ class GCodeGenerator:
                     epaths = self.entity_to_paths(vent)
                     if not epaths:
                         continue
-                    if getattr(self.settings, "software_mirror_x", False) or getattr(self.settings, "software_mirror_y", False):
-                        m_x = getattr(self.settings, "software_mirror_x", False)
-                        m_y = getattr(self.settings, "software_mirror_y", False)
+                    if self.settings.software_mirror_x or self.settings.software_mirror_y:
+                        m_x = self.settings.software_mirror_x
+                        m_y = self.settings.software_mirror_y
                         bw = self.settings.bed_width
                         bh = self.settings.bed_height
                         t_epaths = []
@@ -600,18 +613,18 @@ class GCodeGenerator:
 
                     # Check for Rotary software coordinate scaling
                     rot_scale_y = 1.0
-                    if getattr(self.settings, "rotary_enabled", False) and getattr(self.settings, "rotary_mode", "Software Scaling") == "Software Scaling":
+                    if self.settings.rotary_enabled and self.settings.rotary_mode == "Software Scaling":
                         rot_scale_y = RotaryEngine.calculate_software_scale_factor(self.settings)
                     if abs(rot_scale_y - 1.0) > 1e-4:
                         epaths = [[(px, py * rot_scale_y) for px, py in poly] for poly in epaths]
 
                     # Check for native G2/G3 arc support on CircleEntity (only when not scaled by rotary)
                     arc_data = None
-                    if abs(rot_scale_y - 1.0) < 1e-4 and isinstance(vent, CircleEntity) and getattr(self.settings, "enable_arcs", True):
+                    if abs(rot_scale_y - 1.0) < 1e-4 and isinstance(vent, CircleEntity) and self.settings.enable_arcs:
                         rx, ry = vent.radius_x, vent.radius_y
                         if abs(rx - ry) < 1e-3:
-                            eff_cx = (self.settings.bed_width - vent.x) if getattr(self.settings, "software_mirror_x", False) else vent.x
-                            eff_cy = (self.settings.bed_height - vent.y) if getattr(self.settings, "software_mirror_y", False) else vent.y
+                            eff_cx = (self.settings.bed_width - vent.x) if self.settings.software_mirror_x else vent.x
+                            eff_cy = (self.settings.bed_height - vent.y) if self.settings.software_mirror_y else vent.y
                             arc_data = {"cx": eff_cx, "cy": eff_cy, "r": rx}
 
                     is_closed = getattr(vent, "closed", True) if not isinstance(vent, LineEntity) else False
@@ -672,8 +685,8 @@ class GCodeGenerator:
                     current_cut_feed: float = -1.0
 
                     is_m106 = (laser_cmd == "M106")
-                    inline_s = getattr(self.settings, "use_inline_power", True) and not is_m106
-                    continuous_streaming = getattr(self.settings, "continuous_inline_streaming", True) and inline_s
+                    inline_s = self.settings.use_inline_power and not is_m106
+                    continuous_streaming = self.settings.continuous_inline_streaming and inline_s
 
                     if continuous_streaming:
                         gcode_lines.append(f"{laser_cmd} S0 ; Fill Turbo Mode ON")
@@ -719,7 +732,7 @@ class GCodeGenerator:
                                     gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f} S{eff_s_power}")
                             else:
                                 gcode_lines.append(self._laser_on_cmd(eff_s_power))
-                                fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
+                                fire_dwell = self.settings.laser_fire_delay_ms
                                 if fire_dwell > 0.0:
                                     gcode_lines.append(f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell")
                                 if eff_feed != current_cut_feed:
@@ -728,7 +741,7 @@ class GCodeGenerator:
                                 else:
                                     gcode_lines.append(f"G1 X{seg_x2:.3f} Y{seg_y:.3f}")
                                 gcode_lines.append(self._laser_off_cmd())
-                                off_dwell = getattr(self.settings, "laser_off_delay_ms", 0.0)
+                                off_dwell = self.settings.laser_off_delay_ms
                                 if off_dwell > 0.0:
                                     gcode_lines.append(f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell")
 
@@ -804,7 +817,7 @@ class GCodeGenerator:
 
                             # Laser ON
                             gcode_lines.append(self._laser_on_cmd(eff_s_power))
-                            fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
+                            fire_dwell = self.settings.laser_fire_delay_ms
                             if fire_dwell > 0.0:
                                 gcode_lines.append(f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell")
 
@@ -830,7 +843,7 @@ class GCodeGenerator:
 
                             # Laser OFF
                             gcode_lines.append(self._laser_off_cmd())
-                            off_dwell = getattr(self.settings, "laser_off_delay_ms", 0.0)
+                            off_dwell = self.settings.laser_off_delay_ms
                             if off_dwell > 0.0:
                                 gcode_lines.append(f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell")
                             continue
@@ -869,7 +882,7 @@ class GCodeGenerator:
 
                         # Laser ON
                         gcode_lines.append(self._laser_on_cmd(eff_s_power))
-                        fire_dwell = getattr(self.settings, "laser_fire_delay_ms", 0.0)
+                        fire_dwell = self.settings.laser_fire_delay_ms
                         if fire_dwell > 0.0:
                             gcode_lines.append(f"G4 P{fire_dwell / 1000.0:.3f} ; Laser fire dwell")
 
@@ -981,12 +994,12 @@ class GCodeGenerator:
 
                         # Laser OFF
                         gcode_lines.append(self._laser_off_cmd())
-                        off_dwell = getattr(self.settings, "laser_off_delay_ms", 0.0)
+                        off_dwell = self.settings.laser_off_delay_ms
                         if off_dwell > 0.0:
                             gcode_lines.append(f"G4 P{off_dwell / 1000.0:.3f} ; Laser off dwell")
 
             if layer.air_assist:
-                post_delay = getattr(self.settings, "air_assist_post_delay_sec", 0.0)
+                post_delay = self.settings.air_assist_post_delay_sec
                 if post_delay > 0.0:
                     gcode_lines.append(f"G4 P{post_delay:.1f} ; Air Assist Post-delay")
                 gcode_lines.append(f"{self.settings.air_assist_off_cmd} ; Air Assist OFF")
@@ -996,7 +1009,7 @@ class GCodeGenerator:
         gcode_lines.append(f"{self._laser_off_cmd()}           ; Laser OFF")
 
         # Custom End G-Code
-        end_script = getattr(self.settings, "custom_end_gcode", "").strip()
+        end_script = self.settings.custom_end_gcode.strip()
         if end_script:
             gcode_lines.append("; --- Custom End G-Code ---")
             for line in end_script.splitlines():
@@ -1005,12 +1018,12 @@ class GCodeGenerator:
                     gcode_lines.append(cl)
 
         # Finish position mode
-        finish_mode = getattr(self.settings, "finish_position_mode", "Origin")
+        finish_mode = self.settings.finish_position_mode
         if finish_mode == "Job Start":
             gcode_lines.append(f"G0 X{job_start_x:.3f} Y{job_start_y:.3f} F{self.settings.rapid_speed:.0f} ; Return to Job Start")
         elif finish_mode in ("Park Position", "Park"):
-            park_x = getattr(self.settings, "park_x", 0.0)
-            park_y = getattr(self.settings, "park_y", 0.0)
+            park_x = self.settings.park_x
+            park_y = self.settings.park_y
             gcode_lines.append(f"G0 X{park_x:.3f} Y{park_y:.3f} F{self.settings.rapid_speed:.0f} ; Move to Park Position")
         elif finish_mode == "Hold Current":
             gcode_lines.append("; Hold Current Position")
@@ -1052,9 +1065,9 @@ class GCodeGenerator:
         else:
             return ""
 
-        if getattr(self.settings, "software_mirror_x", False):
+        if self.settings.software_mirror_x:
             min_x, max_x = self.settings.bed_width - max_x, self.settings.bed_width - min_x
-        if getattr(self.settings, "software_mirror_y", False):
+        if self.settings.software_mirror_y:
             min_y, max_y = self.settings.bed_height - max_y, self.settings.bed_height - min_y
 
         s_frame = int(round((self.settings.framing_power_pct / 100.0) * self.settings.max_s_value))
@@ -1105,7 +1118,8 @@ class GCodeGenerator:
             if hull.is_empty or hull.geom_type != 'Polygon':
                 return self.generate_framing_gcode(target)
             coords = list(hull.exterior.coords)
-        except Exception:
+        except Exception as e:
+            print(f'[LaserForge WARNING] Convex hull generation failed: {e}. Falling back to standard bounding box framing.', file=sys.stderr)
             return self.generate_framing_gcode(target)
 
         if len(coords) < 3:
@@ -1114,9 +1128,9 @@ class GCodeGenerator:
         # Mirroring if configured
         final_coords = []
         for x, y in coords:
-            if getattr(self.settings, "software_mirror_x", False):
+            if self.settings.software_mirror_x:
                 x = self.settings.bed_width - x
-            if getattr(self.settings, "software_mirror_y", False):
+            if self.settings.software_mirror_y:
                 y = self.settings.bed_height - y
             final_coords.append((x, y))
 
@@ -1141,9 +1155,9 @@ class GCodeGenerator:
 
     def generate_target_point_gcode(self, target_x: float, target_y: float, power_pct: float = 0.5) -> str:
         """Generates G-code to jog the laser to target coordinate and project low-power guide dot."""
-        if getattr(self.settings, "software_mirror_x", False):
+        if self.settings.software_mirror_x:
             target_x = self.settings.bed_width - target_x
-        if getattr(self.settings, "software_mirror_y", False):
+        if self.settings.software_mirror_y:
             target_y = self.settings.bed_height - target_y
         s_val = max(1, int(round((power_pct / 100.0) * self.settings.max_s_value)))
         lines = [
@@ -1152,7 +1166,7 @@ class GCodeGenerator:
             "G90",
             self._laser_off_cmd(),
             f"G0 X{target_x:.3f} Y{target_y:.3f} F{self.settings.rapid_speed:.0f}",
-            f"{'M106 S' + str(s_val) if getattr(self.settings, 'laser_mode', 'M4') == 'M106' else 'M3 S' + str(s_val)} ; Targeting Beam ON",
+            f"{'M106 S' + str(s_val) if self.settings.laser_mode == 'M106' else 'M3 S' + str(s_val)} ; Targeting Beam ON",
         ]
         return "\n".join(lines)
 
@@ -1336,16 +1350,16 @@ class GCodeGenerator:
 
         # Map to machine space if software mirroring is enabled
         def _map_pt(px: float, py: float) -> Tuple[float, float]:
-            tx = self.settings.bed_width - px if getattr(self.settings, "software_mirror_x", False) else px
-            ty = self.settings.bed_height - py if getattr(self.settings, "software_mirror_y", False) else py
+            tx = self.settings.bed_width - px if self.settings.software_mirror_x else px
+            ty = self.settings.bed_height - py if self.settings.software_mirror_y else py
             return round(tx, 3), round(ty, 3)
 
         s_val = max(1, int(round((power_pct / 100.0) * self.settings.max_s_value)))
         laser_on = self._laser_on_cmd(s_val)
         laser_off = self._laser_off_cmd()
         rapid_spd = self.settings.rapid_speed
-        fire_delay = getattr(self.settings, "laser_fire_delay_ms", 0.0)
-        off_delay = getattr(self.settings, "laser_off_delay_ms", 0.0)
+        fire_delay = self.settings.laser_fire_delay_ms
+        off_delay = self.settings.laser_off_delay_ms
         pass_delay = getattr(self.settings, "pass_delay_sec", 0.0)
 
         lines: List[str] = [

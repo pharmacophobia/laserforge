@@ -77,6 +77,7 @@ class LivingHingeDialog(QDialog):
     """Parametric Studio for Living Hinges and Lattice Flex."""
 
     hinge_generated = pyqtSignal(list)
+    patterns_generated = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -257,4 +258,5 @@ class LivingHingeDialog(QDialog):
             return
 
         self.hinge_generated.emit(self._current_entities)
+        self.patterns_generated.emit(self._current_entities)
         self.accept()

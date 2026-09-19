@@ -4,7 +4,7 @@ Displays and edits numeric coordinates (X, Y), dimensions (Width, Height),
 rotation angle, aspect ratio lock, and quick alignment tools for selected CAD entities.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QDoubleSpinBox, QPushButton, QToolButton, QGroupBox,
@@ -250,6 +250,24 @@ class ShapePropertiesPanel(QWidget):
     def _on_aspect_toggled(self, checked: bool):
         self.lock_aspect_ratio = checked
 
+    def _get_origin_info(self) -> Tuple[str, float, float]:
+        origin = "Bottom-Left"
+        bw = 400.0
+        bh = 400.0
+        if hasattr(self.scene, "origin_corner"):
+            origin = self.scene.origin_corner
+        elif self.parent() and hasattr(self.parent(), "settings"):
+            origin = getattr(self.parent().settings, "origin_corner", origin)
+        if hasattr(self.scene, "bed_width"):
+            bw = self.scene.bed_width
+        elif self.parent() and hasattr(self.parent(), "settings"):
+            bw = getattr(self.parent().settings, "bed_width", bw)
+        if hasattr(self.scene, "bed_height"):
+            bh = self.scene.bed_height
+        elif self.parent() and hasattr(self.parent(), "settings"):
+            bh = getattr(self.parent().settings, "bed_height", bh)
+        return origin, float(bw), float(bh)
+
     def update_from_selection(self):
         if self._is_updating_ui:
             return
@@ -295,12 +313,15 @@ class ShapePropertiesPanel(QWidget):
                 self.text_mode_combo.setCurrentIndex(mode_idx)
 
 
+        origin, bw, bh = self._get_origin_info()
         if len(selected_items) == 1:
             item = selected_items[0]
             item.sync_to_entity()
             ent = item.entity
-            self.x_spin.setValue(ent.x)
-            self.y_spin.setValue(ent.y)
+            disp_x = (bw - ent.x) if "Right" in origin else ent.x
+            disp_y = (bh - ent.y) if "Bottom" in origin else ent.y
+            self.x_spin.setValue(disp_x)
+            self.y_spin.setValue(disp_y)
             self.rot_spin.setValue(ent.rotation)
 
             b = ent.get_bounds()
@@ -314,8 +335,11 @@ class ShapePropertiesPanel(QWidget):
             min_y = min(i.entity.get_bounds()[1] for i in selected_items)
             max_x = max(i.entity.get_bounds()[2] for i in selected_items)
             max_y = max(i.entity.get_bounds()[3] for i in selected_items)
-            self.x_spin.setValue(min_x)
-            self.y_spin.setValue(min_y)
+            origin, bw, bh = self._get_origin_info()
+            disp_ref_x = (bw - min_x) if "Right" in origin else min_x
+            disp_ref_y = (bh - min_y) if "Bottom" in origin else min_y
+            self.x_spin.setValue(disp_ref_x)
+            self.y_spin.setValue(disp_ref_y)
             self.w_spin.setValue(max_x - min_x)
             self.h_spin.setValue(max_y - min_y)
             self.rot_spin.setValue(0)
@@ -325,23 +349,27 @@ class ShapePropertiesPanel(QWidget):
     def _on_pos_changed(self):
         if self._is_updating_ui:
             return
-        new_x = self.x_spin.value()
-        new_y = self.y_spin.value()
+        disp_x = self.x_spin.value()
+        disp_y = self.y_spin.value()
         selected_items = [i for i in self.scene.selectedItems() if isinstance(i, LaserItemWrapper)]
         if not selected_items:
             return
 
+        origin, bw, bh = self._get_origin_info()
+        target_scene_x = (bw - disp_x) if "Right" in origin else disp_x
+        target_scene_y = (bh - disp_y) if "Bottom" in origin else disp_y
+
         if len(selected_items) == 1:
             item = selected_items[0]
-            item.entity.x = new_x
-            item.entity.y = new_y
+            item.entity.x = target_scene_x
+            item.entity.y = target_scene_y
             item.sync_from_entity()
         else:
             # Shift entire group
             min_x = min(i.entity.get_bounds()[0] for i in selected_items)
             min_y = min(i.entity.get_bounds()[1] for i in selected_items)
-            dx = new_x - min_x
-            dy = new_y - min_y
+            dx = target_scene_x - min_x
+            dy = target_scene_y - min_y
             for item in selected_items:
                 item.entity.x += dx
                 item.entity.y += dy

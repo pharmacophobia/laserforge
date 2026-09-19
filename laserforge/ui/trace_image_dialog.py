@@ -222,7 +222,7 @@ class TracePreviewCanvas(QWidget):
         if self.view_mode == "mask":
             if self.mask_pixmap and not self.mask_pixmap.isNull():
                 painter.setOpacity(1.0)
-                painter.drawPixmap(0, 0, self.mask_pixmap)
+                painter.drawPixmap(QRectF(0, 0, w, h), self.mask_pixmap, QRectF(self.mask_pixmap.rect()))
             else:
                 painter.fillRect(QRectF(0, 0, w, h), QColor("#000000"))
         elif self.view_mode == "vectors":
@@ -402,6 +402,19 @@ class TraceImageDialog(QDialog):
         self.aspect_ratio = orig_w / max(1, orig_h)
         self.initial_w_mm = initial_width_mm
         self.initial_h_mm = initial_width_mm / self.aspect_ratio if self.aspect_ratio else initial_height_mm
+
+        # High-Performance Interactive Preview Scaling:
+        # Scale large images to max 1200px proxy for ultra-fast 60 FPS slider response
+        MAX_PREVIEW_DIM = 1200
+        if max(orig_w, orig_h) > MAX_PREVIEW_DIM:
+            scale_factor = MAX_PREVIEW_DIM / float(max(orig_w, orig_h))
+            prev_w = max(1, int(round(orig_w * scale_factor)))
+            prev_h = max(1, int(round(orig_h * scale_factor)))
+            self.preview_image = pil_image.resize((prev_w, prev_h), Image.Resampling.BILINEAR)
+            self.preview_scale = float(prev_w) / float(orig_w)
+        else:
+            self.preview_image = pil_image
+            self.preview_scale = 1.0
 
         self._init_ui()
         self.canvas.set_source_image(self.pil_image)
@@ -1285,10 +1298,8 @@ class TraceImageDialog(QDialog):
     # -----------------------------------------------------------------
     # Live Contour Extraction Engine
     # -----------------------------------------------------------------
-    def _recalculate_contours(self):
-        """Runs the vector tracer in image pixel space for the interactive preview."""
-        t0 = time.perf_counter()
-
+    def _get_current_params(self) -> Dict[str, Any]:
+        """Collects current tracing parameters from UI controls."""
         mode_idx = self.combo_mode.currentIndex()
         if mode_idx == 0:
             mode = "feature"
@@ -1307,30 +1318,96 @@ class TraceImageDialog(QDialog):
             threshold = self.canny_spin.value()
             edge_dilation = self.canny_dilation_spin.value()
 
-        invert = self.chk_invert.isChecked()
-        blur = self.blur_spin.value()
-        contrast = float(self.contrast_spin.value())
-        brightness = float(self.brightness_spin.value())
-        high_pass = self.high_pass_spin.value()
-        clahe = self.chk_clahe.isChecked()
-        adaptive_bs = self.adaptive_bs_spin.value()
-        adaptive_c = self.adaptive_c_spin.value()
+        return {
+            "mode": mode,
+            "threshold": threshold,
+            "edge_dilation": edge_dilation,
+            "invert": self.chk_invert.isChecked(),
+            "blur": self.blur_spin.value(),
+            "contrast": float(self.contrast_spin.value()),
+            "brightness": float(self.brightness_spin.value()),
+            "high_pass": self.high_pass_spin.value(),
+            "clahe": self.chk_clahe.isChecked(),
+            "adaptive_bs": self.adaptive_bs_spin.value(),
+            "adaptive_c": self.adaptive_c_spin.value(),
+            "smooth": self.smooth_spin.value(),
+            "corner_deg": float(self.corner_spin.value()),
+            "smooth_iter": self.combo_smooth_iter.currentIndex(),
+            "noise_area": float(self.noise_spin.value()),
+            "ignore_holes": self.chk_ignore_holes.isChecked(),
+            "ignore_border": self.chk_ignore_border.isChecked(),
+            "is_centerline": (getattr(self, "combo_trace_style", None) is not None and self.combo_trace_style.currentIndex() == 1)
+        }
 
-        # 1. Compute binary mask
+    def _compute_full_resolution_contours(self) -> List[List[Tuple[float, float]]]:
+        """Calculates 100% full-resolution precision contours for final canvas insertion or SVG export."""
+        if self.preview_scale == 1.0:
+            return self.pixel_contours
+
+        p = self._get_current_params()
+        try:
+            if p["is_centerline"]:
+                return ImageTracer.trace_centerline(
+                    img=self.pil_image,
+                    threshold=p["threshold"] or 128,
+                    mode=p["mode"],
+                    invert=p["invert"],
+                    blur_radius=int(p["blur"]),
+                    adaptive_block_size=p["adaptive_bs"],
+                    adaptive_c=int(p["adaptive_c"]),
+                    contrast=p["contrast"],
+                    brightness=p["brightness"],
+                    high_pass=(p["high_pass"] > 0.5),
+                    clahe=p["clahe"],
+                    edge_dilation=p["edge_dilation"],
+                    min_length_pixels=max(2.0, p["noise_area"] * 0.4),
+                    smoothness=p["smooth"]
+                )
+            else:
+                return ImageTracer.trace_image(
+                    img=self.pil_image,
+                    threshold=p["threshold"],
+                    mode=p["mode"],
+                    invert=p["invert"],
+                    blur_radius=p["blur"],
+                    smoothness=p["smooth"],
+                    corner_sharpness_deg=p["corner_deg"],
+                    smooth_iterations=p["smooth_iter"],
+                    min_area_pixels=p["noise_area"],
+                    ignore_holes=p["ignore_holes"],
+                    ignore_border=p["ignore_border"],
+                    adaptive_block_size=p["adaptive_bs"],
+                    adaptive_c=p["adaptive_c"],
+                    contrast=p["contrast"],
+                    brightness=p["brightness"],
+                    high_pass=p["high_pass"],
+                    clahe=p["clahe"],
+                    edge_dilation=p["edge_dilation"]
+                )
+        except Exception as e:
+            print(f"[TraceImage] Full-res calculation fallback error: {e}")
+            return self.pixel_contours
+
+    def _recalculate_contours(self):
+        """Runs the vector tracer in image pixel space on preview proxy for instantaneous live feedback."""
+        t0 = time.perf_counter()
+        p = self._get_current_params()
+
+        # 1. Compute binary mask on preview proxy
         try:
             binary_mask = ImageTracer.get_binary_mask(
-                self.pil_image,
-                threshold=threshold,
-                mode=mode,
-                invert=invert,
-                blur_radius=blur,
-                adaptive_block_size=adaptive_bs,
-                adaptive_c=adaptive_c,
-                contrast=contrast,
-                brightness=brightness,
-                high_pass=high_pass,
-                clahe=clahe,
-                edge_dilation=edge_dilation
+                self.preview_image,
+                threshold=p["threshold"],
+                mode=p["mode"],
+                invert=p["invert"],
+                blur_radius=p["blur"],
+                adaptive_block_size=p["adaptive_bs"],
+                adaptive_c=p["adaptive_c"],
+                contrast=p["contrast"],
+                brightness=p["brightness"],
+                high_pass=p["high_pass"],
+                clahe=p["clahe"],
+                edge_dilation=p["edge_dilation"]
             )
         except Exception as e:
             self.lbl_stats.setText(f"Error computing mask: {e}")
@@ -1338,36 +1415,30 @@ class TraceImageDialog(QDialog):
 
         self.canvas.set_binary_mask(binary_mask)
 
-        # 2. Extract smoothed vector contours
-        smooth = self.smooth_spin.value()
-        corner_deg = float(self.corner_spin.value())
-        smooth_iter = self.combo_smooth_iter.currentIndex()  # 0: None, 1: Light, 2: High
-        noise_area = float(self.noise_spin.value())
-        ignore_holes = self.chk_ignore_holes.isChecked()
-        ignore_border = self.chk_ignore_border.isChecked()
-
-        is_centerline = (getattr(self, "combo_trace_style", None) is not None and self.combo_trace_style.currentIndex() == 1)
+        # 2. Extract smoothed vector contours scaled back to canvas image space
+        inv_scale = 1.0 / self.preview_scale
+        effective_noise_area = p["noise_area"] * (self.preview_scale ** 2)
 
         try:
-            if is_centerline:
+            if p["is_centerline"]:
                 contours = ImageTracer.trace_centerline(
                     binary_mask=binary_mask,
-                    smoothness=smooth,
-                    min_length_pixels=max(2.0, float(noise_area) * 0.4),
-                    scale_x=1.0,
-                    scale_y=1.0
+                    smoothness=p["smooth"],
+                    min_length_pixels=max(2.0, float(effective_noise_area) * 0.4),
+                    scale_x=inv_scale,
+                    scale_y=inv_scale
                 )
             else:
                 contours = ImageTracer.trace_image(
                     binary_mask=binary_mask,
-                    smoothness=smooth,
-                    corner_sharpness_deg=corner_deg,
-                    smooth_iterations=smooth_iter,
-                    min_area_pixels=noise_area,
-                    ignore_holes=ignore_holes,
-                    ignore_border=ignore_border,
-                    scale_x=1.0,
-                    scale_y=1.0
+                    smoothness=p["smooth"],
+                    corner_sharpness_deg=p["corner_deg"],
+                    smooth_iterations=p["smooth_iter"],
+                    min_area_pixels=effective_noise_area,
+                    ignore_holes=p["ignore_holes"],
+                    ignore_border=p["ignore_border"],
+                    scale_x=inv_scale,
+                    scale_y=inv_scale
                 )
         except Exception as e:
             self.lbl_stats.setText(f"Error tracing contours: {e}")
@@ -1379,19 +1450,24 @@ class TraceImageDialog(QDialog):
         self.canvas.set_contours(contours)
 
         total_pts = sum(len(c) for c in contours)
-        style_name = "Centerline strokes" if is_centerline else "Outline contours"
+        style_name = "Centerline strokes" if p["is_centerline"] else "Outline contours"
+        res_tag = f" (Preview {self.preview_image.width}×{self.preview_image.height})" if self.preview_scale != 1.0 else ""
         self.lbl_stats.setText(
-            f"{style_name}: {len(contours)} paths | {total_pts} vertices | {t_calc:.1f} ms"
+            f"{style_name}: {len(contours)} paths | {total_pts} vertices | {t_calc:.1f} ms{res_tag}"
         )
 
     # -----------------------------------------------------------------
     # Output & Export Actions
     # -----------------------------------------------------------------
     def _apply_and_close(self):
-        """Constructs native PathEntity scaled to desired millimeter dimensions."""
+        """Constructs native PathEntity scaled to desired millimeter dimensions with full-resolution precision."""
         if not self.pixel_contours:
             QMessageBox.warning(self, "Trace Image", "No vector contours extracted. Try adjusting threshold or mode.")
             return
+
+        final_contours = self._compute_full_resolution_contours()
+        if not final_contours:
+            final_contours = self.pixel_contours
 
         w_mm = self.width_spin.value()
         h_mm = self.height_spin.value()
@@ -1399,7 +1475,7 @@ class TraceImageDialog(QDialog):
         scale_y = h_mm / max(1.0, self.pil_image.height)
 
         scaled_contours = []
-        for poly in self.pixel_contours:
+        for poly in final_contours:
             scaled_poly = [(pt[0] * scale_x, pt[1] * scale_y) for pt in poly]
             scaled_contours.append(scaled_poly)
 
@@ -1420,7 +1496,7 @@ class TraceImageDialog(QDialog):
         self.accept()
 
     def _export_svg(self):
-        """Exports the traced vectors directly to a standard SVG file."""
+        """Exports the traced vectors directly to a standard SVG file with full-resolution precision."""
         if not self.pixel_contours:
             QMessageBox.warning(self, "Export SVG", "No vector contours extracted. Try adjusting threshold or mode.")
             return
@@ -1432,6 +1508,10 @@ class TraceImageDialog(QDialog):
         if not out_path:
             return
 
+        final_contours = self._compute_full_resolution_contours()
+        if not final_contours:
+            final_contours = self.pixel_contours
+
         w_mm = self.width_spin.value()
         h_mm = self.height_spin.value()
         scale_x = w_mm / max(1.0, self.pil_image.width)
@@ -1439,7 +1519,7 @@ class TraceImageDialog(QDialog):
 
         scaled_contours = [
             [(pt[0] * scale_x, pt[1] * scale_y) for pt in poly]
-            for poly in self.pixel_contours
+            for poly in final_contours
         ]
 
         try:
