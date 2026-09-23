@@ -127,7 +127,10 @@ try:
     @numba.jit(nopython=True, fastmath=True)
     def _numba_extract_segments(raster_arr: np.ndarray, origin_x_mm: float, line_interval_mm: float, bidirectional: bool, is_grayscale: bool):
         h, w = raster_arr.shape
-        max_segs = h * (w // 2 + 1)
+        # Worst case is one segment per pixel (grayscale power changes every pixel),
+        # so h*w is the only provably-safe bound. A smaller bound caused out-of-bounds
+        # writes in numba -> heap corruption. Do not reduce this.
+        max_segs = h * w
         out_row = np.empty(max_segs, dtype=np.int32)
         out_x1 = np.empty(max_segs, dtype=np.float32)
         out_x2 = np.empty(max_segs, dtype=np.float32)
