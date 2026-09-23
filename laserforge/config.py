@@ -15,7 +15,7 @@ DEFAULT_ORIGIN_CORNER = "Bottom-Left"  # "Bottom-Left", "Top-Left", "Bottom-Righ
 DEFAULT_BAUD_RATE = 115200
 DEFAULT_MAX_S_VALUE = 1000     # GRBL $30 max spindle speed
 DEFAULT_LASER_MODE = "M4"      # M4 = Dynamic laser power (GRBL 1.1+), M3 = Constant power
-DEFAULT_RAPID_SPEED = 3000.0   # G0 speed in mm/min
+DEFAULT_RAPID_SPEED = 4000.0   # G0 speed in mm/min (optimized rapid traverse default)
 DEFAULT_JOG_SPEED = 2000.0     # Jogging speed in mm/min
 DEFAULT_FRAMING_POWER = 0.5    # 0.5% power for visible framing guide without burning material
 DEFAULT_FRAMING_SPEED = 2000.0 # Speed when framing bounding box
@@ -59,13 +59,13 @@ class MachineSettings:
     # Laser Firing & Timing Controls
     laser_fire_delay_ms: float = 0.0      # Dwell pause in ms after laser fires before moving
     laser_off_delay_ms: float = 0.0       # Dwell pause in ms after laser shuts off
-    overscan_enabled: bool = False        # Lead-in/lead-out overscan to eliminate edge burn
+    overscan_enabled: bool = True         # Lead-in/lead-out overscan enabled by default to eliminate edge burn
     overscan_pct: float = 2.5             # Overscan % of raster scanline length
     overscan_mode: str = "Acceleration"   # "Acceleration" (d=v^2/2a), "Percentage", or "Fixed"
     overscan_mm: float = 2.0              # Fixed overscan in mm
     overscan_accel_multiplier: float = 1.2 # Safety margin above theoretical v^2 / (2*a)
     white_space_skip_enabled: bool = True  # Rapid G0 jump across wide empty gaps
-    white_space_skip_threshold_mm: float = 5.0 # Minimum gap (mm) to trigger G0 white-space skip
+    white_space_skip_threshold_mm: float = 3.0 # Minimum gap (mm) to trigger G0 white-space skip (optimized from 5.0)
     flood_fill_enabled: bool = True       # Engrave disconnected shapes / islands individually
     flood_fill_separation_mm: float = 12.0 # Minimum gap (mm) between islands to trigger flood fill
     continuous_inline_streaming: bool = True # Zero-stutter G1 S... / G0 streaming without intermediate M5
@@ -168,5 +168,13 @@ class MachineSettings:
     telemetry_enabled: bool = True
     feedback_webhook_url: str = ""
     developer_contact_email: str = "creator@laserforge.org"
+
+    # AI Assistant & Copilot (DeepSeek / Ollama / Local LLM)
+    ai_enabled: bool = True
+    ai_provider: str = "deepseek"  # "deepseek", "ollama", "lmstudio", "custom"
+    ai_api_key: str = ""
+    ai_api_base: str = "https://api.deepseek.com/v1"
+    ai_model: str = "deepseek-chat"
+    ai_temperature: float = 0.2
 
 

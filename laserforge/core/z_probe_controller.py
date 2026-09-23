@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List
 import re
 import time
+import threading
 from PyQt6.QtCore import QObject, pyqtSignal
 
 
@@ -97,22 +98,96 @@ class ZProbeEngine(QObject):
 
     def execute_probe(self, settings: Optional[ZProbeSettings] = None) -> bool:
         """
-        Streams probe command sequence through SerialController.
+        Streams probe command sequence through SerialController with synchronous
+        acknowledgment tracking and PRB response parsing.
         """
-        if not self.serial_ctrl or not self.serial_ctrl.is_connected:
+        if not self.serial_ctrl or not getattr(self.serial_ctrl, "is_connected", False):
             self.probe_failed.emit("Laser is not connected. Please connect via serial port first.")
             return False
 
-        cfg = settings or self.settings
-        gcode_cmds = self.generate_probe_gcode(cfg)
+        if getattr(self.serial_ctrl, "is_streaming", False):
+            self.probe_failed.emit("Cannot run Z-probe while a job is actively streaming.")
+            return False
 
+        if self.is_probing:
+            self.probe_failed.emit("A probe cycle is already in progress.")
+            return False
+
+        cfg = settings or self.settings
         self.is_probing = True
         self.probe_started.emit()
-        self.probe_progress.emit(f"Starting Z-probe toward plate ({cfg.feed_rate_mm_min} mm/min)...")
+        self.probe_progress.emit(f"Starting Z-probe toward plate ({cfg.feed_rate_mm_min:.0f} mm/min)...")
 
-        for cmd in gcode_cmds:
-            if not cmd.startswith(";"):
-                self.serial_ctrl.send_command(cmd)
-
-        self.probe_progress.emit("Probe cycle dispatched to GRBL. Awaiting trigger...")
+        worker = threading.Thread(target=self._probe_worker, args=(cfg,), daemon=True)
+        worker.start()
         return True
+
+    def _probe_worker(self, cfg: ZProbeSettings):
+        prb_result: Optional[Tuple[float, float, float, bool]] = None
+
+        def on_log(direction: str, text: str):
+            nonlocal prb_result
+            if direction == "rx" and "[PRB:" in text:
+                parsed = self.parse_grbl_prb(text)
+                if parsed:
+                    prb_result = parsed
+
+        try:
+            if hasattr(self.serial_ctrl, "log_received"):
+                self.serial_ctrl.log_received.connect(on_log)
+
+            # Drain residual ack_queue
+            if hasattr(self.serial_ctrl, "ack_queue"):
+                while not self.serial_ctrl.ack_queue.empty():
+                    try:
+                        self.serial_ctrl.ack_queue.get_nowait()
+                    except Exception:
+                        break
+
+            # Calculate safe timeout for probe move:
+            # travel_time = (max_travel_mm / feed_rate_mm_min) * 60 + 10 seconds margin
+            probe_timeout = (abs(cfg.max_travel_mm) / max(1.0, cfg.feed_rate_mm_min)) * 60.0 + 10.0
+
+            gcode_cmds = self.generate_probe_gcode(cfg)
+            for cmd in gcode_cmds:
+                cl = cmd.strip()
+                if not cl or cl.startswith(";"):
+                    continue
+
+                is_probe_cmd = "G38." in cl
+                timeout = probe_timeout if is_probe_cmd else 5.0
+
+                self.serial_ctrl.send_command(cl)
+
+                # Wait for ACK if ack_queue is available
+                if hasattr(self.serial_ctrl, "ack_queue"):
+                    try:
+                        token_type, token_val = self.serial_ctrl.ack_queue.get(timeout=timeout)
+                        if token_type in ("error", "alarm"):
+                            self.probe_failed.emit(f"Controller {token_type}: {token_val}")
+                            return
+                    except Exception:
+                        self.probe_failed.emit(f"Command timed out waiting for response: {cl}")
+                        return
+
+                if is_probe_cmd and prb_result is not None:
+                    _x, _y, z, ok = prb_result
+                    if not ok:
+                        self.probe_failed.emit("Touch plate was not contacted within max travel limit.")
+                        return
+                    self._last_probe_pos = (_x, _y, z)
+
+            # Successfully completed sequence
+            triggered_z = self._last_probe_pos[2] if self._last_probe_pos else 0.0
+            self.probe_success.emit(triggered_z)
+            self.probe_progress.emit(f"Probe completed successfully (Z={triggered_z:.3f} mm).")
+
+        except Exception as e:
+            self.probe_failed.emit(f"Probing error: {e}")
+        finally:
+            self.is_probing = False
+            if hasattr(self.serial_ctrl, "log_received"):
+                try:
+                    self.serial_ctrl.log_received.disconnect(on_log)
+                except Exception:
+                    pass

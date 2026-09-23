@@ -10,6 +10,8 @@ Provides:
 
 from dataclasses import dataclass
 import re
+import socket
+import subprocess
 import threading
 import time
 from typing import Dict, List, Optional, Tuple, Any
@@ -152,18 +154,106 @@ class PortDetector:
         return ranked
 
 
+def discover_pibridge_service() -> Optional[Tuple[str, int]]:
+    """Discovers active PiBridge laser services via Avahi / mDNS DNS-SD."""
+    try:
+        out = subprocess.check_output(
+            ["avahi-browse", "-t", "-r", "-p", "_pibridge._tcp"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0
+        )
+        for line in out.splitlines():
+            if line.startswith("=") and ";IPv4;" in line:
+                parts = line.split(";")
+                if len(parts) >= 8:
+                    ip = parts[7].strip()
+                    port = int(parts[8].strip())
+                    return ip, port
+    except Exception:
+        pass
+    return None
+
+
+def probe_network_laser(
+    target: str,
+    timeout: float = 1.0
+) -> Tuple[bool, Optional[int], str]:
+    """
+    Safely probes a TCP network laser bridge (e.g. 'laserbridge.local:8088' or 'tcp://192.168.1.50:8088').
+    Returns: (is_grbl, 115200, banner)
+    """
+    p = target.strip()
+    for prefix in ("tcp://", "socket://", "net://"):
+        if p.lower().startswith(prefix):
+            p = p[len(prefix):]
+            break
+
+    host = p
+    port_num = 8088
+    if ":" in p:
+        parts = p.split(":", 1)
+        host = parts[0]
+        try:
+            port_num = int(parts[1])
+        except ValueError:
+            return False, None, ""
+
+    # If hostname ends with .local, attempt mDNS / DNS-SD resolution fallback
+    if host.endswith(".local"):
+        try:
+            host = socket.gethostbyname(host)
+        except Exception:
+            disc = discover_pibridge_service()
+            if disc:
+                host, port_num = disc
+
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port_num))
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        # Send wake-up and query status
+        sock.sendall(b"\n?\n")
+        time.sleep(0.15)
+        resp = sock.recv(512).decode("latin1", errors="replace")
+        if "<" in resp or "Grbl" in resp or "ok" in resp or "$0=" in resp:
+            return True, 115200, resp.strip()
+
+        # Send settings query
+        sock.sendall(b"$$\n")
+        time.sleep(0.15)
+        resp2 = sock.recv(512).decode("latin1", errors="replace")
+        if "<" in resp2 or "Grbl" in resp2 or "ok" in resp2 or "$0=" in resp2:
+            return True, 115200, resp2.strip()
+    except Exception:
+        pass
+    finally:
+        if sock:
+            try: sock.close()
+            except Exception: pass
+
+    return False, None, ""
+
+
 def probe_port_for_grbl(
     port: str,
     baud_rates: Tuple[int, ...] = PROBE_BAUD_RATES,
     timeout: float = 0.45
 ) -> Tuple[bool, Optional[int], str]:
     """
-    Safely probes a serial port to verify whether a GRBL laser controller is attached.
+    Safely probes a serial port or network bridge to verify whether a GRBL laser controller is attached.
     Returns: (is_grbl, baud_rate, status_or_banner)
     Non-destructive: closes port before returning.
     """
     if not port or port.upper().startswith("VIRTUAL"):
         return False, None, ""
+
+    # Delegate to network probe if port is a network target
+    if port.startswith(("tcp://", "socket://", "net://")) or ":" in port or port.endswith(".local"):
+        return probe_network_laser(port, timeout=timeout)
     for baud in baud_rates:
         ser = None
         try:
@@ -244,11 +334,6 @@ class AutoConnectWorker(QThread):
             # Try once with all ports if no USB ports found
             ports = PortDetector.get_ranked_ports(include_dummy_tty=True)
 
-        if not ports:
-            self.probe_failed.emit("No serial communication ports detected on system.")
-            self.probe_finished.emit(False, "No serial ports found")
-            return
-
         # Exclude any virtual/simulated ports from auto-connect
         ports = [p for p in ports if not p.device.upper().startswith("VIRTUAL")]
 
@@ -258,7 +343,8 @@ class AutoConnectWorker(QThread):
             non_matching = [p for p in ports if p.device != self.preferred_port]
             ports = matching + non_matching
 
-        self.probe_progress.emit(f"Scanning {len(ports)} candidate serial port(s)...")
+        if ports:
+            self.probe_progress.emit(f"Scanning {len(ports)} candidate serial port(s)...")
 
         for idx, port_info in enumerate(ports):
             if self._abort:
@@ -276,6 +362,16 @@ class AutoConnectWorker(QThread):
                 self.laser_found.emit(dev, baud, summary)
                 self.probe_progress.emit(f"Found GRBL Laser on {dev} @ {baud} baud!")
                 self.probe_finished.emit(True, f"Connected to {dev} ({summary})")
+        # If no physical USB serial laser responded, probe PiBridge wireless laser bridge
+        if not self._abort:
+            default_net = "tcp://laserbridge.local:8088"
+            self.probe_progress.emit("Probing PiBridge wireless laser (laserbridge.local:8088)...")
+            is_grbl, baud, banner = probe_port_for_grbl(default_net, timeout=0.5)
+            if is_grbl and baud:
+                summary = banner.splitlines()[0] if banner else "PiBridge Wireless Laser"
+                self.laser_found.emit(default_net, baud, summary)
+                self.probe_progress.emit(f"Found wireless laser on {default_net}!")
+                self.probe_finished.emit(True, f"Connected to {default_net} ({summary})")
                 return
 
         self.probe_failed.emit(

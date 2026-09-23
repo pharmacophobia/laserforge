@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QPushButton, QComboBox, QRadioButton, QButtonGroup,
     QProgressBar, QGroupBox, QSpinBox, QDoubleSpinBox,
-    QFrame, QCheckBox, QScrollArea, QMessageBox
+    QFrame, QCheckBox, QScrollArea, QMessageBox, QInputDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QIcon
@@ -37,6 +37,7 @@ class LaserControlPanel(QWidget):
     alignment_dialog_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     park_requested = pyqtSignal()
+    resume_job_requested = pyqtSignal()
 
     def __init__(self, serial_ctrl: SerialController, parent=None, settings=None):
         super().__init__(parent)
@@ -74,7 +75,12 @@ class LaserControlPanel(QWidget):
         port_row = QHBoxLayout()
         port_row.setSpacing(3)
         self.port_combo = QComboBox()
-        self.port_combo.setToolTip("Serial Port (Laser candidates ranked first)")
+        self.port_combo.setEditable(True)
+        self.port_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        if self.port_combo.lineEdit():
+            self.port_combo.lineEdit().setPlaceholderText("Select port or type tcp://IP:Port")
+        self.port_combo.setToolTip("Serial Port or Network Bridge (e.g. tcp://laserbridge.local:8088)")
+        self.port_combo.activated.connect(self._on_port_combo_activated)
         self.refresh_ports_btn = QPushButton("⟳")
         self.refresh_ports_btn.setFixedWidth(24)
         self.refresh_ports_btn.setToolTip("Refresh Port List")
@@ -348,12 +354,20 @@ class LaserControlPanel(QWidget):
         )
         self.btn_stop.clicked.connect(self.serial_ctrl.stop_streaming)
 
+        self.btn_resume = QPushButton("⏯ Resume %")
+        self.btn_resume.setToolTip("Resume interrupted or stopped laser job from specific percentage or line")
+        self.btn_resume.setStyleSheet(
+            "background-color: #0284c7; color: white; font-weight: bold; padding: 4px; font-size: 10px;"
+        )
+        self.btn_resume.clicked.connect(self.resume_job_requested.emit)
+
         run_row.addWidget(self.btn_frame)
         run_row.addWidget(self.btn_contour_frame)
         run_row.addWidget(self.btn_simulate)
         run_row.addWidget(self.btn_start)
         run_row.addWidget(self.btn_pause)
         run_row.addWidget(self.btn_stop)
+        run_row.addWidget(self.btn_resume)
         job_layout.addLayout(run_row)
 
         self.progress_bar = QProgressBar()
@@ -487,7 +501,7 @@ class LaserControlPanel(QWidget):
         self.serial_ctrl.enable_hotplug_watcher(self.chk_auto_plug.isChecked())
 
     def refresh_ports(self):
-        current_data = self.port_combo.currentData() or self.port_combo.currentText()
+        current_data = self.port_combo.currentData() or self.port_combo.currentText().strip()
         if current_data and current_data.upper().startswith("VIRTUAL"):
             current_data = None
         self.port_combo.clear()
@@ -497,22 +511,47 @@ class LaserControlPanel(QWidget):
 
         ranked = [p for p in ranked if not p.device.upper().startswith("VIRTUAL")]
 
+        selected_idx = 0
         if not ranked:
-            self.port_combo.addItem("No ports found", None)
+            self.port_combo.addItem("No serial ports found", None)
         else:
-            selected_idx = 0
             for idx, p in enumerate(ranked):
                 self.port_combo.addItem(p.display_name, p.device)
                 if p.device == current_data:
                     selected_idx = idx
-            self.port_combo.setCurrentIndex(selected_idx)
+
+        # PiBridge / Network Laser options
+        net_default = "tcp://laserbridge.local:8088"
+        self.port_combo.addItem("🌐 PiBridge Network Laser (laserbridge.local:8088)", net_default)
+        if current_data and (current_data == net_default or "laserbridge" in str(current_data)):
+            selected_idx = self.port_combo.count() - 1
+
+        self.port_combo.addItem("➕ Add Custom Network Laser (TCP)...", "__ADD_CUSTOM_NETWORK__")
+        self.port_combo.setCurrentIndex(selected_idx)
+
+    def _on_port_combo_activated(self, idx: int):
+        data = self.port_combo.itemData(idx)
+        if data == "__ADD_CUSTOM_NETWORK__":
+            host_str, ok = QInputDialog.getText(
+                self, "Add Network Laser",
+                "Enter Laser Bridge Host/IP and Port:\n(e.g. laserbridge.local:8088 or 192.168.1.50:8088)",
+                text="laserbridge.local:8088"
+            )
+            if ok and host_str.strip():
+                addr = host_str.strip()
+                if not addr.startswith(("tcp://", "socket://", "net://")):
+                    addr = f"tcp://{addr}"
+                self.port_combo.insertItem(0, f"🌐 Network Laser ({addr})", addr)
+                self.port_combo.setCurrentIndex(0)
+            else:
+                self.port_combo.setCurrentIndex(0)
 
     def _toggle_connection(self):
         if self.serial_ctrl.is_connected:
             self.serial_ctrl.disconnect()
         else:
-            port = self.port_combo.currentData() or self.port_combo.currentText()
-            if not port or port == "No ports found":
+            port = self.port_combo.currentData() or self.port_combo.currentText().strip()
+            if not port or port in ("No serial ports found", "No ports found", "__ADD_CUSTOM_NETWORK__"):
                 return
             baud = int(self.baud_combo.currentText())
             self.serial_ctrl.connect(port, baud)

@@ -7,6 +7,9 @@ homing, framing, and emergency stop abort handling via PyQt6 QThread signals.
 import time
 import threading
 import queue
+import re
+import socket
+import select
 from typing import List, Optional, Tuple, Dict, Any
 import serial
 import serial.tools.list_ports
@@ -14,6 +17,23 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from laserforge.core.auto_connect import (
     PortDetector, AutoConnectWorker, USBHotplugWatcher, RankedPort
 )
+
+
+def sanitize_gcode_line(line: str) -> str:
+    """
+    Sanitizes a single G-code line before transmission to GRBL hardware.
+    1. Removes inline semicolon comments ('; ...' to end of line).
+    2. Removes parenthesis comments ('(...)').
+    3. Strips whitespace and returns clean machine command.
+    """
+    if not line:
+        return ""
+    # Strip semicolon comments
+    s = line.split(";", 1)[0]
+    # Strip parenthesis comments
+    s = re.sub(r"\(.*?\)", "", s)
+    return s.strip()
+
 
 # Standard GRBL 1.1 Error Code Reference
 GRBL_ERRORS: Dict[int, str] = {
@@ -255,33 +275,57 @@ class VirtualGrblSerial:
         elif line.startswith("$"):
             self._enqueue(b"ok\r\n")
         else:
+            if ";" in line:
+                self._enqueue(b"error:2\r\n")
+                return
+
+            if "G38.2" in line.upper() or "G38.3" in line.upper():
+                # Simulate probe contact
+                probe_z = -15.0
+                parts = line.upper().split()
+                for p in parts:
+                    if p.startswith("Z"):
+                        try:
+                            probe_z = float(p[1:]) / 2.0  # simulate contact midway
+                        except ValueError:
+                            pass
+                self.mpos[2] = probe_z
+                self.wpos[2] = probe_z
+                self._enqueue(f"[PRB:{self.mpos[0]:.3f},{self.mpos[1]:.3f},{probe_z:.3f}:1]\r\nok\r\n".encode('latin1'))
+                return
+
             # Parse G-code motion
             parts = line.upper().split()
             for p in parts:
-                if p.startswith("X"):
+                if not p:
+                    continue
+                letter = p[0]
+                val_str = p[1:]
+                if letter in ("X", "Y", "Z", "F", "S", "G", "M", "P", "L", "I", "J", "K", "R"):
+                    if not val_str:
+                        self._enqueue(b"error:2\r\n")
+                        return
                     try:
-                        x = float(p[1:])
-                        self.mpos[0] = x
-                        self.wpos[0] = x
-                    except ValueError: pass
-                elif p.startswith("Y"):
-                    try:
-                        y = float(p[1:])
-                        self.mpos[1] = y
-                        self.wpos[1] = y
-                    except ValueError: pass
-                elif p.startswith("Z"):
-                    try:
-                        z = float(p[1:])
-                        self.mpos[2] = z
-                        self.wpos[2] = z
-                    except ValueError: pass
-                elif p.startswith("F"):
-                    try: self.feed_rate = float(p[1:])
-                    except ValueError: pass
-                elif p.startswith("S"):
-                    try: self.laser_power = int(float(p[1:]))
-                    except ValueError: pass
+                        num = float(val_str)
+                    except ValueError:
+                        self._enqueue(b"error:2\r\n")
+                        return
+                    if letter == "X":
+                        self.mpos[0] = num
+                        self.wpos[0] = num
+                    elif letter == "Y":
+                        self.mpos[1] = num
+                        self.wpos[1] = num
+                    elif letter == "Z":
+                        self.mpos[2] = num
+                        self.wpos[2] = num
+                    elif letter == "F":
+                        self.feed_rate = num
+                    elif letter == "S":
+                        self.laser_power = int(num)
+                else:
+                    self._enqueue(b"error:2\r\n")
+                    return
             self._enqueue(b"ok\r\n")
 
     def flush(self):
@@ -289,6 +333,149 @@ class VirtualGrblSerial:
 
     def close(self):
         self.is_open = False
+
+
+class NetworkSocketSerial:
+    """
+    TCP Socket Serial emulator for LaserForge.
+    Enables connecting to wireless G-code bridges (such as PiBridge or esp3d) over network sockets.
+    Provides a drop-in pySerial-compatible interface: write, read, in_waiting, reset_input_buffer, close.
+    """
+    def __init__(self, host: str, port: int = 8088, timeout: float = 1.0):
+        self.host = host
+        self.port = int(port)
+        self.timeout = timeout
+        self.is_open = False
+        self._sock: Optional[socket.socket] = None
+        self._rx_buffer = bytearray()
+        self._lock = threading.Lock()
+        self.open()
+
+    def open(self):
+        with self._lock:
+            self.close()
+            target_host = self.host
+            target_port = self.port
+            if target_host.endswith(".local"):
+                try:
+                    target_host = socket.gethostbyname(target_host)
+                except Exception:
+                    try:
+                        from laserforge.core.auto_connect import discover_pibridge_service
+                        disc = discover_pibridge_service()
+                        if disc:
+                            target_host, target_port = disc
+                    except Exception:
+                        pass
+                if target_host.endswith(".local"):
+                    try:
+                        test_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        test_s.settimeout(0.5)
+                        test_s.connect(("10.0.11.212", target_port))
+                        test_s.close()
+                        target_host = "10.0.11.212"
+                    except Exception:
+                        pass
+
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(max(3.0, self.timeout))
+            s.connect((target_host, target_port))
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            try:
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            except (AttributeError, OSError):
+                pass
+            s.setblocking(False)
+            self._sock = s
+            self.is_open = True
+            self._rx_buffer.clear()
+
+    def write(self, data: bytes) -> int:
+        if not self.is_open or self._sock is None:
+            raise serial.SerialException("Network socket not connected")
+        with self._lock:
+            total_sent = 0
+            data_len = len(data)
+            deadline = time.time() + max(5.0, self.timeout)
+            while total_sent < data_len:
+                try:
+                    sent = self._sock.send(data[total_sent:])
+                    if sent == 0:
+                        self.is_open = False
+                        raise serial.SerialException("Network socket connection broken")
+                    total_sent += sent
+                except (BlockingIOError, socket.timeout):
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        raise serial.SerialException("Network socket write timed out")
+                    _, w, _ = select.select([], [self._sock], [], min(0.2, remaining))
+                    if not w and time.time() >= deadline:
+                        raise serial.SerialException("Network socket write timed out")
+                except socket.error as e:
+                    self.is_open = False
+                    raise serial.SerialException(f"Network write error: {e}")
+            return total_sent
+
+    def _poll(self):
+        if not self.is_open or self._sock is None:
+            return
+        try:
+            r, _, _ = select.select([self._sock], [], [], 0.0)
+            if self._sock in r:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    self.is_open = False
+                    return
+                self._rx_buffer.extend(chunk)
+        except (BlockingIOError, socket.timeout):
+            pass
+        except socket.error as e:
+            self.is_open = False
+            if not self._rx_buffer:
+                raise serial.SerialException(f"Network socket error: {e}")
+
+    @property
+    def in_waiting(self) -> int:
+        with self._lock:
+            self._poll()
+            return len(self._rx_buffer)
+
+    def read(self, size: int = 1) -> bytes:
+        with self._lock:
+            self._poll()
+            if not self._rx_buffer:
+                if not self.is_open:
+                    raise serial.SerialException("Connection closed by remote laser bridge")
+                return b""
+            chunk = bytes(self._rx_buffer[:size])
+            del self._rx_buffer[:size]
+            return chunk
+
+    def reset_input_buffer(self):
+        with self._lock:
+            self._rx_buffer.clear()
+
+    def reset_output_buffer(self):
+        pass
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.is_open = False
+        if self._sock is not None:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
 
 
 class SerialController(QObject):
@@ -309,6 +496,8 @@ class SerialController(QObject):
     auto_connect_progress = pyqtSignal(str)
     auto_connect_finished = pyqtSignal(bool, str)
     ports_changed = pyqtSignal(list)     # List of RankedPort
+
+    sanitize_gcode_line = staticmethod(sanitize_gcode_line)
 
     def __init__(self):
         super().__init__()
@@ -354,6 +543,10 @@ class SerialController(QObject):
         self.abort_requested = False
         self.gcode_lines: List[str] = []
         self.current_line_idx = 0
+        self.last_job_gcode: str = ""
+        self.last_job_lines: List[str] = []
+        self.last_stopped_line_idx: int = 0
+        self.streaming_mode: str = "auto"  # "auto", "line_by_line", "character_counting"
 
         # Automated connection & hotplug worker
         self.auto_connect_worker: Optional[AutoConnectWorker] = None
@@ -362,9 +555,19 @@ class SerialController(QObject):
 
         # Background worker thread & FIFO response queue
         self.worker_thread: Optional[threading.Thread] = None
+        self.stream_thread: Optional[threading.Thread] = None
         self.stop_worker = False
         self.lock = threading.Lock()
         self.ack_queue: queue.Queue = queue.Queue()
+
+    @property
+    def is_network_connection(self) -> bool:
+        """Returns True if currently connected over a TCP network socket bridge."""
+        if isinstance(self.serial_port, NetworkSocketSerial):
+            return True
+        if self.port_name and (self.port_name.startswith("tcp://") or (":" in self.port_name and not self.port_name.startswith("/dev/"))):
+            return True
+        return False
 
     @property
     def current_wpos(self) -> List[float]:
@@ -448,13 +651,53 @@ class SerialController(QObject):
         if not self.is_connected and self.auto_reconnect_enabled:
             self.start_auto_connect(preferred_port=device_path)
 
+    @staticmethod
+    def parse_network_target(port: str) -> Optional[Tuple[str, int]]:
+        """
+        Parses a network connection string (e.g. 'tcp://192.168.1.50:8088',
+        'laserbridge.local:8088', 'socket://10.0.0.5:8088', '192.168.1.50:8088') into (host, port).
+        Returns None if port is a standard serial device (/dev/ttyUSB0, COM3, etc.).
+        """
+        if not port or port.upper().startswith("VIRTUAL"):
+            return None
+        p = port.strip()
+        for prefix in ("tcp://", "socket://", "net://"):
+            if p.lower().startswith(prefix):
+                p = p[len(prefix):]
+                break
+        else:
+            if p.startswith("/dev/"):
+                return None
+            if not (":" in p or p.endswith(".local")):
+                return None
+
+        p = p.split("/")[0]
+
+        if ":" in p:
+            host_part, port_part = p.split(":", 1)
+            try:
+                port_num = int(port_part)
+                return host_part.strip(), port_num
+            except ValueError:
+                return None
+        elif p.endswith(".local") or re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", p):
+            return p.strip(), 8088
+
+        return None
+
     def connect(self, port: str, baud: int = 115200) -> bool:
-        """Opens connection to the laser engraver."""
+        """Opens connection to the laser engraver (USB Serial or Network TCP bridge)."""
         if self.is_connected:
             self.disconnect()
 
         try:
-            if port.upper() in ("VIRTUAL_GRBL", "VIRTUAL", "SIMULATOR"):
+            net_target = self.parse_network_target(port)
+            if net_target:
+                host, net_port = net_target
+                self.log_received.emit("rx", f"Connecting to network laser bridge at {host}:{net_port}...")
+                self.serial_port = NetworkSocketSerial(host=host, port=net_port, timeout=2.0)
+                time.sleep(0.2)
+            elif port.upper() in ("VIRTUAL_GRBL", "VIRTUAL", "SIMULATOR"):
                 self.serial_port = VirtualGrblSerial(port=port, baudrate=baud)
                 time.sleep(0.1)
             else:
@@ -521,12 +764,12 @@ class SerialController(QObject):
                 pass
 
     def send_command(self, cmd: str):
-        """Sends a raw command or G-code line to GRBL using standard \\n terminator."""
+        """Sends a raw command or G-code line to GRBL using standard \n terminator."""
         if not self.is_connected or not self.serial_port:
             self.log_received.emit("err", "Cannot send command: Not connected.")
             return
 
-        clean_cmd = cmd.strip()
+        clean_cmd = sanitize_gcode_line(cmd)
         if not clean_cmd:
             return
 
@@ -737,10 +980,18 @@ class SerialController(QObject):
             self.log_received.emit("err", "Cannot start job: Laser is not connected.")
             return
 
-        lines = [line.strip() for line in gcode_text.splitlines() if line.strip() and not line.strip().startswith(";")]
+        lines = []
+        for raw_line in gcode_text.splitlines():
+            clean = sanitize_gcode_line(raw_line)
+            if clean:
+                lines.append(clean)
         if not lines:
             self.log_received.emit("err", "Job is empty or contains only comments.")
             return
+
+        self.last_job_gcode = gcode_text
+        self.last_job_lines = list(lines)
+        self.last_stopped_line_idx = 0
 
         self.gcode_lines = lines
         self.current_line_idx = 0
@@ -749,8 +1000,43 @@ class SerialController(QObject):
         self.abort_requested = False
 
         # Launch streaming thread
-        stream_thread = threading.Thread(target=self._streaming_loop, daemon=True)
-        stream_thread.start()
+        self.stream_thread = threading.Thread(target=self._streaming_loop, daemon=True)
+        self.stream_thread.start()
+
+    def resume_job_from_position(
+        self,
+        gcode_text: Optional[str] = None,
+        line_idx: Optional[int] = None,
+        percentage: Optional[float] = None,
+        by_distance: bool = False
+    ) -> bool:
+        """
+        Resumes a job from a specific line index or progress percentage.
+        Synthesizes the safe resumption preamble and starts the stream.
+        """
+        from laserforge.core.job_resumer import JobResumer
+
+        target_gcode = gcode_text or self.last_job_gcode
+        if not target_gcode:
+            self.log_received.emit("err", "Cannot resume: No previous job G-code found.")
+            return False
+
+        try:
+            resumed = JobResumer.build_resumed_job(
+                target_gcode,
+                target_line_idx=line_idx,
+                target_percentage=percentage,
+                by_distance=by_distance
+            )
+            self.log_received.emit(
+                "rx",
+                f"Resuming job at line {resumed.resume_line_index} of {resumed.original_line_count} ({resumed.resume_percentage:.1f}%)..."
+            )
+            self.start_job(resumed.full_gcode)
+            return True
+        except Exception as e:
+            self.log_received.emit("err", f"Job resumption failed: {e}")
+            return False
 
     def pause_job(self):
         """Pauses job execution."""
@@ -776,6 +1062,11 @@ class SerialController(QObject):
         self.is_streaming = False
         self.is_paused = False
         self.ack_queue.put(("abort", "Aborted by user"))
+        if self.stream_thread and self.stream_thread.is_alive() and threading.current_thread() != self.stream_thread:
+            try:
+                self.stream_thread.join(timeout=1.0)
+            except Exception:
+                pass
         if self.is_connected and self.serial_port:
             with self.lock:
                 try:
@@ -787,12 +1078,23 @@ class SerialController(QObject):
 
     def _streaming_loop(self):
         """
-        High-speed character-counting G-code streaming engine for GRBL.
-        Maintains saturated planner buffer (up to 120 bytes in flight) to eliminate
-        motor stuttering and false timeouts during laser engraving.
+        G-code streaming engine for GRBL.
+        Uses strict line-by-line ACK flow control over network bridges,
+        and high-speed character-counting buffers over direct USB.
         """
+        try:
+            self._do_streaming_loop()
+        except RuntimeError:
+            return
+
+    def _do_streaming_loop(self):
         total = len(self.gcode_lines)
-        self.log_received.emit("rx", f"Starting G-Code stream ({total} lines)...")
+        use_line_by_line = (
+            self.streaming_mode == "line_by_line" or
+            (self.streaming_mode == "auto" and self.is_network_connection)
+        )
+        stream_mode_label = "Line-by-Line ACK (Network Safe)" if use_line_by_line else "Buffered (High-Speed USB)"
+        self.log_received.emit("rx", f"Starting G-Code stream ({total} lines) [{stream_mode_label}]...")
 
         # Drain residual tokens from ack_queue before starting
         while not self.ack_queue.empty():
@@ -801,6 +1103,79 @@ class SerialController(QObject):
             except queue.Empty:
                 break
 
+        if use_line_by_line:
+            # === STRICT LINE-BY-LINE PING-PONG FLOW CONTROL ===
+            # Transmits 1 line at a time and waits for GRBL's 'ok' ACK.
+            # Prevents Wi-Fi/TCP buffer overruns, dropped characters, and error:1 / error:23.
+            idx = 0
+            while idx < total:
+                if self.abort_requested:
+                    self.log_received.emit("err", "Job Aborted by user.")
+                    self.job_finished.emit(False, "Aborted by user")
+                    return
+
+                while self.is_paused:
+                    time.sleep(0.1)
+                    if self.abort_requested:
+                        self.job_finished.emit(False, "Aborted while paused")
+                        return
+
+                next_line = self.gcode_lines[idx]
+                with self.lock:
+                    if not self.serial_port or not self.serial_port.is_open:
+                        self.job_finished.emit(False, "Connection lost during network stream")
+                        self.is_streaming = False
+                        return
+                    try:
+                        self.serial_port.write((next_line + "\n").encode("latin1"))
+                        if not self.is_streaming or next_line.startswith(";") or not next_line.startswith("G1") or idx % 50 == 0:
+                            self.log_received.emit("tx", next_line)
+                    except Exception as e:
+                        self.job_finished.emit(False, f"Network transmission error: {e}")
+                        self.is_streaming = False
+                        return
+
+                # Wait synchronously for this line's ACK before transmitting next line
+                ack_received = False
+                send_time = time.time()
+                while not ack_received and not self.abort_requested:
+                    try:
+                        token_type, token_val = self.ack_queue.get(timeout=0.20)
+                        if token_type == "ok":
+                            ack_received = True
+                            self.current_line_idx = idx + 1
+                            self.last_stopped_line_idx = self.current_line_idx
+                            pct = (self.current_line_idx / total) * 100.0 if total > 0 else 100.0
+                            self.job_progress.emit(pct, self.current_line_idx, total)
+                            idx += 1
+                        elif token_type in ("error", "alarm"):
+                            err_msg = f"Laser controller {token_type}: {token_val} (at line {idx+1}: {next_line})"
+                            self.log_received.emit("err", err_msg)
+                            self.job_finished.emit(False, err_msg)
+                            self.is_streaming = False
+                            return
+                        elif token_type == "abort":
+                            self.job_finished.emit(False, "Aborted by user")
+                            self.is_streaming = False
+                            return
+                    except queue.Empty:
+                        now = time.time()
+                        if self.machine_state in ("Run", "Jog", "Hold"):
+                            send_time = now
+                            continue
+                        if now - getattr(self, "last_rx_time", now) > 60.0:
+                            err_msg = f"Controller response timed out after 60s (at line {idx+1}: {next_line})"
+                            self.log_received.emit("err", err_msg)
+                            self.job_finished.emit(False, err_msg)
+                            self.is_streaming = False
+                            return
+
+            self.is_streaming = False
+            self.log_received.emit("rx", "Job Completed Successfully!")
+            self.job_finished.emit(True, "Job Completed Successfully")
+            return
+
+        # === HIGH-SPEED CHARACTER-COUNTING BUFFERED STREAM (USB DIRECT) ===
         in_flight: List[int] = []  # Length of lines in flight (bytes including \n)
         max_buffer_bytes = 120    # Safe threshold for GRBL's 128-byte RX buffer
         idx = 0
@@ -849,6 +1224,7 @@ class SerialController(QObject):
                         if in_flight:
                             in_flight.pop(0)
                         self.current_line_idx = min(total, idx - len(in_flight))
+                        self.last_stopped_line_idx = self.current_line_idx
                         pct = (self.current_line_idx / total) * 100.0 if total > 0 else 100.0
                         self.job_progress.emit(pct, self.current_line_idx, total)
                     elif token_type in ("error", "alarm"):
@@ -881,6 +1257,10 @@ class SerialController(QObject):
         Sends a single line and synchronously waits for GRBL 'ok' or error response.
         Used for discrete calibration and manual control moves.
         """
+        clean_line = sanitize_gcode_line(line)
+        if not clean_line:
+            return True, ""
+
         # Drain residual tokens before sending
         while not self.ack_queue.empty():
             try:
@@ -892,8 +1272,8 @@ class SerialController(QObject):
             if not self.serial_port or not self.serial_port.is_open:
                 return False, "Serial port not connected"
             try:
-                self.serial_port.write((line + "\n").encode("latin1"))
-                self.log_received.emit("tx", line)
+                self.serial_port.write((clean_line + "\n").encode("latin1"))
+                self.log_received.emit("tx", clean_line)
             except Exception as e:
                 return False, f"Write error: {e}"
 

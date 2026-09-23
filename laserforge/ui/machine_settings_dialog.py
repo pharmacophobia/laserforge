@@ -33,8 +33,8 @@ class MachineSettingsDialog(QDialog):
         self.serial_ctrl = serial_ctrl
 
         self.setWindowTitle("Machine & Laser Settings - LaserForge")
-        self.resize(760, 600)
-        self.setMinimumSize(640, 520)
+        self.resize(1048, 600)
+        self.setMinimumSize(928, 520)
 
         self._init_ui()
         self._load_values()
@@ -863,20 +863,20 @@ class MachineSettingsDialog(QDialog):
         self.pulse_pow_spin.setValue(getattr(self.settings, "test_pulse_power_pct", 1.0))
 
         # Overscan & White-Space Skipping & Raster Turbo
-        self.chk_overscan.setChecked(getattr(self.settings, "overscan_enabled", False))
+        self.chk_overscan.setChecked(getattr(self.settings, "overscan_enabled", True))
         self.overscan_mode_combo.setCurrentText(getattr(self.settings, "overscan_mode", "Acceleration"))
         self.overscan_mult_spin.setValue(getattr(self.settings, "overscan_accel_multiplier", 1.2))
         self.overscan_pct_spin.setValue(getattr(self.settings, "overscan_pct", 2.5))
         self.overscan_mm_spin.setValue(getattr(self.settings, "overscan_mm", 2.0))
         self.chk_white_space_skip.setChecked(getattr(self.settings, "white_space_skip_enabled", True))
-        self.white_space_skip_threshold_spin.setValue(getattr(self.settings, "white_space_skip_threshold_mm", 8.0))
+        self.white_space_skip_threshold_spin.setValue(getattr(self.settings, "white_space_skip_threshold_mm", 3.0))
         self.chk_continuous_streaming.setChecked(getattr(self.settings, "continuous_inline_streaming", True))
         self.fast_ws_speed_spin.setValue(getattr(self.settings, "raster_fast_whitespace_speed", 0.0))
         self.chk_flood_fill.setChecked(getattr(self.settings, "flood_fill_enabled", True))
         self.flood_fill_sep_spin.setValue(getattr(self.settings, "flood_fill_separation_mm", 12.0))
 
         # Kinematics
-        self.rapid_spin.setValue(getattr(self.settings, "rapid_speed", 3000.0))
+        self.rapid_spin.setValue(getattr(self.settings, "rapid_speed", 4000.0))
         self.jog_spin.setValue(getattr(self.settings, "jog_speed", 2000.0))
         self.x_steps_spin.setValue(getattr(self.settings, "x_steps_per_mm", 80.0))
         self.y_steps_spin.setValue(getattr(self.settings, "y_steps_per_mm", 80.0))

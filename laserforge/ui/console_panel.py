@@ -77,6 +77,8 @@ class ConsolePanel(QWidget):
         text = text.rstrip("\r\n")
 
         # Skip periodic ? status queries to avoid spamming the log
+        if not text or not text.strip():
+            return
         if text == "?" or text.startswith("<"):
             return
 

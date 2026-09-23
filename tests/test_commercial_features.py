@@ -384,6 +384,204 @@ class TestAlignmentMarksGenerator(unittest.TestCase):
         self.assertIn("Center Cross H", gcode_both)
 
 
+class TestGCodeSanitizationAndGrblCompliance(unittest.TestCase):
+    """Test G-code comment sanitization and GRBL 1.1 syntax compliance."""
+
+    def setUp(self):
+        self.serial_ctrl = SerialController()
+        self.sim = VirtualGrblSerial()
+
+    def tearDown(self):
+        self.serial_ctrl.stop_streaming()
+        self.serial_ctrl.disconnect()
+        self.sim.close()
+
+    def test_sanitize_gcode_line(self):
+        sanitize = self.serial_ctrl.sanitize_gcode_line
+
+        # Semicolon comments stripped
+        self.assertEqual(sanitize("G21 ; Set units to millimeters"), "G21")
+        self.assertEqual(sanitize("M4 ; Dynamic laser mode ON"), "M4")
+        self.assertEqual(sanitize("M5 S0 ; Fill Turbo Mode OFF"), "M5 S0")
+        self.assertEqual(sanitize("; Pure comment line"), "")
+
+        # Parentheses comments stripped
+        self.assertEqual(sanitize("G1 X10.0 (move) Y20.0 (comment)"), "G1 X10.0  Y20.0")
+
+        # Whitespace handling
+        self.assertEqual(sanitize("   G0 X0 Y0   "), "G0 X0 Y0")
+        self.assertEqual(sanitize("   "), "")
+        self.assertEqual(sanitize(""), "")
+
+    def test_virtual_grbl_rejects_unstripped_comments(self):
+        """Virtual GRBL must return error:2 if unstripped comments reach the controller."""
+        self.sim.reset_input_buffer()
+        self.sim.write(b"G21 ; Set units to millimeters\n")
+        resp = self.sim.readline().decode()
+        self.assertIn("error:2", resp)
+
+        self.sim.reset_input_buffer()
+        self.sim.write(b"M4 ; Dynamic laser mode ON\n")
+        resp = self.sim.readline().decode()
+        self.assertIn("error:2", resp)
+
+    def test_virtual_grbl_rejects_malformed_numeric_words(self):
+        """Virtual GRBL must return error:2 if numeric values fail float parsing."""
+        self.sim.reset_input_buffer()
+        self.sim.write(b"G1 Xabc Y20\n")
+        resp = self.sim.readline().decode()
+        self.assertIn("error:2", resp)
+
+    def test_virtual_grbl_accepts_clean_gcode(self):
+        """Virtual GRBL returns ok for clean standard G-code lines."""
+        self.sim.reset_input_buffer()
+        self.sim.write(b"G21\n")
+        resp = self.sim.readline().decode()
+        self.assertEqual(resp.strip(), "ok")
+
+        self.sim.reset_input_buffer()
+        self.sim.write(b"M4\n")
+        resp = self.sim.readline().decode()
+        self.assertEqual(resp.strip(), "ok")
+
+        self.sim.reset_input_buffer()
+        self.sim.write(b"G1 X35.160 S953 F3000\n")
+        resp = self.sim.readline().decode()
+        self.assertEqual(resp.strip(), "ok")
+
+    def test_start_job_sanitizes_lines(self):
+        """start_job must never enqueue comments or blank lines."""
+        raw_program = """
+        ; Header Comment
+        G21 ; Set units
+        G90 ; Absolute
+        M5 ; Laser OFF
+
+        ; Layer 1
+        G0 X10.0 Y10.0
+        M4 ; Dynamic Laser ON
+        G1 X20.0 S500 F1500
+        M5 S0 ; Cooldown
+
+        ; Footer
+        M2 ; End
+        """
+        self.serial_ctrl.is_connected = True
+        self.serial_ctrl.serial_port = self.sim
+
+        self.serial_ctrl.abort_requested = True
+        self.serial_ctrl.start_job(raw_program)
+        self.serial_ctrl.stop_streaming()
+
+        self.assertGreater(len(self.serial_ctrl.gcode_lines), 0)
+        for line in self.serial_ctrl.gcode_lines:
+            self.assertFalse(line.startswith(";"), f"Comment line found in stream: {line}")
+            self.assertNotIn(";", line, f"Inline semicolon comment found in stream: {line}")
+            self.assertNotIn("(", line, f"Parenthesis comment found in stream: {line}")
+            self.assertTrue(bool(line.strip()), "Empty line found in stream")
+
+    def test_gcode_generator_produces_no_inline_comments(self):
+        """GCodeGenerator must emit clean instructions with zero inline comments."""
+        from laserforge.config import MachineSettings
+        from laserforge.core.layer_manager import LayerManager
+        from laserforge.core.gcode_generator import GCodeGenerator
+        from laserforge.core.models import RectEntity
+
+        settings = MachineSettings()
+        lm = LayerManager()
+        gen = GCodeGenerator(settings, lm)
+        rect = RectEntity(layer_id=0, x=10, y=10, width=50, height=30)
+        job = gen.generate_job([rect])
+
+        for line in job.gcode.splitlines():
+            cl = line.strip()
+            if not cl or cl.startswith(";"):
+                continue
+            self.assertNotIn(";", cl, f"Inline comment found in generated machine line: '{cl}'")
+
+    def test_auto_calibration_cleanliness_and_parking_bounds(self):
+        """AutoCalibrationEngine must produce clean G-code and clamp parking coordinates."""
+        from laserforge.core.auto_calibration import AutoCalibrationEngine, AutoCalibrationConfig
+
+        cfg = AutoCalibrationConfig(
+            bed_width_mm=200.0,
+            bed_height_mm=150.0,
+            park_position=(0.0, 400.0) # Requested Y=400 on a 150mm bed
+        )
+        engine = AutoCalibrationEngine(cfg)
+        gcode = engine.generate_calibration_gcode(200.0, 150.0, 20.0, 1000.0, 15.0)
+
+        for line in gcode.splitlines():
+            sanitized = self.serial_ctrl.sanitize_gcode_line(line)
+            if not sanitized:
+                continue
+            self.assertNotIn(";", sanitized, f"Inline comment in sanitized calibration line: '{sanitized}'")
+            if "G0" in sanitized and "Y" in sanitized:
+                # Ensure clamped to bed height 150
+                for part in sanitized.split():
+                    if part.startswith("Y"):
+                        y_val = float(part[1:])
+                        self.assertLessEqual(y_val, 150.0)
+
+    def test_rotary_engine_gcode_cleanliness(self):
+        """RotaryEngine test G-code must contain zero inline comments on machine lines."""
+        from laserforge.config import MachineSettings
+        from laserforge.core.rotary_engine import RotaryEngine
+
+        st = MachineSettings()
+        st.rotary_enabled = True
+        st.rotary_type = "Chuck"
+        st.rotary_mode = "Hardware $101"
+        st.rotary_object_diameter = 50.0
+
+        gcode = RotaryEngine.generate_test_rotation_gcode(st)
+        for line in gcode.splitlines():
+            cl = line.strip()
+            if not cl or cl.startswith(";"):
+                continue
+            self.assertNotIn(";", cl, f"Inline comment found in rotary test line: '{cl}'")
+
+    def test_gcode_validator_comment_length_and_m106(self):
+        """Validator must tolerate long header comments and respect M106 laser mode."""
+        from laserforge.config import MachineSettings
+        from laserforge.core.gcode_validator import GCodeValidator
+
+        # Long comment line exceeding 256 characters
+        long_comment = "; " + "A" * 300
+        gcode = f"{long_comment}\nG21\nG90\nF1000\nM4 S500\nG1 X10.0 Y10.0\nM5 S0\n"
+
+        st = MachineSettings()
+        validator = GCodeValidator(st)
+        rep = validator.validate(gcode)
+        self.assertTrue(rep.is_valid, f"Expected valid, got errors: {rep.errors}")
+        self.assertFalse(any(e.error_code == "GRBL_BUFFER_OVERFLOW" for e in rep.errors))
+
+        # M106 mode test
+        m106_code = "G21\nG90\nF1000\nM106 S255\nG1 X20.0 Y20.0\nM107\n"
+        rep_default = validator.validate(m106_code)
+        self.assertTrue(any(e.error_code == "GRBL_ERR_20_MARLIN" for e in rep_default.errors))
+
+        st.laser_mode = "M106"
+        val_m106 = GCodeValidator(st)
+        rep_m106 = val_m106.validate(m106_code)
+        self.assertFalse(any(e.error_code == "GRBL_ERR_20_MARLIN" for e in rep_m106.errors))
+
+    def test_repair_gcode_no_inline_comments(self):
+        """GCodeValidator.repair_gcode must not inject inline semicolon comments."""
+        from laserforge.core.gcode_validator import GCodeValidator
+
+        bad_code = "G1 X10 Y10\n" # Missing headers, missing feed, missing laser shutoff
+        repaired, repairs = GCodeValidator.repair_gcode(bad_code)
+        self.assertGreater(len(repairs), 0)
+
+        for line in repaired.splitlines():
+            cl = line.strip()
+            if not cl or cl.startswith(";"):
+                continue
+            self.assertNotIn(";", cl, f"Inline comment found in repaired line: '{cl}'")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

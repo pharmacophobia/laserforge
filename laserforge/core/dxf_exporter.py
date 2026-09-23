@@ -5,11 +5,19 @@ to standard AutoCAD DXF files (R2010 format) with millimeter units
 and LightBurn-compatible layer color mappings.
 """
 
+from __future__ import annotations
 from typing import List, Tuple, Optional
 import os
 import math
-import ezdxf
-from ezdxf.colors import rgb2int
+
+try:
+    import ezdxf
+    from ezdxf.colors import rgb2int
+    HAS_EZDXF = True
+except ImportError:
+    HAS_EZDXF = False
+    ezdxf = None
+    rgb2int = None
 
 from laserforge.config import LAYER_PALETTE
 from laserforge.core.models import (

@@ -6,9 +6,17 @@ Canny edge sketch detection, sub-pixel Ramer-Douglas-Peucker polygon simplificat
 corner-preserving Chaikin curve smoothing.
 """
 
+from __future__ import annotations
 from typing import List, Tuple, Dict, Optional, Any
 import math
-import cv2
+
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+    cv2 = None
+
 import numpy as np
 from PIL import Image
 

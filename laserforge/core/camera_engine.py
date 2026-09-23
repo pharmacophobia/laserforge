@@ -29,7 +29,7 @@ DEFAULT_CALIBRATION_FILE = os.path.expanduser("~/.laserforge/camera_calibration.
 
 @dataclass
 class CameraCalibrationData:
-    device_index: int = 0
+    device_index: Any = 0
     device_name: str = "USB Laser Camera"
     resolution: Tuple[int, int] = (1920, 1080)
     camera_matrix: Optional[np.ndarray] = None  # 3x3 intrinsic K
@@ -397,6 +397,15 @@ class CameraEngine:
             except Exception:
                 pass
 
+        # Add PiBridge / Network Wireless Camera
+        cameras.append({
+            "index": "http://laserbridge.local:8080/stream",
+            "name": "PiBridge Wireless Camera (http://laserbridge.local:8080/stream)",
+            "device_path": "http://laserbridge.local:8080/stream",
+            "is_mock": False,
+            "is_network": True
+        })
+
         # Always append Simulated Camera for testing / development
         cameras.append({
             "index": -1,
@@ -407,9 +416,10 @@ class CameraEngine:
 
         return cameras
 
-    def open_camera(self, device_index: int = 0, width: int = 1920, height: int = 1080) -> bool:
+    def open_camera(self, device_index: Any = 0, width: int = 1920, height: int = 1080) -> bool:
         """
-        Opens camera stream at specified resolution.
+        Opens camera stream at specified resolution. Supports physical USB index (int),
+        network stream URL (str starting with http://, https://, rtsp://), or simulated (-1).
         """
         self.close_camera()
 
@@ -420,13 +430,29 @@ class CameraEngine:
             self.calibration.resolution = (width, height)
             return True
 
+        is_net = isinstance(device_index, str) and device_index.startswith(("http://", "https://", "rtsp://"))
+        if is_net:
+            try:
+                self.cap = cv2.VideoCapture(device_index)
+                if self.cap.isOpened():
+                    self.is_mock = False
+                    self.calibration.device_index = device_index
+                    self.calibration.device_name = f"PiBridge Camera ({device_index})"
+                    actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    self.calibration.resolution = (actual_w or width, actual_h or height)
+                    return True
+            except Exception as e:
+                print(f"Could not open network camera {device_index}: {e}")
+
         try:
-            self.cap = cv2.VideoCapture(device_index)
+            target_idx = int(device_index) if not is_net else 0
+            self.cap = cv2.VideoCapture(target_idx)
             if self.cap.isOpened():
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
                 self.is_mock = False
-                self.calibration.device_index = device_index
+                self.calibration.device_index = target_idx
                 actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 self.calibration.resolution = (actual_w, actual_h)

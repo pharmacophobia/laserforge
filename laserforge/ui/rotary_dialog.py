@@ -318,10 +318,13 @@ class RotaryDialog(QDialog):
         test_settings.rotary_invert_dir = self.chk_invert.isChecked()
 
         gcode = RotaryEngine.generate_test_rotation_gcode(test_settings)
-        for line in gcode.splitlines():
-            cl = line.strip()
-            if cl and not cl.startswith(";"):
-                self.serial.send_command(cl)
+        if hasattr(self.serial, "start_job") and callable(self.serial.start_job):
+            self.serial.start_job(gcode)
+        else:
+            for line in gcode.splitlines():
+                cl = line.strip()
+                if cl and not cl.startswith(";"):
+                    self.serial.send_command(cl)
 
         QMessageBox.information(
             self, "360° Rotation Dispatched",

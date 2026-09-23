@@ -110,11 +110,11 @@ class RotaryEngine:
 
         lines = [
             "; --- LaserForge Rotary 360° Calibration Test ---",
-            "G91          ; Relative positioning",
-            f"G0 Y{signed_dist:.3f} F{feedrate:.0f} ; Rotate +360°",
-            "G4 P0.5      ; Dwell pause 0.5s",
-            f"G0 Y{-signed_dist:.3f} F{feedrate:.0f} ; Return -360°",
-            "G90          ; Restore absolute positioning",
+            "G91",
+            f"G0 Y{signed_dist:.3f} F{feedrate:.0f}",
+            "G4 P0.5",
+            f"G0 Y{-signed_dist:.3f} F{feedrate:.0f}",
+            "G90",
             "; --- Test Complete ---"
         ]
         return "\n".join(lines)

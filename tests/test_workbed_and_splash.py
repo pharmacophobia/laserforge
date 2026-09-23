@@ -63,7 +63,7 @@ class TestWorkbedSetupDialog(unittest.TestCase):
     """Tests for WorkbedSetupDialog and WorkbedPreviewWidget."""
 
     def setUp(self):
-        self.settings = MachineSettings(bed_width=400.0, bed_height=400.0, origin_corner="Bottom-Left")
+        self.settings = MachineSettings(bed_width=400.0, bed_height=400.0, origin_corner="Bottom-Left", rapid_speed=3000.0)
         self.layer_manager = LayerManager()
         self.scene = LaserCanvasScene(self.layer_manager)
         self.virtual_grbl = VirtualGrblSerial()

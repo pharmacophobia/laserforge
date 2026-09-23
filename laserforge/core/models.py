@@ -19,7 +19,7 @@ class LayerCutSettings:
     power_min: float = 20.0  # % (0-100)
     passes: int = 1
     z_step: float = 0.0  # mm step down per pass
-    line_interval: float = 0.1  # mm spacing for raster fill (~254 DPI)
+    line_interval: float = 0.085  # mm spacing for raster fill (~300 DPI, optimal diode spot match)
     fill_angle: float = 0.0  # degrees
     cross_hatch: bool = False
     air_assist: bool = False

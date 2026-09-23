@@ -341,6 +341,7 @@ class MainWindow(QMainWindow):
         self.actions.barcode_studio.triggered.connect(self.open_barcode_designer)
 
         self.actions.sdxl_turbo.triggered.connect(self.open_sdxl_turbo_studio)
+        self.actions.ai_assistant.triggered.connect(self.open_ai_assistant)
 
         self.actions.crop_image.triggered.connect(self.open_crop_tool_for_selected)
 
@@ -394,6 +395,7 @@ class MainWindow(QMainWindow):
         self.actions.burn_perimeter.triggered.connect(lambda: self.open_burn_perimeter_tool())
 
         self.actions.start_job.triggered.connect(self.start_job)
+        self.actions.resume_job.triggered.connect(self.open_resume_job_dialog)
 
         self.actions.pause_job.triggered.connect(self._toggle_pause_job)
 
@@ -457,10 +459,18 @@ class MainWindow(QMainWindow):
         )
         self.console_panel = ConsolePanel(self.serial_ctrl, self)
         self.props_panel = ShapePropertiesPanel(self.scene, self)
+        from laserforge.ui.ai_assistant_panel import AIAssistantPanel
+        self.ai_panel = AIAssistantPanel(
+            settings=self.settings,
+            scene=self.scene,
+            camera_engine=self.camera_engine,
+            parent=self
+        )
 
         tab_widget.addTab(self.laser_panel, "Laser")
         tab_widget.addTab(self.console_panel, "Console")
         tab_widget.addTab(self.props_panel, "Properties")
+        tab_widget.addTab(self.ai_panel, "🤖 AI Copilot")
         self.right_tab_widget = tab_widget
 
         right_tab_dock.setWidget(tab_widget)
@@ -544,6 +554,7 @@ class MainWindow(QMainWindow):
 
         # Laser control signals
         self.laser_panel.start_job_requested.connect(self.start_job)
+        self.laser_panel.resume_job_requested.connect(self.open_resume_job_dialog)
         self.laser_panel.simulate_job_requested.connect(self.preview_simulation)
         self.laser_panel.frame_job_requested.connect(self.frame_job)
         self.laser_panel.contour_frame_job_requested.connect(self.contour_frame_job)
@@ -1805,7 +1816,7 @@ class MainWindow(QMainWindow):
     def open_box_studio(self):
         """Opens the Parametric Box & Finger-Joint Enclosure Studio dialog."""
         from laserforge.ui.box_dialog import BoxGeneratorDialog
-        dlg = BoxGeneratorDialog(parent=self)
+        dlg = BoxGeneratorDialog(settings=self.settings, parent=self)
         dlg.panels_generated.connect(self._on_box_panels_generated)
         dlg.exec()
 
@@ -2152,6 +2163,79 @@ class MainWindow(QMainWindow):
                 self.serial_ctrl.resume_job()
             else:
                 self.serial_ctrl.pause_job()
+
+    def open_resume_job_dialog(self):
+        """Opens the Resume Job Dialog to resume from a specific percentage or line number."""
+        if not self.serial_ctrl.is_connected:
+            QMessageBox.warning(self, "Laser Not Connected", "Please connect to your laser engraver first in the Laser tab.")
+            return
+
+        if self.serial_ctrl.machine_state == "Alarm":
+            QMessageBox.warning(
+                self, "Machine in ALARM State",
+                "<b>Laser is currently locked in ALARM state!</b><br><br>"
+                "Please ensure the carriage is clear and click <b>'Unlock ($X)'</b> before resuming."
+            )
+            return
+
+        # Determine base G-code to resume
+        base_gcode = getattr(self.serial_ctrl, "last_job_gcode", "")
+        last_line_idx = getattr(self.serial_ctrl, "last_stopped_line_idx", 0)
+
+        # If no previous streamed job in memory, generate from current canvas entities
+        if not base_gcode:
+            entities = self.scene.get_all_entities()
+            if not entities:
+                QMessageBox.warning(
+                    self, "No Job Available",
+                    "No previous laser job found in memory, and the canvas is empty.<br>"
+                    "Please create or open artwork to resume from."
+                )
+                return
+            try:
+                job = self.gcode_gen.generate_job(entities)
+                base_gcode = job.gcode
+            except Exception as e:
+                QMessageBox.critical(self, "Generation Error", f"Failed to generate G-code from canvas: {e}")
+                return
+
+        from laserforge.ui.resume_job_dialog import ResumeJobDialog
+        try:
+            dlg = ResumeJobDialog(
+                gcode_text=base_gcode,
+                initial_line_idx=last_line_idx,
+                parent=self,
+                rapid_speed=getattr(self.settings, "rapid_speed", 3000.0)
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Resume Error", f"Cannot initialize resume dialog: {e}")
+            return
+
+        if dlg.exec() != ResumeJobDialog.DialogCode.Accepted:
+            return
+
+        resumed_gcode = dlg.get_resumed_gcode()
+
+        # Final Confirmation
+        res = QMessageBox.question(
+            self, "Confirm Resumed Laser Burn",
+            f"<b>Execute Resumed Laser Job?</b><br><br>"
+            f"Target line: <b>#{dlg.line_spin.value()}</b> ({dlg.pct_spin.value():.1f}%)<br>"
+            f"• Rapid positioning move will execute with <b>laser completely off (M5)</b>.<br>"
+            f"• Ensure workpiece has not shifted on the bed!",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if res != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.serial_ctrl.start_job(resumed_gcode)
+            self.statusBar().showMessage(
+                f"Resumed laser job started from line {dlg.line_spin.value()} ({dlg.pct_spin.value():.1f}%).",
+                4000
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Execution Error", f"Failed to stream resumed G-code: {e}")
 
     def open_machine_settings(self):
         dlg = MachineSettingsDialog(self.settings, parent=self, serial_ctrl=self.serial_ctrl)
@@ -2932,6 +3016,18 @@ class MainWindow(QMainWindow):
                 self.open_sdxl_turbo_studio(initial_image_path=path)
                 return
         self.open_sdxl_turbo_studio()
+
+    def open_ai_assistant(self):
+        """Switches to the AI Copilot tab in the right dock and focuses the prompt input."""
+        if hasattr(self, "right_tab_dock"):
+            self.right_tab_dock.show()
+            self.right_tab_dock.raise_()
+        if hasattr(self, "right_tab_widget") and hasattr(self, "ai_panel"):
+            idx = self.right_tab_widget.indexOf(self.ai_panel)
+            if idx >= 0:
+                self.right_tab_widget.setCurrentIndex(idx)
+        if hasattr(self, "ai_panel") and hasattr(self.ai_panel, "input_edit"):
+            self.ai_panel.input_edit.setFocus()
 
     def _init_auto_import_watcher(self):
         """Monitors ~/.laserforge/imported_queue for images dispatched from standalone SDXL Turbo."""

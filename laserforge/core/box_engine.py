@@ -92,7 +92,7 @@ class BoxEngine:
             b_s = (p_start[0] + dx * dist_start, p_start[1] + dy * dist_start)
             b_e = (p_start[0] + dx * dist_end, p_start[1] + dy * dist_end)
 
-            is_tab_raised = (i % 2 == 0) if is_male else (i % 2 != 0)
+            is_tab_raised = (i % 2 == 0)
 
             if is_male:
                 if is_tab_raised:
@@ -211,6 +211,64 @@ class BoxEngine:
         return cleaned
 
     @classmethod
+    def calculate_dimensions(
+        cls,
+        width: float,
+        depth: float,
+        height: float,
+        thickness: float = 3.0,
+        style: str = "6-sided",
+        dimension_mode: str = "outer"
+    ) -> Dict[str, float]:
+        """
+        Calculates both external footprint and internal usable cavity dimensions.
+
+        Parameters:
+            width: Width in mm
+            depth: Depth in mm
+            height: Height in mm
+            thickness: Material sheet thickness in mm
+            style: "6-sided", "open-top", or "sliding-lid"
+            dimension_mode: "outer" (external envelope) or "inner" (interior usable cavity)
+
+        Returns:
+            Dict containing outer_w, outer_d, outer_h, inner_w, inner_d, inner_h
+        """
+        if dimension_mode == "inner":
+            inner_w = max(1.0, width)
+            inner_d = max(1.0, depth)
+            inner_h = max(1.0, height)
+            outer_w = inner_w + 2.0 * thickness
+            outer_d = inner_d + 2.0 * thickness
+            if style == "6-sided":
+                outer_h = inner_h + 2.0 * thickness
+            elif style == "open-top":
+                outer_h = inner_h + thickness
+            else:  # sliding-lid
+                outer_h = inner_h + 5.0 + 2.0 * thickness
+        else:
+            outer_w = max(1.0, width)
+            outer_d = max(1.0, depth)
+            outer_h = max(1.0, height)
+            inner_w = max(0.0, outer_w - 2.0 * thickness)
+            inner_d = max(0.0, outer_d - 2.0 * thickness)
+            if style == "6-sided":
+                inner_h = max(0.0, outer_h - 2.0 * thickness)
+            elif style == "open-top":
+                inner_h = max(0.0, outer_h - thickness)
+            else:  # sliding-lid
+                inner_h = max(0.0, outer_h - 5.0 - 2.0 * thickness)
+
+        return {
+            "outer_w": outer_w,
+            "outer_d": outer_d,
+            "outer_h": outer_h,
+            "inner_w": inner_w,
+            "inner_d": inner_d,
+            "inner_h": inner_h,
+        }
+
+    @classmethod
     def generate_box(
         cls,
         width: float,
@@ -223,10 +281,23 @@ class BoxEngine:
         dividers_x: int = 0,
         dividers_y: int = 0,
         joint_type: str = "finger",
-        dovetail_angle: float = 10.0
+        dovetail_angle: float = 10.0,
+        dimension_mode: str = "outer"
     ) -> List[BoxPanel]:
         """
         Generates all flat panels required to assemble the box.
+
+        Parameters:
+            width: Width in mm (either outer footprint or inner cavity based on dimension_mode)
+            depth: Depth in mm
+            height: Height in mm
+            thickness: Material thickness in mm
+            finger_width: Target finger width in mm
+            kerf: Laser kerf compensation in mm
+            style: "6-sided", "open-top", or "sliding-lid"
+            joint_type: "finger" or "dovetail"
+            dovetail_angle: Dovetail flare angle in degrees
+            dimension_mode: "outer" (outer footprint) or "inner" (interior usable cavity)
 
         Box panels:
         - Bottom: width x depth
@@ -236,21 +307,29 @@ class BoxEngine:
         - Right: depth x height
         - Top: width x depth (for 6-sided or sliding-lid)
         """
+        dims = cls.calculate_dimensions(
+            width=width, depth=depth, height=height, thickness=thickness,
+            style=style, dimension_mode=dimension_mode
+        )
+        eff_width = dims["outer_w"]
+        eff_depth = dims["outer_d"]
+        eff_height = dims["outer_h"]
+
         panels: List[BoxPanel] = []
 
         is_open_top = (style == "open-top")
         is_sliding_lid = (style == "sliding-lid")
 
-        # 1. BOTTOM PANEL: width x depth
+        # 1. BOTTOM PANEL: eff_width x eff_depth
         # Bottom receives tabs from Front, Back, Left, Right -> female on all 4 sides
         bot_edges = {"bottom": "female", "right": "female", "top": "female", "left": "female"}
         bot_outline = cls.generate_panel_outline(
-            width, depth, thickness, finger_width, bot_edges, kerf=kerf,
+            eff_width, eff_depth, thickness, finger_width, bot_edges, kerf=kerf,
             joint_type=joint_type, dovetail_angle=dovetail_angle
         )
-        panels.append(BoxPanel(name="Bottom", width=width, height=depth, outline=bot_outline, internal_cutouts=[]))
+        panels.append(BoxPanel(name="Bottom", width=eff_width, height=eff_depth, outline=bot_outline, internal_cutouts=[]))
 
-        # 2. FRONT PANEL: width x height
+        # 2. FRONT PANEL: eff_width x eff_height
         # Bottom: male (fits bottom female)
         # Left: male (fits left side female)
         # Right: male (fits right side female)
@@ -258,19 +337,19 @@ class BoxEngine:
         front_top = "female" if (not is_open_top and not is_sliding_lid) else "flat"
         front_edges = {"bottom": "male", "right": "male", "top": front_top, "left": "male"}
         front_outline = cls.generate_panel_outline(
-            width, height, thickness, finger_width, front_edges, kerf=kerf,
+            eff_width, eff_height, thickness, finger_width, front_edges, kerf=kerf,
             joint_type=joint_type, dovetail_angle=dovetail_angle
         )
-        panels.append(BoxPanel(name="Front", width=width, height=height, outline=front_outline, internal_cutouts=[]))
+        panels.append(BoxPanel(name="Front", width=eff_width, height=eff_height, outline=front_outline, internal_cutouts=[]))
 
-        # 3. BACK PANEL: width x height (same joint structure as Front)
+        # 3. BACK PANEL: eff_width x eff_height (same joint structure as Front)
         back_outline = cls.generate_panel_outline(
-            width, height, thickness, finger_width, front_edges, kerf=kerf,
+            eff_width, eff_height, thickness, finger_width, front_edges, kerf=kerf,
             joint_type=joint_type, dovetail_angle=dovetail_angle
         )
-        panels.append(BoxPanel(name="Back", width=width, height=height, outline=back_outline, internal_cutouts=[]))
+        panels.append(BoxPanel(name="Back", width=eff_width, height=eff_height, outline=back_outline, internal_cutouts=[]))
 
-        # 4. LEFT PANEL: depth x height
+        # 4. LEFT PANEL: eff_depth x eff_height
         # Bottom: male (fits bottom female)
         # Left (meets Back): female (receives Back male)
         # Right (meets Front): female (receives Front male)
@@ -278,42 +357,42 @@ class BoxEngine:
         side_top = "female" if (not is_open_top and not is_sliding_lid) else "flat"
         left_edges = {"bottom": "male", "right": "female", "top": side_top, "left": "female"}
         left_outline = cls.generate_panel_outline(
-            depth, height, thickness, finger_width, left_edges, kerf=kerf,
+            eff_depth, eff_height, thickness, finger_width, left_edges, kerf=kerf,
             joint_type=joint_type, dovetail_angle=dovetail_angle
         )
 
         left_cutouts = []
         if is_sliding_lid:
             # Slot for sliding lid: 3mm from top rim, thickness tall, depth long
-            slot_y = height - 5.0 - thickness
+            slot_y = eff_height - 5.0 - thickness
             left_cutouts.append([
-                (thickness, slot_y), (depth - thickness, slot_y),
-                (depth - thickness, slot_y + thickness), (thickness, slot_y + thickness),
+                (thickness, slot_y), (eff_depth - thickness, slot_y),
+                (eff_depth - thickness, slot_y + thickness), (thickness, slot_y + thickness),
                 (thickness, slot_y)
             ])
-        panels.append(BoxPanel(name="Left", width=depth, height=height, outline=left_outline, internal_cutouts=left_cutouts))
+        panels.append(BoxPanel(name="Left", width=eff_depth, height=eff_height, outline=left_outline, internal_cutouts=left_cutouts))
 
-        # 5. RIGHT PANEL: depth x height (same joint structure as Left)
+        # 5. RIGHT PANEL: eff_depth x eff_height (same joint structure as Left)
         right_outline = cls.generate_panel_outline(
-            depth, height, thickness, finger_width, left_edges, kerf=kerf,
+            eff_depth, eff_height, thickness, finger_width, left_edges, kerf=kerf,
             joint_type=joint_type, dovetail_angle=dovetail_angle
         )
         right_cutouts = []
         if is_sliding_lid:
-            slot_y = height - 5.0 - thickness
+            slot_y = eff_height - 5.0 - thickness
             right_cutouts.append([
-                (thickness, slot_y), (depth - thickness, slot_y),
-                (depth - thickness, slot_y + thickness), (thickness, slot_y + thickness),
+                (thickness, slot_y), (eff_depth - thickness, slot_y),
+                (eff_depth - thickness, slot_y + thickness), (thickness, slot_y + thickness),
                 (thickness, slot_y)
             ])
-        panels.append(BoxPanel(name="Right", width=depth, height=height, outline=right_outline, internal_cutouts=right_cutouts))
+        panels.append(BoxPanel(name="Right", width=eff_depth, height=eff_height, outline=right_outline, internal_cutouts=right_cutouts))
 
         # 6. TOP PANEL (if not open-top)
         if not is_open_top:
             if is_sliding_lid:
                 # Sliding lid slides into side slots: slightly narrower than width
-                lid_w = width - (thickness * 2.0) + (thickness * 1.5)
-                lid_d = depth - thickness
+                lid_w = eff_width - (thickness * 2.0) + (thickness * 1.5)
+                lid_d = eff_depth - thickness
                 # Flat rectangular lid with finger notch
                 lid_outline = [
                     (0.0, 0.0), (lid_w, 0.0), (lid_w, lid_d), (0.0, lid_d), (0.0, 0.0)
@@ -331,10 +410,10 @@ class BoxEngine:
                 # Standard enclosed top: receives tabs from all 4 walls (female on all sides)
                 top_edges = {"bottom": "female", "right": "female", "top": "female", "left": "female"}
                 top_outline = cls.generate_panel_outline(
-                    width, depth, thickness, finger_width, top_edges, kerf=kerf,
+                    eff_width, eff_depth, thickness, finger_width, top_edges, kerf=kerf,
                     joint_type=joint_type, dovetail_angle=dovetail_angle
                 )
-                panels.append(BoxPanel(name="Top", width=width, height=depth, outline=top_outline, internal_cutouts=[]))
+                panels.append(BoxPanel(name="Top", width=eff_width, height=eff_depth, outline=top_outline, internal_cutouts=[]))
 
         return panels
 
@@ -346,20 +425,23 @@ class BoxEngine:
         start_y: float = 10.0,
         spacing: float = 8.0,
         layer_id: int = 0,
-        include_labels: bool = True
+        include_labels: bool = True,
+        max_sheet_w: float = 400.0
     ) -> List[LaserEntity]:
         """
         Arranges the generated 2D panels flat side-by-side with spacing and converts them into PathEntities.
+        Automatically wraps rows respecting max_sheet_w while ensuring wide panels do not cause overlap.
         """
         entities: List[LaserEntity] = []
         cur_x = start_x
         cur_y = start_y
         row_max_h = 0.0
-        max_sheet_w = 400.0  # wrap to next row if exceeding standard sheet width
+        max_panel_w = max((p.width for p in panels), default=0.0)
+        effective_sheet_w = max(max_sheet_w, max_panel_w + start_x + 10.0)
 
         for p in panels:
             # Check row wrapping
-            if cur_x + p.width > max_sheet_w and cur_x > start_x:
+            if cur_x + p.width > effective_sheet_w and cur_x > start_x:
                 cur_x = start_x
                 cur_y += row_max_h + spacing
                 row_max_h = 0.0

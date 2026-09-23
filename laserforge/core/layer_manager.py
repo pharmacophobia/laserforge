@@ -32,7 +32,7 @@ class LayerManager:
                 power_max=30.0,
                 power_min=10.0,
                 passes=1,
-                line_interval=0.1,
+                line_interval=0.085,
                 fill_angle=0.0,
                 air_assist=False,
                 output_enabled=not is_tool,

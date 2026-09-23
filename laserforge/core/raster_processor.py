@@ -18,6 +18,12 @@ try:
 except ImportError:
     HAS_CV2 = False
 
+try:
+    import scipy.ndimage as ndi
+    HAS_SCIPY_NDI = True
+except ImportError:
+    HAS_SCIPY_NDI = False
+
 from laserforge.core.gpu_accelerator import GPUAccelerator
 
 try:
@@ -792,9 +798,9 @@ class RasterProcessor:
         if not np.any(burn_mask):
             return []
 
-        # If OpenCV is unavailable or image is too small to partition, return single full image
+        # If neither OpenCV nor SciPy is available or image is too small to partition, return single full image
         sep_px = int(round(max(2.0, min_separation_mm) / max(0.01, line_interval_mm)))
-        if not HAS_CV2 or sep_px <= 2 or w < sep_px:
+        if (not HAS_CV2 and not HAS_SCIPY_NDI) or sep_px <= 2 or w < sep_px:
             return [{
                 "sub_array": raster_arr,
                 "origin_x_mm": origin_x_mm,
@@ -807,10 +813,32 @@ class RasterProcessor:
             # Dilate burn mask to merge nearby details into continuous islands
             kw = max(3, sep_px)
             kh = max(3, sep_px // 2)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh))
-            dilated = cv2.dilate(burn_mask, kernel)
 
-            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
+            if HAS_CV2:
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh))
+                dilated = cv2.dilate(burn_mask, kernel)
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, connectivity=8)
+            elif HAS_SCIPY_NDI:
+                structure = np.ones((kh, kw), dtype=bool)
+                dilated = ndi.binary_dilation(burn_mask, structure=structure)
+                conn = np.ones((3, 3), dtype=int)
+                labels, num_labels_count = ndi.label(dilated, structure=conn)
+                num_labels = num_labels_count + 1
+                stats = [None] * num_labels
+                for lbl in range(1, num_labels):
+                    where = np.where(labels == lbl)
+                    if len(where[0]) == 0:
+                        stats[lbl] = (0, 0, 0, 0, 0)
+                        continue
+                    ly = int(np.min(where[0]))
+                    lh = int(np.max(where[0]) - ly + 1)
+                    lx = int(np.min(where[1]))
+                    lw = int(np.max(where[1]) - lx + 1)
+                    area = len(where[0])
+                    stats[lbl] = (lx, ly, lw, lh, area)
+            else:
+                raise RuntimeError("No morphological segmentation provider available")
+
             islands = []
             for lbl in range(1, num_labels):
                 lx, ly, lw, lh, area = stats[lbl]

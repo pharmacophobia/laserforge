@@ -22,6 +22,7 @@ Key Geometric & Optimization Constraints:
    serpentine (zig-zag) optimization for high-speed diode/CO2 laser engraving.
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Set, Optional, Any
 import math
@@ -29,14 +30,27 @@ import random
 import os
 import concurrent.futures
 import numpy as np
-from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString, GeometryCollection
-from shapely.ops import polygonize, unary_union
-import shapely.affinity
+
 try:
-    from shapely.validation import make_valid
+    from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString, GeometryCollection
+    from shapely.ops import polygonize, unary_union
+    import shapely.affinity
+    try:
+        from shapely.validation import make_valid
+    except ImportError:
+        def make_valid(geom):
+            return geom.buffer(0)
+    HAS_SHAPELY = True
 except ImportError:
-    def make_valid(geom):
-        return geom.buffer(0)
+    HAS_SHAPELY = False
+    Polygon = None
+    MultiPolygon = None
+    LineString = None
+    MultiLineString = None
+    GeometryCollection = None
+    polygonize = None
+    unary_union = None
+    make_valid = None
 
 from laserforge.core.models import LaserEntity, PathEntity
 from laserforge.core.geometry_boolean import entity_to_painter_path

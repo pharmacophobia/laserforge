@@ -4,11 +4,22 @@ Provides automatic topological kerf offsets (outward for perimeters, inward for 
 tangential/arc/perpendicular lead-ins, lead-outs, and overcut path extensions.
 """
 
+from __future__ import annotations
 import math
 from typing import List, Tuple, Optional, Dict, Any, Union
-import shapely
-import shapely.affinity
-from shapely.geometry import Polygon, MultiPolygon, LineString, LinearRing
+
+try:
+    import shapely
+    import shapely.affinity
+    from shapely.geometry import Polygon, MultiPolygon, LineString, LinearRing
+    HAS_SHAPELY = True
+except ImportError:
+    HAS_SHAPELY = False
+    shapely = None
+    Polygon = None
+    MultiPolygon = None
+    LineString = None
+    LinearRing = None
 
 
 Point2D = Tuple[float, float]

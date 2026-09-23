@@ -176,7 +176,9 @@ class GCodeValidator:
                 continue
 
             # Check 1: Maximum buffer line length (GRBL line buffer is 256 bytes)
-            if len(raw_line) > 256:
+            # Pure comment lines (starting with ; or () never enter GRBL's line buffer.
+            # Any command or mixed line exceeding 256 bytes triggers buffer overflow.
+            if not line_str.startswith(";") and not line_str.startswith("(") and len(raw_line) > 256:
                 issues.append(ValidationIssue(
                     line_number=line_idx,
                     line_text=raw_line[:60] + "...",
@@ -233,14 +235,18 @@ class GCodeValidator:
 
                 # 3D printer Marlin check
                 if word_str in self.MARLIN_3D_CODES:
-                    issues.append(ValidationIssue(
-                        line_number=line_idx,
-                        line_text=raw_line,
-                        severity="error",
-                        error_code="GRBL_ERR_20_MARLIN",
-                        message=f"Unsupported 3D-printer command '{word_str}' ({self.MARLIN_3D_CODES[word_str]}). "
-                                f"Will cause GRBL error:20."
-                    ))
+                    laser_mode = getattr(self.settings, "laser_mode", "M4")
+                    if word_str in ("M106", "M107") and laser_mode == "M106":
+                        pass
+                    else:
+                        issues.append(ValidationIssue(
+                            line_number=line_idx,
+                            line_text=raw_line,
+                            severity="error",
+                            error_code="GRBL_ERR_20_MARLIN",
+                            message=f"Unsupported 3D-printer command '{word_str}' ({self.MARLIN_3D_CODES[word_str]}). "
+                                    f"Will cause GRBL error:20."
+                        ))
                 elif letter == "E":
                     issues.append(ValidationIssue(
                         line_number=line_idx,
@@ -284,7 +290,19 @@ class GCodeValidator:
                 # M codes
                 elif letter == "M":
                     norm_m = f"M{int(num_val)}" if num_val.is_integer() else f"M{num_val}"
-                    if norm_m not in self.MODAL_GROUPS_M:
+                    is_m106_laser_mode = getattr(self.settings, "laser_mode", "M4") == "M106"
+
+                    if norm_m in ("M106", "M107") and is_m106_laser_mode:
+                        # M106/M107 are legitimate laser control commands when laser_mode == "M106"
+                        # M106 = laser ON (equivalent to M3/M4), M107 = laser OFF (equivalent to M5)
+                        cur_laser_cmd = norm_m
+                        if norm_m == "M106":
+                            if cur_s_value > 0:
+                                laser_ever_fired = True
+                                laser_off_at_end = False
+                        elif norm_m == "M107":
+                            laser_off_at_end = True
+                    elif norm_m not in self.MODAL_GROUPS_M:
                         issues.append(ValidationIssue(
                             line_number=line_idx,
                             line_text=raw_line,
@@ -340,7 +358,7 @@ class GCodeValidator:
                                 message=f"Laser power S{cur_s_value:.0f} exceeds configured maximum ($30={max_power}). "
                                         f"GRBL will clamp to max power."
                             ))
-                        if cur_s_value > 0 and cur_laser_cmd in ("M3", "M4"):
+                        if cur_s_value > 0 and cur_laser_cmd in ("M3", "M4", "M106"):
                             laser_ever_fired = True
                             laser_off_at_end = False
                         elif cur_s_value == 0:
@@ -387,13 +405,14 @@ class GCodeValidator:
 
                 # Rapid transit safety check
                 if active_motion == "G0":
-                    if cur_laser_cmd == "M3" and cur_s_value > 0:
+                    if cur_laser_cmd in ("M3", "M106") and cur_s_value > 0:
+                        mode_label = "M3" if cur_laser_cmd == "M3" else "M106"
                         issues.append(ValidationIssue(
                             line_number=line_idx,
                             line_text=raw_line,
                             severity="warning",
                             error_code="RAPID_MOVE_BURN_HAZARD",
-                            message=f"Rapid move (G0) while constant laser power (M3, S{cur_s_value:.0f}) is ON. "
+                            message=f"Rapid move (G0) while constant laser power ({mode_label}, S{cur_s_value:.0f}) is ON. "
                                     f"May burn unintended diagonal lines across workpiece."
                         ))
 
@@ -872,7 +891,7 @@ class GCodeValidator:
 
             # Rapid move G0 with laser on
             if active_motion == "G0" and active_laser in ("M3", "M4") and active_s > 0:
-                output_lines.append("M5 S0 ; Extinguish laser before rapid move (auto-repair)")
+                output_lines.append("M5 S0")
                 repairs.append(f"Extinguished laser (M5) before rapid move G0 (L{line_idx})")
                 active_laser = "M5"
                 active_s = 0.0
@@ -892,17 +911,17 @@ class GCodeValidator:
 
         # Prepend headers if missing
         if not has_g90:
-            output_lines.insert(0, "G90 ; Set Absolute Distance Mode (auto-repair)")
+            output_lines.insert(0, "G90")
             repairs.append("Prepended G90 absolute distance mode header")
         if not has_g21:
-            output_lines.insert(0, "G21 ; Set Units to Millimeters (auto-repair)")
+            output_lines.insert(0, "G21")
             repairs.append("Prepended G21 millimeter units header")
 
         # Guarantee safety laser shutoff and origin park at end
         last_non_empty = [l.strip() for l in output_lines if l.strip() and not l.strip().startswith(";")]
         if not last_non_empty or not last_non_empty[-1].startswith("M5"):
-            output_lines.append("M5 S0 ; Safety laser shutoff (auto-repair)")
-            output_lines.append("G0 X0 Y0 ; Safe park at origin (auto-repair)")
+            output_lines.append("M5 S0")
+            output_lines.append("G0 X0 Y0")
             repairs.append("Appended safety laser shutoff (M5 S0) and return to origin at program end")
 
         repaired_text = "\n".join(output_lines)

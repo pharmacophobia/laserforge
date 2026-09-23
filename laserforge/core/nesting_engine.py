@@ -4,12 +4,23 @@ Provides high-efficiency 2D bin packing, rotational alignment (0°, 90°, 45° s
 sheet margin clearance, part-to-part spacing, and cavity/hole nesting.
 """
 
+from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Any, Optional
-import shapely
-from shapely.geometry import Polygon, MultiPolygon, box
-from shapely import affinity
+
+try:
+    import shapely
+    from shapely.geometry import Polygon, MultiPolygon, box
+    from shapely import affinity
+    HAS_SHAPELY = True
+except ImportError:
+    HAS_SHAPELY = False
+    shapely = None
+    Polygon = None
+    MultiPolygon = None
+    box = None
+    affinity = None
 
 from laserforge.core.models import (
     LaserEntity, RectEntity, CircleEntity, LineEntity, PathEntity, TextEntity

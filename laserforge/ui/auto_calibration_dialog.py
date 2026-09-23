@@ -115,6 +115,12 @@ class AutoCalibrationDialog(QDialog):
         self.setWindowTitle("LaserForge Auto-Calibration Studio — Workbed & Laser Vision Alignment")
         self.resize(1080, 680)
 
+        # Guard against swapped positional arguments (e.g. passing serial_ctrl as 2nd arg)
+        if isinstance(settings, SerialController):
+            if serial_ctrl is None:
+                serial_ctrl = settings
+            settings = None
+
         self.camera_engine = camera_engine
         self.settings = settings or MachineSettings()
         self.serial_ctrl = serial_ctrl
@@ -492,10 +498,13 @@ class AutoCalibrationDialog(QDialog):
             power_pct=self.engine.config.burn_power_pct
         )
 
-        for line in gcode.splitlines():
-            line = line.strip()
-            if line and not line.startswith(";"):
-                self.serial_ctrl.send_command(line)
+        if hasattr(self.serial_ctrl, "start_job") and callable(self.serial_ctrl.start_job):
+            self.serial_ctrl.start_job(gcode)
+        else:
+            for line in gcode.splitlines():
+                line = line.strip()
+                if line and not line.startswith(";"):
+                    self.serial_ctrl.send_command(line)
 
         self.lbl_status_msg.setText("🔥 Burning targets on laser bed...")
 

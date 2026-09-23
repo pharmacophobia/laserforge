@@ -4,11 +4,22 @@ Provides CAD boolean operations (Union/Weld, Difference/Subtract, Intersection, 
 directly on canvas vector entities using Shapely.
 """
 
+from __future__ import annotations
 from typing import List, Tuple, Optional, Any
 import math
-from shapely.geometry import Polygon, MultiPolygon, Point, box
-from shapely.ops import unary_union
-import shapely.affinity
+
+try:
+    from shapely.geometry import Polygon, MultiPolygon, Point, box
+    from shapely.ops import unary_union
+    import shapely.affinity
+    HAS_SHAPELY = True
+except ImportError:
+    HAS_SHAPELY = False
+    Polygon = None
+    MultiPolygon = None
+    Point = None
+    box = None
+    unary_union = None
 
 from laserforge.core.models import (
     LaserEntity, RectEntity, CircleEntity, LineEntity, PathEntity

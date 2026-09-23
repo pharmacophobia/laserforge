@@ -11,12 +11,21 @@ Supports:
   - Unit scaling (mm, inches, meters) from DXF $INSUNITS header
 """
 
+from __future__ import annotations
 from typing import List, Tuple, Dict, Optional, Any
 import os
 import math
-import ezdxf
-from ezdxf import path
-from ezdxf.colors import aci2rgb
+
+try:
+    import ezdxf
+    from ezdxf import path
+    from ezdxf.colors import aci2rgb
+    HAS_EZDXF = True
+except ImportError:
+    HAS_EZDXF = False
+    ezdxf = None
+    path = None
+    aci2rgb = None
 
 from laserforge.config import LAYER_PALETTE, DEFAULT_BED_WIDTH_MM, DEFAULT_BED_HEIGHT_MM
 from laserforge.core.models import (

@@ -30,4 +30,5 @@ __all__ = [
     "boolean_engine",
     "box_engine",
     "hershey_font",
+    "ai_assistant",
 ]

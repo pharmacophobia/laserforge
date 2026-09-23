@@ -4,7 +4,7 @@ Provides an interactive real-time 2D CAD studio for designing interlocking
 laser-cut boxes, enclosures, and sliding-lid cases with kerf compensation.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Any
 import math
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
@@ -54,7 +54,7 @@ class BoxPreviewWidget(QWidget):
         cur_y = 0.0
         row_max_h = 0.0
         panel_rects = []
-        max_sheet_w = 400.0
+        max_sheet_w = max(400.0, max((p.width for p in self.panels), default=400.0))
 
         for p in self.panels:
             if cur_x + p.width > max_sheet_w and cur_x > 0.0:
@@ -66,8 +66,8 @@ class BoxPreviewWidget(QWidget):
             if p.height > row_max_h:
                 row_max_h = p.height
 
-        total_w = max_sheet_w if cur_y > 0 else cur_x
-        total_h = cur_y + row_max_h
+        total_w = max((px + p.width for p, px, py in panel_rects), default=1.0)
+        total_h = max((py + p.height for p, px, py in panel_rects), default=1.0)
 
         if total_w <= 0 or total_h <= 0:
             return
@@ -134,11 +134,13 @@ class BoxGeneratorDialog(QDialog):
 
     panels_generated = pyqtSignal(list)  # List[LaserEntity]
 
-    def __init__(self, parent=None):
+    def __init__(self, settings: Optional[Any] = None, parent=None):
         super().__init__(parent)
+        self.settings = settings
         self.setWindowTitle("📦 Parametric Box & Finger-Joint Enclosure Studio")
-        self.resize(920, 560)
+        self.resize(960, 600)
         self._current_panels: List[BoxPanel] = []
+        self._updating_preset: bool = False
         self._init_ui()
         self._on_params_changed()
 
@@ -172,6 +174,14 @@ class BoxGeneratorDialog(QDialog):
         dim_group = QGroupBox("Enclosure Dimensions")
         dim_form = QFormLayout(dim_group)
 
+        self.combo_dim_mode = QComboBox()
+        self.combo_dim_mode.addItems([
+            "Outside Dimensions (Outer Footprint)",
+            "Inside Dimensions (Internal Usable Space)"
+        ])
+        self.combo_dim_mode.currentIndexChanged.connect(self._on_params_changed)
+        dim_form.addRow("Dimension Mode:", self.combo_dim_mode)
+
         self.spin_w = QDoubleSpinBox()
         self.spin_w.setRange(15.0, 1200.0)
         self.spin_w.setValue(100.0)
@@ -192,6 +202,14 @@ class BoxGeneratorDialog(QDialog):
         self.spin_h.setSuffix(" mm")
         self.spin_h.valueChanged.connect(self._on_params_changed)
         dim_form.addRow("Height (Z):", self.spin_h)
+
+        self.lbl_dim_summary = QLabel()
+        self.lbl_dim_summary.setStyleSheet(
+            "background-color: #24273a; border: 1px solid #363a4f; border-radius: 5px; "
+            "padding: 6px; color: #89b4fa; font-size: 11px; font-weight: bold;"
+        )
+        self.lbl_dim_summary.setWordWrap(True)
+        dim_form.addRow(self.lbl_dim_summary)
 
         left_layout.addWidget(dim_group)
 
@@ -244,6 +262,14 @@ class BoxGeneratorDialog(QDialog):
         self.combo_style.currentIndexChanged.connect(self._on_params_changed)
         mat_form.addRow("Enclosure Style:", self.combo_style)
 
+        self.lbl_joint_summary = QLabel()
+        self.lbl_joint_summary.setStyleSheet(
+            "background-color: #24273a; border: 1px solid #363a4f; border-radius: 5px; "
+            "padding: 6px; color: #a6e3a1; font-size: 11px;"
+        )
+        self.lbl_joint_summary.setWordWrap(True)
+        mat_form.addRow(self.lbl_joint_summary)
+
         left_layout.addWidget(mat_group)
 
         # 4. Options
@@ -290,11 +316,18 @@ class BoxGeneratorDialog(QDialog):
         main_layout.addWidget(splitter)
 
     def _on_preset_selected(self, index: int):
+        if index == 0:
+            return
+
+        self._updating_preset = True
         self.spin_w.blockSignals(True)
         self.spin_d.blockSignals(True)
         self.spin_h.blockSignals(True)
         self.spin_thick.blockSignals(True)
         self.combo_style.blockSignals(True)
+        self.combo_dim_mode.blockSignals(True)
+
+        self.combo_dim_mode.setCurrentIndex(0)  # Presets are outer dimensions
 
         if index == 1:  # Trinket
             self.spin_w.setValue(80.0)
@@ -332,6 +365,8 @@ class BoxGeneratorDialog(QDialog):
         self.spin_h.blockSignals(False)
         self.spin_thick.blockSignals(False)
         self.combo_style.blockSignals(False)
+        self.combo_dim_mode.blockSignals(False)
+        self._updating_preset = False
 
         self._on_params_changed()
 
@@ -341,6 +376,12 @@ class BoxGeneratorDialog(QDialog):
         self._on_params_changed()
 
     def _on_params_changed(self):
+        if not getattr(self, "_updating_preset", False):
+            if self.combo_preset.currentIndex() != 0:
+                self.combo_preset.blockSignals(True)
+                self.combo_preset.setCurrentIndex(0)
+                self.combo_preset.blockSignals(False)
+
         w = self.spin_w.value()
         d = self.spin_d.value()
         h = self.spin_h.value()
@@ -351,10 +392,38 @@ class BoxGeneratorDialog(QDialog):
         style = "6-sided" if style_idx == 0 else ("open-top" if style_idx == 1 else "sliding-lid")
         joint_type = "dovetail" if self.combo_joint_type.currentIndex() == 1 else "finger"
         dovetail_angle = self.spin_dovetail_angle.value()
+        dim_mode = "inner" if self.combo_dim_mode.currentIndex() == 1 else "outer"
+
+        dims = BoxEngine.calculate_dimensions(
+            width=w, depth=d, height=h, thickness=t, style=style, dimension_mode=dim_mode
+        )
+
+        mode_str = "Inside Cavity" if dim_mode == "inner" else "Outside Footprint"
+        self.lbl_dim_summary.setText(
+            f"📐 Input Mode: {mode_str}\n"
+            f"• Usable Interior: {dims['inner_w']:.1f} × {dims['inner_d']:.1f} × {dims['inner_h']:.1f} mm\n"
+            f"• Outer Footprint: {dims['outer_w']:.1f} × {dims['outer_d']:.1f} × {dims['outer_h']:.1f} mm"
+        )
+
+        def _get_tabs(edge_len, target_len):
+            n = max(3, int(round(edge_len / target_len)))
+            if n % 2 == 0:
+                n += 1
+            return n, edge_len / float(n)
+
+        nw, tw = _get_tabs(dims["outer_w"], finger)
+        nd, td = _get_tabs(dims["outer_d"], finger)
+        nh, th = _get_tabs(dims["outer_h"], finger)
+        self.lbl_joint_summary.setText(
+            f"🧩 Tooth Count & Width:\n"
+            f"• Width (X): {nw} teeth ({tw:.1f} mm)\n"
+            f"• Depth (Y): {nd} teeth ({td:.1f} mm)\n"
+            f"• Height (Z): {nh} teeth ({th:.1f} mm)"
+        )
 
         self._current_panels = BoxEngine.generate_box(
             width=w, depth=d, height=h, thickness=t, finger_width=finger, kerf=kerf, style=style,
-            joint_type=joint_type, dovetail_angle=dovetail_angle
+            joint_type=joint_type, dovetail_angle=dovetail_angle, dimension_mode=dim_mode
         )
         self.preview_widget.set_panels(self._current_panels, spacing=self.spin_spacing.value())
 
@@ -363,13 +432,15 @@ class BoxGeneratorDialog(QDialog):
             QMessageBox.warning(self, "No Panels", "Please configure valid box dimensions first.")
             return
 
+        bed_w = getattr(self.settings, "bed_width", 400.0) if self.settings else 400.0
         entities = BoxEngine.layout_to_entities(
             self._current_panels,
             start_x=15.0,
             start_y=15.0,
             spacing=self.spin_spacing.value(),
             layer_id=0,
-            include_labels=self.chk_labels.isChecked()
+            include_labels=self.chk_labels.isChecked(),
+            max_sheet_w=bed_w
         )
         self.panels_generated.emit(entities)
         self.accept()

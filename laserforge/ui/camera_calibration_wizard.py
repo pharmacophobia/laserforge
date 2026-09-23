@@ -19,7 +19,8 @@ from PyQt6.QtGui import QImage, QPixmap, QColor, QPen, QBrush, QFont, QPainter, 
 from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QPushButton, QComboBox, QCheckBox, QGroupBox, QStackedWidget,
-    QProgressBar, QMessageBox, QFrame, QSplitter, QDoubleSpinBox, QSlider
+    QProgressBar, QMessageBox, QFrame, QSplitter, QDoubleSpinBox, QSlider,
+    QInputDialog
 )
 
 from laserforge.core.camera_engine import CameraEngine, CameraCalibrationData
@@ -377,6 +378,11 @@ class CameraCalibrationWizardDialog(QDialog):
         self.combo_cameras.currentIndexChanged.connect(self._on_camera_changed)
         top_ctrl.addWidget(self.combo_cameras, 1)
 
+        self.btn_add_net_stream = QPushButton("🌐 Add Stream...")
+        self.btn_add_net_stream.setToolTip("Connect to a network MJPEG/RTSP camera (e.g. http://laserbridge.local:8080/stream)")
+        self.btn_add_net_stream.clicked.connect(self._on_add_network_stream)
+        top_ctrl.addWidget(self.btn_add_net_stream)
+
         top_ctrl.addWidget(QLabel("Resolution:"))
         self.combo_res = QComboBox()
         self.combo_res.addItems(["1920x1080 (1080p)", "1280x720 (720p)", "640x480 (VGA)"])
@@ -662,6 +668,19 @@ class CameraCalibrationWizardDialog(QDialog):
         dev_idx = self.combo_cameras.currentData()
         if dev_idx is not None:
             self.engine.open_camera(dev_idx)
+
+    def _on_add_network_stream(self):
+        """Allows user to enter a custom network camera stream URL (e.g. PiBridge MJPEG)."""
+        url, ok = QInputDialog.getText(
+            self, "Add Network Camera Stream",
+            "Enter Network Camera Stream URL (MJPEG / RTSP / HTTP):\n(e.g. http://laserbridge.local:8080/stream)",
+            text="http://laserbridge.local:8080/stream"
+        )
+        if ok and url.strip():
+            stream_url = url.strip()
+            self.combo_cameras.insertItem(0, f"🌐 Network Camera ({stream_url})", stream_url)
+            self.combo_cameras.setCurrentIndex(0)
+            self.engine.open_camera(stream_url)
 
     def _on_resolution_changed(self, idx: int):
         res_map = [(1920, 1080), (1280, 720), (640, 480)]

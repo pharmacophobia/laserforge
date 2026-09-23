@@ -297,6 +297,10 @@ class ActionRegistry:
         self.multi_camera.setShortcut("F6")
         self.multi_camera.setToolTip("Configure multi-camera panoramic array and seamless stitching for wide laser beds (F6)")
 
+        self.ai_assistant = QAction("🤖 DeepSeek AI Copilot...", p)
+        self.ai_assistant.setShortcut("Ctrl+Alt+I")
+        self.ai_assistant.setToolTip("Open DeepSeek AI Copilot for bed alignment diagnostics, camera review, and CAD manipulation (Ctrl+Alt+I)")
+
         # Alignment & Distribution Actions
         self.bed_center = QAction("Center on Laser Bed", p)
         self.bed_center.setShortcut("Ctrl+Alt+C")
@@ -353,6 +357,10 @@ class ActionRegistry:
 
         self.start_job = QAction("Start Laser Job", p)
         self.start_job.setShortcut("Ctrl+R")
+
+        self.resume_job = QAction("Resume Job from % / Line...", p)
+        self.resume_job.setShortcut("Ctrl+Alt+J")
+        self.resume_job.setToolTip("Resume interrupted or stopped laser job from specific percentage or line number (Ctrl+Alt+J)")
 
         self.pause_job = QAction("Pause / Resume Job", p)
 

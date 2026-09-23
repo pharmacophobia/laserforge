@@ -832,6 +832,8 @@ class AutoCalibrationEngine:
         power = power_pct or self.config.burn_power_pct
         s_val = int(round((power / 100.0) * max_s_val))
         park_x, park_y = self.config.park_position
+        park_x = min(w, max(0.0, park_x))
+        park_y = min(h, max(0.0, park_y))
 
         # 4 Standard fiducial centers: TL, TR, BR, BL
         fids = [
@@ -847,10 +849,10 @@ class AutoCalibrationEngine:
             f"; Bed Size: {w:.1f} x {h:.1f} mm | Corner Inset: {ins:.1f} mm",
             f"; Pattern: {pattern_type} | Feed: {feed:.0f} mm/min | Power: {power:.1f}% (S{s_val})",
             "; ==========================================================================",
-            "G21 ; Millimeter units",
-            "G90 ; Absolute positioning",
-            f"{laser_mode} ; Laser dynamic mode",
-            "M5 ; Ensure laser off for initial travel",
+            "G21",
+            "G90",
+            laser_mode,
+            "M5",
             ""
         ]
 
@@ -895,7 +897,7 @@ class AutoCalibrationEngine:
                 # Single high-contrast burn dot with 200ms dwell
                 lines.append(f"G0 X{fx:.3f} Y{fy:.3f}")
                 lines.append(f"M3 S{s_val}")
-                lines.append("G4 P0.2 ; 200ms laser pulse dwell")
+                lines.append("G4 P0.2")
                 lines.append("M5")
 
             lines.append("")
@@ -903,9 +905,9 @@ class AutoCalibrationEngine:
         # Park laser head out of the camera's view
         lines.extend([
             "; --- Park laser head out of camera view ---",
-            "M5 ; Ensure laser off",
+            "M5",
             f"G0 X{park_x:.3f} Y{park_y:.3f} F3000 ; Rapid to parking position",
-            "M2 ; Program end"
+            "M2"
         ])
 
         return "\n".join(lines)
