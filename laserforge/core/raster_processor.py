@@ -30,7 +30,7 @@ try:
     import numba
     HAS_NUMBA = True
 
-    @numba.jit(nopython=True, fastmath=True)
+    @numba.jit(nopython=True, fastmath=True, cache=True)
     def _numba_floyd_steinberg(arr: np.ndarray) -> np.ndarray:
         h, w = arr.shape
         buf = arr.copy()
@@ -48,7 +48,7 @@ try:
                     if x + 1 < w: buf[y + 1, x + 1] += err * (1.0 / 16.0)
         return out
 
-    @numba.jit(nopython=True, fastmath=True)
+    @numba.jit(nopython=True, fastmath=True, cache=True)
     def _numba_atkinson(arr: np.ndarray) -> np.ndarray:
         h, w = arr.shape
         buf = arr.copy()
@@ -68,7 +68,7 @@ try:
                 if y + 2 < h: buf[y + 2, x] += err
         return out
 
-    @numba.jit(nopython=True, fastmath=True)
+    @numba.jit(nopython=True, fastmath=True, cache=True)
     def _numba_jarvis(arr: np.ndarray) -> np.ndarray:
         h, w = arr.shape
         buf = arr.copy()
@@ -96,7 +96,7 @@ try:
                     if x + 2 < w: buf[y + 2, x + 2] += err * (1.0 / div)
         return out
 
-    @numba.jit(nopython=True, fastmath=True)
+    @numba.jit(nopython=True, fastmath=True, cache=True)
     def _numba_stucki(arr: np.ndarray) -> np.ndarray:
         h, w = arr.shape
         buf = arr.copy()
@@ -124,7 +124,7 @@ try:
                     if x + 2 < w: buf[y + 2, x + 2] += err * (1.0 / div)
         return out
 
-    @numba.jit(nopython=True, fastmath=True)
+    @numba.jit(nopython=True, fastmath=True, cache=True)
     def _numba_extract_segments(raster_arr: np.ndarray, origin_x_mm: float, line_interval_mm: float, bidirectional: bool, is_grayscale: bool):
         h, w = raster_arr.shape
         # Worst case is one segment per pixel (grayscale power changes every pixel),
