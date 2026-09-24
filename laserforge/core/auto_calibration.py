@@ -204,10 +204,35 @@ class FiducialDetector:
         return centers
 
     @staticmethod
+    def _preprocess(gray: np.ndarray) -> np.ndarray:
+        """
+        Normalizes a real-world camera frame so fiducial detection has a fair
+        chance on a dark machine bed under uneven lighting. Without this, a
+        raw frame from a webcam is either washed out or crushed to black and
+        the detectors find nothing ('cannot see my machine').
+
+        Steps: CLAHE (local contrast) + auto-level stretch.
+        """
+        g = gray
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            g = clahe.apply(g)
+        except Exception:
+            pass
+        # Percentile stretch: map the 2nd..98th percentile to full range.
+        try:
+            lo, hi = np.percentile(g, (2.0, 98.0))
+            if hi - lo >= 10.0:
+                g = np.clip((g.astype(np.float32) - lo) * (255.0 / (hi - lo)), 0, 255).astype(np.uint8)
+        except Exception:
+            pass
+        return g
+
+    @staticmethod
     def detect_concentric_circles(
         frame: np.ndarray,
-        min_radius: int = 5,
-        max_radius: int = 150
+        min_radius: int = 3,
+        max_radius: int = 200
     ) -> List[Tuple[float, float]]:
         """
         Detects concentric circular fiducials (bullseyes or ring targets)
@@ -217,6 +242,7 @@ class FiducialDetector:
             return []
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame.copy()
+        gray = FiducialDetector._preprocess(gray)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
         # Try adaptive thresholding
@@ -229,14 +255,19 @@ class FiducialDetector:
         if hierarchy is None or len(contours) == 0:
             return []
 
+        h_img, w_img = gray.shape[:2]
+        frame_area = float(h_img * w_img)
         candidate_circles = []
         for i, c in enumerate(contours):
             area = cv2.contourArea(c)
+            # Reject the bed/horizon filling most of the frame, and specks.
+            if area <= 0 or area > 0.75 * frame_area:
+                continue
             peri = cv2.arcLength(c, True)
             if peri <= 0:
                 continue
             circularity = 4.0 * math.pi * (area / (peri * peri))
-            if circularity >= 0.65 and area >= (math.pi * min_radius * min_radius):
+            if circularity >= 0.55 and area >= (math.pi * min_radius * min_radius):
                 (x, y), radius = cv2.minEnclosingCircle(c)
                 if min_radius <= radius <= max_radius:
                     M = cv2.moments(c)
@@ -259,7 +290,7 @@ class FiducialDetector:
                 c2 = candidate_circles[j]
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 rad_diff = abs(c1[2] - c2[2])
-                if dist <= 12.0 and rad_diff >= 4.0:
+                if dist <= 18.0 and rad_diff >= 2.0:
                     # Found concentric pair! Average center
                     avg_x = (c1[0] + c2[0]) / 2.0
                     avg_y = (c1[1] + c2[1]) / 2.0
@@ -291,8 +322,9 @@ class FiducialDetector:
             return []
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame.copy()
+        gray = FiducialDetector._preprocess(gray)
         corners = cv2.goodFeaturesToTrack(
-            gray, maxCorners=50, qualityLevel=0.08, minDistance=50, blockSize=7
+            gray, maxCorners=50, qualityLevel=0.05, minDistance=40, blockSize=7
         )
         if corners is None:
             return []
@@ -313,6 +345,7 @@ class FiducialDetector:
             return []
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame.copy()
+        gray = FiducialDetector._preprocess(gray)
         # Invert so dark spots become bright
         inv = 255 - gray
         _, thresh = cv2.threshold(inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -320,9 +353,13 @@ class FiducialDetector:
         cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         centers: List[Tuple[float, float]] = []
 
+        h_img, w_img = gray.shape[:2]
+        frame_area = float(h_img * w_img)
         for c in cnts:
             area = cv2.contourArea(c)
-            if 10.0 <= area <= 1500.0:
+            if area > 0.75 * frame_area:
+                continue
+            if 4.0 <= area <= 4000.0:
                 peri = cv2.arcLength(c, True)
                 if peri > 0:
                     circ = 4.0 * math.pi * (area / (peri * peri))
@@ -835,6 +872,45 @@ class AutoCalibrationEngine:
         park_x = min(w, max(0.0, park_x))
         park_y = min(h, max(0.0, park_y))
 
+        # GRBL laser-mode handling.
+        #
+        # M4/M3 select the laser mode, but M5 *disables* the laser AND clears the
+        # active mode. The previous implementation set {laser_mode} once at the top
+        # and then emitted M5 after every shape -- so every subsequent move moved
+        # with the laser OFF ("axes move but the laser never fires"). It also used
+        # "G1 S.. F.." with no axis words (a zero-length no-op in GRBL) and arc
+        # moves (G2) that cannot carry inline S. We now turn the laser on
+        # explicitly, per burn move, with real coordinates, and only shut it off
+        # when we intend to stop burning.
+        on_cmd = (laser_mode or "M4").strip().upper()
+        if on_cmd not in ("M3", "M4"):
+            on_cmd = "M4"
+
+        def burn(x1: float, y1: float, x2: float, y2: float, with_feed: bool) -> list:
+            """Rapid to (x1,y1), enable laser, cut to (x2,y2), shut laser off."""
+            out = [
+                f"G0 X{x1:.3f} Y{y1:.3f}",
+                f"{on_cmd} S{s_val}",
+            ]
+            out.append(
+                f"G1 X{x2:.3f} Y{y2:.3f} S{s_val} F{feed:.0f}" if with_feed
+                else f"G1 X{x2:.3f} Y{y2:.3f} S{s_val}"
+            )
+            out.append("M5")
+            return out
+
+        def arc(cx: float, cy: float, r: float) -> list:
+            """Cut a full circle of radius r around (cx,cy) using two 180-degree G2 arcs."""
+            out = [
+                f"G0 X{cx + r:.3f} Y{cy:.3f}",
+                f"{on_cmd} S{s_val}",
+                # Two semicircles (GRBL cannot do a 360-degree arc in one command).
+                f"G2 X{cx - r:.3f} Y{cy:.3f} I{-r:.3f} J0.000 F{feed:.0f}",
+                f"G2 X{cx + r:.3f} Y{cy:.3f} I{r:.3f} J0.000",
+                "M5",
+            ]
+            return out
+
         # 4 Standard fiducial centers: TL, TR, BR, BL
         fids = [
             (ins, ins, "P1_TopLeft"),
@@ -848,55 +924,36 @@ class AutoCalibrationEngine:
             "; LaserForge Workbed Auto-Calibration Target Pattern",
             f"; Bed Size: {w:.1f} x {h:.1f} mm | Corner Inset: {ins:.1f} mm",
             f"; Pattern: {pattern_type} | Feed: {feed:.0f} mm/min | Power: {power:.1f}% (S{s_val})",
+            f"; Laser mode: {on_cmd} (S{s_val} per burn move)",
             "; ==========================================================================",
             "G21",
             "G90",
-            laser_mode,
+            f"{on_cmd} S0",
             "M5",
             ""
         ]
 
         for fx, fy, label in fids:
             lines.append(f"; --- Fiducial {label} at X{fx:.3f} Y{fy:.3f} ---")
-            # Rapid to fiducial center
-            lines.append(f"G0 X{fx:.3f} Y{fy:.3f}")
 
             if pattern_type in ("concentric_circle", "auto"):
                 # Outer circle: radius 8 mm
-                r_outer = 8.0
-                lines.append(f"G0 X{fx + r_outer:.3f} Y{fy:.3f}")
-                lines.append(f"G1 S{s_val} F{feed:.0f}")
-                lines.append(f"G2 X{fx + r_outer:.3f} Y{fy:.3f} I{-r_outer:.3f} J0.000")
-                lines.append("M5")
-
+                lines.extend(arc(fx, fy, 8.0))
                 # Inner circle: radius 4 mm
-                r_inner = 4.0
-                lines.append(f"G0 X{fx + r_inner:.3f} Y{fy:.3f}")
-                lines.append(f"G1 S{s_val} F{feed:.0f}")
-                lines.append(f"G2 X{fx + r_inner:.3f} Y{fy:.3f} I{-r_inner:.3f} J0.000")
-                lines.append("M5")
-
-                # Center crosshair (length 16 mm)
-                lines.append(f"G0 X{fx - 8.0:.3f} Y{fy:.3f}")
-                lines.append(f"G1 X{fx + 8.0:.3f} Y{fy:.3f} S{s_val}")
-                lines.append("M5")
-                lines.append(f"G0 X{fx:.3f} Y{fy - 8.0:.3f}")
-                lines.append(f"G1 X{fx:.3f} Y{fy + 8.0:.3f} S{s_val}")
-                lines.append("M5")
+                lines.extend(arc(fx, fy, 4.0))
+                # Center crosshair (16 mm arms), feed on the first move only
+                lines.extend(burn(fx - 8.0, fy, fx + 8.0, fy, True))
+                lines.extend(burn(fx, fy - 8.0, fx, fy + 8.0, False))
 
             elif pattern_type == "crosshair":
                 # Large crosshair (20 mm arms)
-                lines.append(f"G0 X{fx - 10.0:.3f} Y{fy:.3f}")
-                lines.append(f"G1 X{fx + 10.0:.3f} Y{fy:.3f} S{s_val} F{feed:.0f}")
-                lines.append("M5")
-                lines.append(f"G0 X{fx:.3f} Y{fy - 10.0:.3f}")
-                lines.append(f"G1 X{fx:.3f} Y{fy + 10.0:.3f} S{s_val}")
-                lines.append("M5")
+                lines.extend(burn(fx - 10.0, fy, fx + 10.0, fy, True))
+                lines.extend(burn(fx, fy - 10.0, fx, fy + 10.0, False))
 
             elif pattern_type == "burn_dot":
                 # Single high-contrast burn dot with 200ms dwell
                 lines.append(f"G0 X{fx:.3f} Y{fy:.3f}")
-                lines.append(f"M3 S{s_val}")
+                lines.append(f"{on_cmd} S{s_val}")
                 lines.append("G4 P0.2")
                 lines.append("M5")
 
