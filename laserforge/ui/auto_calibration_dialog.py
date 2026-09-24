@@ -416,6 +416,27 @@ class AutoCalibrationDialog(QDialog):
             QMessageBox.warning(self, "Camera Error", "No frame available from camera stream.")
             return
 
+        # Guard against silently calibrating on a synthetic frame. If the engine
+        # fell back to mock mode, the "detected" fiducials are not real and any
+        # resulting calibration would be meaningless on the physical machine.
+        if getattr(self.camera_engine, "is_mock", False) and not getattr(self, "_allow_mock_calibration", False):
+            err = getattr(self.camera_engine, "last_error", None)
+            detail = f"\n\n{err}" if err else ""
+            _StdBtn = getattr(QMessageBox, "StandardButton", QMessageBox)
+            ans = QMessageBox.warning(
+                self,
+                "Camera Not Connected",
+                "No real camera is connected -- the preview is a simulated demo frame, "
+                "so auto-calibration cannot measure your actual workbed." + detail +
+                "\n\nConnect a camera (or select your camera in the setup) and try again.\n\n"
+                "Proceed anyway with the simulated frame (for testing only)?",
+                _StdBtn.Yes | _StdBtn.No,
+                _StdBtn.No,
+            )
+            if ans != _StdBtn.Yes:
+                self.lbl_status_msg.setText("⚠️ No real camera connected -- calibration cancelled.")
+                return
+
         result = self.engine.calibrate_from_frame(frame, self.camera_engine)
         self.current_result = result
 

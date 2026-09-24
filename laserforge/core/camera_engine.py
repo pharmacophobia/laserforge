@@ -209,6 +209,10 @@ class CameraEngine:
         self.calibration = calibration or CameraCalibrationData.load_from_file()
         self.cap: Optional[Any] = None
         self.is_mock: bool = (self.calibration.device_index == -1)
+        # Set when open_camera() silently falls back to a simulated frame after
+        # failing to open the requested device; cleared on every real open attempt.
+        self.fallback_from: Optional[Any] = None
+        self.last_error: Optional[str] = None
         self._mock_frame_counter: int = 0
         self.live_laser_pos: Optional[Tuple[float, float]] = None
         self.live_laser_state: str = "Idle"
@@ -367,7 +371,13 @@ class CameraEngine:
                     tested_indices.add(idx)
 
                     cap = cv2.VideoCapture(idx)
+                    # A v4l2loopback / unattached device can report isOpened()
+                    # yet deliver no frames. Require an actual readable frame so
+                    # we don't advertise a dead device as usable.
+                    ok = False
                     if cap.isOpened():
+                        ok, _ = cap.read()
+                    if ok:
                         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         cameras.append({
@@ -376,26 +386,34 @@ class CameraEngine:
                             "device_path": dev_path,
                             "is_mock": False
                         })
-                        cap.release()
-            except Exception:
-                pass
-
-        # Fallback probe for index 0 if no /dev/video* matched
-        if not cameras:
-            try:
-                cap = cv2.VideoCapture(0)
-                if cap.isOpened():
-                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    cameras.append({
-                        "index": 0,
-                        "name": f"Default USB Camera ({w}x{h})",
-                        "device_path": "/dev/video0",
-                        "is_mock": False
-                    })
                     cap.release()
             except Exception:
                 pass
+
+        # Fallback probe across common indices if no /dev/video* matched.
+        # Do not hardcode 0: on many systems the working camera is at a
+        # higher index (e.g. a virtual/loopback device occupies 0).
+        if not cameras:
+            for idx in range(0, 5):
+                try:
+                    cap = cv2.VideoCapture(idx)
+                    ok = False
+                    if cap.isOpened():
+                        ok, _ = cap.read()
+                    if ok:
+                        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        cameras.append({
+                            "index": idx,
+                            "name": f"Camera {idx} ({w}x{h})",
+                            "device_path": f"/dev/video{idx}",
+                            "is_mock": False
+                        })
+                        cap.release()
+                        break
+                    cap.release()
+                except Exception:
+                    pass
 
         # Add PiBridge / Network Wireless Camera
         cameras.append({
@@ -422,6 +440,8 @@ class CameraEngine:
         network stream URL (str starting with http://, https://, rtsp://), or simulated (-1).
         """
         self.close_camera()
+        self.fallback_from = None
+        self.last_error = None
 
         if device_index == -1 or not HAS_CV2:
             self.is_mock = True
@@ -448,7 +468,7 @@ class CameraEngine:
         try:
             target_idx = int(device_index) if not is_net else 0
             self.cap = cv2.VideoCapture(target_idx)
-            if self.cap.isOpened():
+            if self.cap.isOpened() and self.cap.read()[0]:
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
                 self.is_mock = False
@@ -460,8 +480,15 @@ class CameraEngine:
         except Exception as e:
             print(f"Could not open physical camera {device_index}: {e}")
 
-        # Fallback to simulated
+        # Fallback to simulated. This is NOT a successful open of the requested
+        # device -- record why, so the UI can warn the user instead of silently
+        # showing a synthetic frame as if the camera were working.
         self.is_mock = True
+        self.fallback_from = device_index
+        self.last_error = (
+            f"Could not open camera device {device_index!r}. "
+            "Falling back to a simulated demo frame."
+        )
         self.calibration.device_index = -1
         self.calibration.device_name = "Simulated Overhead Bed Camera (Fallback)"
         self.calibration.resolution = (width, height)

@@ -302,6 +302,9 @@ class TestAutoCalibrationUI(unittest.TestCase):
 
     def test_auto_calibration_dialog_lifecycle(self):
         dlg = AutoCalibrationDialog(camera_engine=self.cam, settings=self.settings)
+        # The test camera is a simulated/mock engine; acknowledge that so the
+        # "no real camera connected" guard does not block the lifecycle test.
+        dlg._allow_mock_calibration = True
         try:
             self.assertIn("Auto-Calibration Studio", dlg.windowTitle())
             self.assertFalse(dlg.btn_apply.isEnabled())
